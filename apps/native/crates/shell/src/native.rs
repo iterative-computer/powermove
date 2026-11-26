@@ -313,6 +313,34 @@ fn field_can(name: &str) -> bool {
             })
         })
 }
+/// Undo or Redo in the Agent composer with nothing of its own to take back
+/// (its prompt was sent and its typing undo cleared): the command goes on to
+/// the project's undo, the agent's change set among it (PM-749).
+pub fn composer_passes(responder: &NSResponder, name: &str) -> bool {
+    let redo = match name {
+        "contextUndo" => false,
+        "contextRedo" => true,
+        _ => return false,
+    };
+    if !responder
+        .class()
+        .name()
+        .to_string_lossy()
+        .contains("PMComposerTextView")
+    {
+        return false;
+    }
+    // SAFETY: NSResponder's undoManager, and NSUndoManager's canUndo or
+    // canRedo, read on the main thread.
+    let manager: Option<Retained<AnyObject>> = unsafe { msg_send![responder, undoManager] };
+    !manager.is_some_and(|m| unsafe {
+        if redo {
+            msg_send![&*m, canRedo]
+        } else {
+            msg_send![&*m, canUndo]
+        }
+    })
+}
 /// Whether a text field in the key window is being edited (a sheet's name
 /// field): its own Undo, Cut, Copy and Paste then have something to act on.
 fn key_field_editing() -> bool {
@@ -7167,6 +7195,9 @@ impl Host {
                         &r.class().name().to_string_lossy(),
                     )
                 }) {
+                    return false;
+                }
+                if responder.as_ref().is_some_and(|r| composer_passes(r, name)) {
                     return false;
                 }
                 let selector = match name {

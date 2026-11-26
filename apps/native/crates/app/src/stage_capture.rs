@@ -409,17 +409,18 @@ pub(crate) fn native_stills(out: std::path::PathBuf, device: metal::Device) -> a
                 );
             }
         });
-        // (still, step, the timeline chosen)
+        // (still, step, the timeline chosen, the Powermove account signed in)
         let shots = [
-            ("1-welcome", None, "layers"),
-            ("2-timeline-layers", Some(Step::Timeline), "layers"),
-            ("2b-timeline-tracks", Some(Step::Timeline), "tracks"),
-            ("3-agent", Some(Step::Agent), "layers"),
-            ("4-speech-model", Some(Step::Transcription), "layers"),
-            ("5-workspace", Some(Step::Workspace), "layers"),
+            ("1-welcome", None, "layers", None),
+            ("2-timeline-layers", Some(Step::Timeline), "layers", None),
+            ("2b-timeline-tracks", Some(Step::Timeline), "tracks", None),
+            ("3-agent", Some(Step::Agent), "layers", None),
+            ("3b-agent-signed-in", Some(Step::Agent), "layers", Some("ana@example.com")),
+            ("4-speech-model", Some(Step::Transcription), "layers", None),
+            ("5-workspace", Some(Step::Workspace), "layers", None),
         ];
         cx.spawn(async move |cx| {
-            for (name, step, timeline) in shots {
+            for (name, step, timeline, powermove) in shots {
                 if let Some(step) = step {
                     let tokens = tokens.clone();
                     let _ = cx.update(|cx| {
@@ -431,7 +432,7 @@ pub(crate) fn native_stills(out: std::path::PathBuf, device: metal::Device) -> a
                                     ..Default::default()
                                 },
                                 &Default::default(),
-                                None,
+                                powermove,
                                 None,
                             ),
                             tokens,

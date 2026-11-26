@@ -116,8 +116,10 @@ impl Backend {
         rows.extend(agent_client_rows(&self.native.facts["agentClients"]));
         rows
     }
-    /// Settings › Providers: one group per provider, each row the method,
-    /// signed in or out with its name (keys masked), and the action.
+    /// Settings › Providers: three providers, each for its harness (the
+    /// Powermove Account for Aero, OpenAI for Codex, Anthropic for Claude
+    /// Code), each row the method, signed in or out with its name (keys
+    /// masked), and the action.
     fn providers_rows(&self) -> Vec<Value> {
         let row = |id: &str, group: &str, label: &str| {
             json!({"id":format!("providers.{id}"),"section":"providers","group":group,"label":label,"control":"status"})
@@ -129,72 +131,141 @@ impl Backend {
             row["detail"] = json!(detail);
             row
         };
-        let mut rows = vec![];
+        let mut rows = self.powermove_provider_rows(&row, &action);
         let accounts = self.native.agent_link.accounts();
-        // OpenAI: Sign in with ChatGPT (Codex's sign-in) or an API key, one
-        // Keychain item Codex and Powermove both read.
+        // OpenAI: Sign in with ChatGPT (Codex's sign-in) or an API key, in
+        // Codex's own Keychain item.
+        const OPENAI: &str = "OpenAI (Codex)";
         let openai = accounts.as_ref().map(|a| a.status(Provider::Chatgpt));
-        let both = "Used by Codex and Powermove.";
+        let both = "Used by Codex.";
         match openai.as_ref().map(|s| (s.state, s)) {
+            // Both ways in, as Anthropic (Claude Code) has them: Codex holds
+            // one sign-in, so the other row says it would replace it.
             Some((State::Connected, status)) => {
-                let (method, name) = match &status.key {
-                    Some(masked) => ("API key", masked.clone()),
-                    None => ("Sign in with ChatGPT", [status.email.clone(), status.plan.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ")),
+                let with_detail = |mut r: Value| {
+                    if let Some(detail) = &status.detail {
+                        r["detail"] = json!(format!(
+                            "{} {detail}",
+                            r["detail"].as_str().unwrap_or_default()
+                        ));
+                    }
+                    r
                 };
-                let label = if status.key.is_some() { "Remove" } else { "Sign Out" };
-                let detail = match (&status.key, name.is_empty()) {
-                    (Some(_), _) => format!("{name}. {both}"),
-                    (None, true) => format!("Signed in. {both}"),
-                    (None, false) => format!("Signed in as {name}. {both}"),
-                };
-                let mut r = action(row("openai", "OpenAI", method), "providers.openai.sign-out", label, detail);
-                r["target"] = json!(name);
-                if let Some(detail) = &status.detail {
-                    r["detail"] = json!(format!("{} {detail}", r["detail"].as_str().unwrap_or_default()));
+                match &status.key {
+                    Some(masked) => {
+                        rows.push(action(
+                            row("openai", OPENAI, "Sign in with ChatGPT"),
+                            "providers.openai.sign-in",
+                            "Sign In…",
+                            format!("Signed out. Signing in replaces the API key. {both}"),
+                        ));
+                        let mut r = action(
+                            row("openai-key", OPENAI, "API key"),
+                            "providers.openai.sign-out",
+                            "Remove",
+                            format!("{masked}. {both}"),
+                        );
+                        r["target"] = json!(masked);
+                        rows.push(with_detail(r));
+                    }
+                    None => {
+                        let name = [status.email.clone(), status.plan.clone()]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        let detail = if name.is_empty() {
+                            format!("Signed in. {both}")
+                        } else {
+                            format!("Signed in as {name}. {both}")
+                        };
+                        let mut r = action(
+                            row("openai", OPENAI, "Sign in with ChatGPT"),
+                            "providers.openai.sign-out",
+                            "Sign Out",
+                            detail,
+                        );
+                        r["target"] = json!(name);
+                        rows.push(with_detail(r));
+                        rows.push(action(
+                            row("openai-key", OPENAI, "API key"),
+                            "providers.openai.key",
+                            "Add Key…",
+                            format!("Not added. Adding one replaces the ChatGPT sign-in. {both}"),
+                        ));
+                    }
                 }
-                rows.push(r);
             }
             Some((State::Connecting, status)) => rows.push(action(
-                row("openai", "OpenAI", "Sign in with ChatGPT"),
+                row("openai", OPENAI, "Sign in with ChatGPT"),
                 "providers.openai.sign-out",
                 "Cancel",
                 status.detail.clone().unwrap_or_else(|| "Finish signing in in your browser.".into()),
             )),
             Some((State::Checking, _)) => {
-                let mut r = row("openai", "OpenAI", "OpenAI");
+                let mut r = row("openai", OPENAI, "OpenAI");
                 r["value"] = json!("Checking…");
                 rows.push(r);
             }
             _ => {
-                let detail = openai.and_then(|s| s.detail).map_or_else(|| format!("Signed out. {both}"), |d| format!("Signed out. {d}"));
-                rows.push(action(row("openai", "OpenAI", "Sign in with ChatGPT"), "providers.openai.sign-in", "Sign In…", detail));
-                rows.push(action(row("openai-key", "OpenAI", "API key"), "providers.openai.key", "Add Key…", format!("Not added. {both}")));
+                let detail = openai.and_then(|s| s.detail).map_or_else(
+                    || format!("Signed out. {both}"),
+                    |d| format!("Signed out. {d}"),
+                );
+                rows.push(action(
+                    row("openai", OPENAI, "Sign in with ChatGPT"),
+                    "providers.openai.sign-in",
+                    "Sign In…",
+                    detail,
+                ));
+                rows.push(action(
+                    row("openai-key", OPENAI, "API key"),
+                    "providers.openai.key",
+                    "Add Key…",
+                    format!("Not added. {both}"),
+                ));
             }
         }
-        // Anthropic / Claude: Claude Code's own sign-in, or an API key.
+        // Anthropic: Claude Code's own sign-in, or an API key it runs on
+        // while signed out.
+        const ANTHROPIC: &str = "Anthropic (Claude Code)";
         if let Some(accounts) = &accounts {
             let claude = accounts.status(Provider::Claude);
-            let terms = "Claude Code only. Anthropic’s terms don’t allow Claude plans in other apps. Use an Anthropic API key.";
+            let terms = "Used by Claude Code.";
             let who = [claude.email.clone(), claude.plan.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ");
             let mut r = match claude.state {
                 State::Connected => {
-                    let mut r = action(row("claude", "Anthropic", "Sign in with Claude"), "providers.claude.sign-out", "Sign Out", format!("Signed in as {who}. {terms}"));
+                    let mut r = action(
+                        row("claude", ANTHROPIC, "Sign in with Claude"),
+                        "providers.claude.sign-out",
+                        "Sign Out",
+                        format!("Signed in as {who}. {terms}"),
+                    );
                     r["target"] = json!(who);
                     r
                 }
-                State::Connecting => action(row("claude", "Anthropic", "Sign in with Claude"), "providers.claude.sign-out", "Cancel", claude.detail.clone().unwrap_or_default()),
-                State::Disconnected => action(row("claude", "Anthropic", "Sign in with Claude"), "providers.claude.sign-in", "Sign In…", format!("Signed out. {terms}")),
+                State::Connecting => action(
+                    row("claude", ANTHROPIC, "Sign in with Claude"),
+                    "providers.claude.sign-out",
+                    "Cancel",
+                    claude.detail.clone().unwrap_or_default(),
+                ),
+                State::Disconnected => action(
+                    row("claude", ANTHROPIC, "Sign in with Claude"),
+                    "providers.claude.sign-in",
+                    "Sign In…",
+                    format!("Signed out. {terms}"),
+                ),
                 State::Checking | State::Unavailable => {
-                    let mut r = row("claude", "Anthropic", "Sign in with Claude");
+                    let mut r = row("claude", ANTHROPIC, "Sign in with Claude");
                     r["value"] = json!(if claude.state == State::Checking { "Checking…".to_owned() } else { claude.detail.clone().unwrap_or_default() });
                     r["detail"] = json!(terms);
                     r
                 }
             };
-            r["powermove"] = json!(false);
             rows.push(r);
             let key = accounts.anthropic();
-            let used = "Used by Claude Code and Powermove.";
+            let used = "Used by Claude Code while signed out of Claude.";
             rows.push(match &key.masked {
                 Some(masked) => {
                     let detail = match (&key.detail, key.checking) {
@@ -206,54 +277,91 @@ impl Backend {
                             if key.models.len() == 1 { "model" } else { "models" }
                         ),
                     };
-                    let mut r = action(row("anthropic-key", "Anthropic", "API key"), "providers.anthropic.remove", "Remove", detail);
+                    let mut r = action(
+                        row("anthropic-key", ANTHROPIC, "API key"),
+                        "providers.anthropic.remove",
+                        "Remove",
+                        detail,
+                    );
                     r["target"] = json!(masked);
                     r
                 }
-                None => action(row("anthropic-key", "Anthropic", "API key"), "providers.anthropic.key", "Add Key…", format!("Not added. {used}")),
+                None => action(
+                    row("anthropic-key", ANTHROPIC, "API key"),
+                    "providers.anthropic.key",
+                    "Add Key…",
+                    format!("Not added. {used}"),
+                ),
             });
         }
-        // Powermove: the Powermove Account (the same account as Settings ›
-        // Account) and its future plan.
+        rows
+    }
+    /// The Powermove Account, which Aero runs on (the same account as
+    /// Settings › Account): signed in or out, and where Aero stands on it.
+    fn powermove_provider_rows(
+        &self,
+        row: &dyn Fn(&str, &str, &str) -> Value,
+        action: &dyn Fn(Value, &str, &str, String) -> Value,
+    ) -> Vec<Value> {
+        use pm_agents::inference::Standing;
+        const GROUP: &str = "Powermove Account (Aero)";
         let cloud = &self.native.facts["cloud"];
-        if cloud.is_object() {
-            let mut r = if cloud["signedIn"] == true {
-                let identity = cloud["identity"].as_str().unwrap_or_default();
-                let mut r = action(row("powermove", "Powermove", "Powermove Account"), "account.sign-out", "Sign Out", format!("Signed in as {identity}."));
-                r["target"] = json!(identity);
-                r
-            } else {
-                action(row("powermove", "Powermove", "Powermove Account"), "account.sign-in", "Sign In…", "Signed out.".into())
-            };
-            r["disabled"] = json!(cloud["busy"] == true);
-            rows.push(r);
+        if !cloud.is_object() {
+            return vec![];
         }
-        let mut aerolite = row("aerolite", "Powermove", "Aerolite");
-        aerolite["value"] = json!("Coming later");
-        rows.push(aerolite);
-        // Custom: an OpenAI-compatible base URL and key, for Powermove only.
-        let provider = &self.native.facts["provider"];
-        let connected = provider["connected"] == true;
-        let text = |key: &str| provider[key].as_str().unwrap_or_default().to_owned();
-        let mut custom = action(
-            row("custom", "Custom", "OpenAI-compatible"),
-            "provider.setup",
-            if connected { "Change…" } else { "Set Up…" },
-            if connected {
-                format!("{} · {}{}. Used by Powermove only.", text("url"), text("model"), if provider["hasKey"] == true { " · key in Keychain" } else { "" })
-            } else {
-                "Not set up. A base URL and an API key, used by Powermove only.".into()
-            },
-        );
-        custom["disabled"] = json!(provider["busy"] == true);
-        let target = connected.then(|| json!([text("type"), text("url"), text("model")]));
-        custom["target"] = json!(target);
-        rows.push(custom);
-        if connected {
-            let mut remove = action(row("custom-remove", "Custom", "OpenAI-compatible"), "provider.disconnect", "Remove", String::new());
-            remove["target"] = json!(target);
-            remove.as_object_mut().unwrap().remove("detail");
-            rows.push(remove);
+        let standing = self.native.agent_link.accounts().map(|a| a.aero());
+        let aero = match &standing {
+            Some(Standing::Ready { usage, .. }) => {
+                let credits = &usage.facts()[0].1;
+                format!("Aero runs on {}: {credits}.", usage.plan.name)
+            }
+            Some(Standing::NoPlan(_)) => "Aero inference is coming soon.".into(),
+            Some(Standing::Unreachable(why)) => why.clone(),
+            _ => "Aero runs on Powermove inference.".into(),
+        };
+        // Signed in here, but Powermove refused the session (it ended or
+        // was revoked): the way back is Sign In, never only Sign Out.
+        let rejected = cloud["signedIn"] == true && matches!(standing, Some(Standing::SignedOut));
+        let mut r = if rejected {
+            let identity = cloud["identity"].as_str().unwrap_or_default();
+            let mut r = action(
+                row("powermove", GROUP, "Powermove Account"),
+                "account.sign-in",
+                "Sign In…",
+                format!("Your session as {identity} ended. Sign in again to use Aero."),
+            );
+            r["target"] = json!(identity);
+            r
+        } else if cloud["signedIn"] == true {
+            let identity = cloud["identity"].as_str().unwrap_or_default();
+            let mut r = action(
+                row("powermove", GROUP, "Powermove Account"),
+                "account.sign-out",
+                "Sign Out",
+                format!("Signed in as {identity}. {aero}"),
+            );
+            r["target"] = json!(identity);
+            r
+        } else {
+            action(
+                row("powermove", GROUP, "Powermove Account"),
+                "account.sign-in",
+                "Sign In…",
+                "Signed out. Aero runs on Powermove inference.".into(),
+            )
+        };
+        r["disabled"] = json!(cloud["busy"] == true);
+        let mut rows = vec![r];
+        // The plan the backend offers someone signed in without one.
+        if cloud["signedIn"] == true
+            && let Some(Standing::NoPlan(Some(offer))) = &standing
+        {
+            rows.push(action(
+                row("aero-offer", GROUP, "Aero"),
+                "providers.aero.offer",
+                &format!("{}…", offer.label),
+                "Aero inference on your Powermove account.".into(),
+            ));
         }
         rows
     }
@@ -1085,6 +1193,7 @@ impl Backend {
                     "providers.claude.sign-in" => accounts.connect(Provider::Claude),
                     "providers.claude.sign-out" => accounts.disconnect(Provider::Claude),
                     "providers.anthropic.remove" => accounts.remove_anthropic_key()?,
+                    "providers.aero.offer" => accounts.open_aero_offer()?,
                     // The secure field is the app's native sheet.
                     kind @ ("providers.openai.key" | "providers.anthropic.key") => {
                         let which = if kind == "providers.openai.key" { "openai" } else { "anthropic" };

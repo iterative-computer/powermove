@@ -1804,7 +1804,7 @@ fn aero_repairs_a_compile_error_and_loads_the_published_extension() {
             Ok(_) | Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(5))
             }
-            event => panic!("Powermove did not complete: {event:?}"),
+            event => panic!("Aero did not complete: {event:?}"),
         }
     };
     assert_eq!(
@@ -2010,7 +2010,7 @@ fn aero_tools(fixture: &Fixture, name: &str) -> pm_mcp::session::aero_tools::Too
 }
 
 /// P1-3: the editor writes while Aero reads the project (the editor's
-/// writes reach the kernel actor directly, between Powermove's reads). Every
+/// writes reach the kernel actor directly, between Aero's reads). Every
 /// answer's data belongs to the revision it is stamped with.
 ///
 /// The editor writes once per read, racing it, and records its edit only

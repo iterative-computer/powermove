@@ -1,3 +1,5 @@
+// Powermove notice: modified from upstream fx (patch P-HOST-MESSAGES): the
+// Anthropic API version is one public constant, shared with the host transport.
 //! Sends requests to a custom model connection
 //! (`src/core/config/configured_provider.zig`) for every protocol it can
 //! speak: the credential and header rules, the connection's own bounds on how
@@ -28,6 +30,10 @@ pub const max_models_bytes = 4 * 1024 * 1024;
 
 /// Reads a successful streamed reply. `progress` is told about each event.
 pub const ConsumeFn = *const fn (alloc: Allocator, reader: *std.Io.Reader, request: streams.ModelRequest, progress: ?sse.Progress) anyerror!streams.Result;
+
+/// Powermove (P-HOST-MESSAGES): the one Anthropic API version, shared with
+/// the host transport (`host_chat_completions.zig`).
+pub const anthropic_version = "2023-06-01";
 
 /// The connection's extra headers with their values read from the
 /// environment, and the header its protocol needs. Free with `deinit`, which
@@ -66,7 +72,7 @@ pub const Headers = struct {
         }
         var count = headers.owned;
         if (definition.protocol == .@"anthropic-messages" and !version_given) {
-            list[count] = .{ .name = "anthropic-version", .value = "2023-06-01" };
+            list[count] = .{ .name = "anthropic-version", .value = anthropic_version };
             count += 1;
         }
         headers.list = list[0..count];

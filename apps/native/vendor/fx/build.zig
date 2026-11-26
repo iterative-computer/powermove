@@ -14,7 +14,7 @@ const WasmSurface = enum {
 
 /// The upstream commit this tree is vendored from (POWERMOVE.md). The fork has
 /// no .git of its own, so the build never asks git.
-const upstream_commit = "8fbe9b8";
+const upstream_commit = "6196071b3";
 /// `pub const version` of upstream's src/main.zig at that commit, which this
 /// tree does not vendor.
 const upstream_version = "0.0.18";

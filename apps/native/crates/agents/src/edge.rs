@@ -199,6 +199,10 @@ pub trait Net: Send + Sync + std::fmt::Debug {
         stop: &AtomicBool,
         on: &mut dyn FnMut(Chunk<'_>) -> Result<(), String>,
     ) -> Result<(), String>;
+    /// Whether a development fake would answer `url` instead of its origin.
+    fn rerouted(&self, _url: &str) -> bool {
+        false
+    }
 }
 
 /// The whole body of a request, with its status.
@@ -227,6 +231,9 @@ pub struct Idle {
     pub after: std::time::Duration,
 }
 impl Net for Idle {
+    fn rerouted(&self, url: &str) -> bool {
+        self.inner.rerouted(url)
+    }
     fn stream(
         &self,
         request: &NetRequest<'_>,
@@ -427,6 +434,9 @@ impl Reroute {
     }
 }
 impl Net for Reroute {
+    fn rerouted(&self, url: &str) -> bool {
+        self.target(url).is_some()
+    }
     fn stream(
         &self,
         request: &NetRequest<'_>,

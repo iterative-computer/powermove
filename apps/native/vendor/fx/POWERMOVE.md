@@ -1,7 +1,8 @@
 # Powermove fork of fx (libfx core)
 
 Upstream: https://github.com/vercel-labs/fx
-Pinned commit: `8fbe9b8` (upstream version 0.0.18).
+Pinned: tag `v0.0.18`, commit `6196071b3` (2026-11-25; re-pinned from the
+pre-release `8fbe9b8` with `tools/sync.sh`, every patch merged unchanged).
 License: Apache-2.0, retained in `LICENSE`; upstream's third-party notices in
 `THIRD_PARTY_NOTICES.md`. Every file we changed or added carries a
 "Powermove notice"; nothing here has been submitted upstream.
@@ -17,11 +18,13 @@ core and nothing else.
 | `src/` | The closure of upstream's `src/` that `zig build capi` reads, plus our files (below). |
 | `src/capi_core_main.zig` | Powermove code (P-CAPI, P-PANIC, P-TOOLS): the C entry, its generation-tagged slot table, the guarded host calls and panic handler, the tool bridge and the fetch bridge's host side. |
 | `src/core/shared/panic_context.zig`, `src/core/tooling/host_tool_bridge.zig` | Powermove code: the runtime a core thread works for (P-PANIC), and the host tool executor hook (P-TOOLS). |
+| `src/gateway/host_chat_completions.zig`, `src/gateway/chat_completions.zig`, `src/gateway/configured_transport.zig`, `src/gateway/anthropic_messages_protocol.zig` | Upstream files patched for P-HOST-MESSAGES. |
 | `include/fx_core.h` | The C ABI, version 2 (patch P-CAPI): threads, liveness, leases, ownership, copies, sizes and closed/failed behaviour per function. |
 | `build.zig`, `build.zig.zon` | Trimmed build: the `capi` static library and the `fake-server` test binary only. |
 | `test-support/fake-inference-server.zig` | Upstream's `benchmarks/libfx/fake-inference-server.zig`, verbatim: the deterministic fake model for tests and benchmarks. |
 | `toolchain.toml` | The pinned Zig (0.17.1) with the tarball's sha256 from ziglang.org's index. |
 | `install-zig.sh` | Downloads that tarball, checks the sha256, unpacks it into `$PM_ZIG_HOME`. |
+| `tools/sync.sh` | Re-pins to another upstream commit: our patch series merged three ways onto it, then the closure re-derived (below). |
 | `tools/derive-closure.sh`, `tools/closure.txt` | Derives the closure from the build graph and refreshes `src/` to it. |
 | `tools/extract-core-runtime.py` | Copies the N-API entry's runtime pieces verbatim into `src/libfx_core_runtime.zig`. |
 
@@ -29,7 +32,7 @@ Omitted from upstream: the fx CLI's and terminal UI's entry points
 (`src/main.zig` and the files only they reach), the WebAssembly and Node-API
 entries, the SDK JavaScript (`sdk/`), benchmarks, examples, e2e and TLA+
 tests, fuzzing and PGO build steps, scripts and CI. The closure still holds
-85 files under `src/ui/`: shared code `@import`s them, and Zig parses every
+85 of its 722 upstream files under `src/ui/`: shared code `@import`s them, and Zig parses every
 file an import names, so they are on disk though no C ABI path runs them. The TLA+ specs stay upstream
 (`tests/tla/sdk/*.tla`); they are the steering, journal and image contract our
 ABI keeps (section 2.7).
@@ -79,8 +82,8 @@ at the commit, lays our files over it, builds `capi` there with a fresh cache,
 and reads the compile's cache manifest, which lists every source file the
 compiler read. Zig parses every file an `@import` names, whether or not its
 code is used, so that list is exactly what the build needs on disk. The script
-writes it to `tools/closure.txt` and makes `src/` exactly the closure plus our
-files. Every manifest of the fresh cache that names the C entry is read, in
+writes its upstream files (the 15 we patched included) to `tools/closure.txt` and makes `src/` exactly the closure plus our
+files; a file with a notice is never overwritten. Every manifest of the fresh cache that names the C entry is read, in
 sorted order, and the script fails if they list different sources. Building the crate from the pruned tree proves it complete.
 
 ## Powermove patches
@@ -96,6 +99,7 @@ sorted order, and the script fails if they list different sources. Building the 
 | P-STOP | The host's completion gate as an fx Stop hook handler: `Config.host_hooks` (`core/hooks/host_hooks.zig`, new) registers the C entry's handlers before `acp/server.zig` freezes the hook runtime. A STOP question carries the final reply and the continuations so far; CONTINUE appends the host's message as fx's own synthetic continuation. The core asked a turn's Stop hook once; `core/agent/runtime/orchestrator.zig` now asks again after each continuation, and the handler bounds itself (asked at most `max_stop_continuations` + 1 times; the last CONTINUE ends the turn). Questions are leases (header rule 9): a cancelled turn's question still waits for its answer. | Milestone 2b-2: implemented; `tests/hooks.rs`. |
 | P-PRETOOL | fx's PreToolUse hook for host tools, through the same registration: ALLOW runs the call, BLOCK gives the model the reason, REWRITE runs it with new input (a JSON object). The question names the call id the allowed call then carries. | Milestone 2b-2: implemented; `tests/hooks.rs`. |
 | P-JOURNAL | `libfx/journal_append` and `libfx/journal_flush` bridged to `fx_host.journal_append` and `fx_journal_ack`/`fx_journal_fail`, with append seq ranges; flush answers are control frames that never meet the input bound. Open from a journal and a checkpoint (`libfx/journal_open` with both as attachments) reports the open turn, the last ended turn, the calls a crash left running and the held follow-ups as `FX_EVENT_RECOVERY`; `fx_turn_resume` continues the open turn (`continueRecovery`, never re-running its calls); a prompt repeating the last ended turn's message id runs nothing; `fx_checkpoint` is `libfx/snapshot`. The Rust side's session folder (`crates/aero-core/src/journal.rs`) is the fenced store. | Milestone 2b-2: implemented; `tests/resume.rs` (kill -9 of the host). Fix round 1 (Sol's m2 items 1 to 4 and 6): a store failure while a turn runs cancels it and ends it with `FX_STOP_ERROR` even between barriers; a journaled turn's TURN_END waits for the acks of every append it sent; a turn's end returns its queued steers, its error and TURN_END and clears the turn in one critical section, so a steer is admitted before (and comes back) or after (`FX_STALE`); a withdraw leaves the steer in place until libfx answers. The Rust store cuts a torn last record under the writer lock before any append, refuses a folder whose whole records are not valid and consecutive, stops after an uncertain write, refuses an append that would outgrow what a reopen loads, tracks the acknowledged head apart from the disk head for checkpoints, retries acks and failures the core could not take, and publishes images from distinct temporary files with a directory sync (`tests/journal_store.rs`, `tests/durability.rs`, `tests/steer_settle.rs`). |
+| P-HOST-MESSAGES | The host transport (`gateway/host_chat_completions.zig`) also carries `anthropic-messages` connections: its guard admits the protocol, it posts to `request_url` (the protocol's `/messages`), adds `anthropic-version` from `configured_transport.anthropic_version` (now public, the one source), and reads and replays by protocol through `chat_completions.consumer`/`replay_projection` (now public). Powermove's Anthropic API keys run on it with their thinking controls (PM-746). The Messages reducer (`gateway/anthropic_messages_protocol.zig`) fails a reply that reports `end_turn`, `stop_sequence` or `tool_use` with a block still open or unsigned thinking (`IncompleteStream`), so a half-sent tool call never runs; `max_tokens` keeps its partial handling. | Implemented; tests `host anthropic messages posts to /messages with the version and reads thinking, its signature and a tool call` and `anthropic messages never completes a finished reply with a block still open or unsigned thinking`. Upstream v0.0.18 has the same guard; worth proposing. |
 
 ## Where the header departs from the design's sketch (section 2.3)
 
@@ -119,6 +123,16 @@ sorted order, and the script fails if they list different sources. Building the 
 
 ## Upstream tracking
 
-Re-pin by running `tools/derive-closure.sh` at the new commit after
-re-applying our patches (`sync.sh`, milestone 2, design 2.7), then
-`tools/extract-core-runtime.py` against the new `napi_core_main.zig`.
+    tools/sync.sh ~/Developer/pm-durable/harness/refs/fx <tag or commit>
+
+reads the pin from `tools/closure.txt`, checks that every upstream file
+without a notice is upstream's at the pin, exports our series (the 15 patched
+upstream files against the pin) to `series.diff` in a temporary folder,
+merges each patched file with `git merge-file --diff3` (ours, the pin, the new
+commit) in place and stops on a conflict with the markers left; after
+resolving, `tools/sync.sh --continue …` re-derives the closure (which builds
+it), re-extracts `src/libfx_core_runtime.zig` from the new
+`napi_core_main.zig`, refreshes `LICENSE`, `THIRD_PARTY_NOTICES.md` and the
+fake server, and names any change to upstream's `build.zig`/`build.zig.zon`
+(ours are trimmed by hand). Then the Aero gates must pass before the pin
+lands, and the pin and closure count above are updated.

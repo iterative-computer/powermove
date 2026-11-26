@@ -448,6 +448,8 @@ impl Controller {
                     || self.mcp.profile.join("aero-dev").is_file()))
         {
             environment.aero = Some(crate::mcp::aero_launcher());
+            // Aero runs only on Powermove inference: the Powermove account.
+            environment.powermove = crate::cloud::aero_account(cx);
         }
         self.builtins.providers = environment.aero.is_some();
         environment.compatible = Some(Arc::new(crate::providers::Chat {

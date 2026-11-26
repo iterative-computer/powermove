@@ -902,8 +902,12 @@ impl Flow {
                 Onboard::Agent => {
                     let provider = match row {
                         "claude" => pm_agents::Provider::Claude,
-                        // Powermove's agent runs on the ChatGPT account too.
-                        _ => pm_agents::Provider::Chatgpt,
+                        "chatgpt" => pm_agents::Provider::Chatgpt,
+                        // Aero's Connect is the Powermove account's sign-in.
+                        _ => {
+                            let _ = onboarding.back();
+                            return vec![];
+                        }
                     };
                     return vec![Effect::Connect(provider)];
                 }
@@ -1299,12 +1303,15 @@ pub(crate) fn step_frame(
             choices: vec![
                 // The tag stands in for the detail: one short line under the
                 // name, clear of the row's Connect.
+                // Aero runs on the Powermove account: signed in, its name;
+                // signed out, Connect leads back to the account step.
                 Choice {
                     badge: Some("Recommended".into()),
                     detail: None,
-                    ..agent("aero", "Powermove", "", "powermove", "chatgpt")
+                    pill: powermove.is_none().then(|| "Connect".into()),
+                    status: powermove.map(str::to_owned),
+                    ..agent("aero", "Aero", "", "powermove", "chatgpt")
                 },
-                agent("chatgpt", "Codex", "With your ChatGPT account.", "provider.chatgpt", "chatgpt"),
                 agent(
                     "claude",
                     "Claude Code",
@@ -1312,6 +1319,7 @@ pub(crate) fn step_frame(
                     "provider.claude",
                     "claude",
                 ),
+                agent("chatgpt", "Codex", "With your ChatGPT account.", "provider.chatgpt", "chatgpt"),
             ],
             chosen: Some(choices.agent.clone()),
             preview: Some("agent".into()),
@@ -2308,23 +2316,26 @@ mod tests;
 mod step_frame_tests {
     use super::*;
 
-    /// The agent rows offer Connect until a sign-in answers; Powermove's
-    /// row follows the ChatGPT account it runs on.
+    /// The agent rows (Aero, Claude Code, Codex) offer Connect until a
+    /// sign-in answers; Aero's row follows the Powermove account.
     #[test]
     fn agent_rows_connect_and_show_a_sign_in() {
         let choices = Choices::default();
         let none = Default::default();
         let frame = step_frame(Onboard::Agent, &choices, &none, None, None);
         let ids: Vec<_> = frame.choices.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["aero", "chatgpt", "claude"]);
+        assert_eq!(ids, ["aero", "claude", "chatgpt"]);
+        assert_eq!(frame.choices[0].label, "Aero");
         assert_eq!(frame.chosen.as_deref(), Some("aero"));
         assert!(frame.choices.iter().all(|c| c.pill.as_deref() == Some("Connect") && c.status.is_none()));
+        // A ChatGPT sign-in is Codex's only; the Powermove account is Aero's.
         let signed = std::collections::BTreeMap::from([("chatgpt".to_owned(), "Connected · a@b.c".to_owned())]);
-        let frame = step_frame(Onboard::Agent, &choices, &signed, None, None);
-        for (choice, connected) in frame.choices.iter().zip([true, true, false]) {
+        let frame = step_frame(Onboard::Agent, &choices, &signed, Some("ana@example.com"), None);
+        for (choice, connected) in frame.choices.iter().zip([true, false, true]) {
             assert_eq!(choice.pill.is_none(), connected, "{}", choice.id);
             assert_eq!(choice.status.is_some(), connected, "{}", choice.id);
         }
+        assert_eq!(frame.choices[0].status.as_deref(), Some("ana@example.com"));
     }
 
     /// The speech step lists every model in the catalogue, in its order,

@@ -172,6 +172,8 @@ pub struct Environment {
     /// The API or local model connection (Settings › Accounts), when the app has one.
     pub compatible: Option<std::sync::Arc<dyn compatible::ChatHost>>,
     pub aero: Option<crate::aero::Launcher>,
+    /// The Powermove account Aero runs on (the app's Cloud session).
+    pub powermove: Option<std::sync::Arc<dyn crate::inference::PowermoveAccount>>,
     /// The Keychain, for Providers' credentials (the app's).
     pub secrets: Option<std::sync::Arc<dyn crate::edge::Secrets>>,
     /// The system HTTP stack (the app's), for Powermove's model requests.
@@ -201,6 +203,7 @@ impl Environment {
             composition_tools,
             compatible: None,
             aero: None,
+            powermove: None,
             secrets: None,
             net: None,
             keychain_prefix: "com.powermove.native.dev".into(),
@@ -453,32 +456,34 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
     if request.provider == Provider::Aero {
         use sha2::{Digest, Sha256};
         let crate::aero::Launcher(open) = environment.aero.clone()
-            .ok_or("Powermove's development switch is off.")?;
-        let project = request.project.as_deref().ok_or("Open a composition before running Powermove.")?;
-        let id = format!("{:x}", Sha256::digest(format!("{project}\n{}", request.workspace.display())));
+            .ok_or("Aero's development switch is off.")?;
+        let project = request
+            .project
+            .as_deref()
+            .ok_or("Open a composition before running Aero.")?;
+        let id = format!(
+            "{:x}",
+            Sha256::digest(format!("{project}\n{}", request.workspace.display()))
+        );
         let scope = environment.profile.join("aero").join("sessions").join(&id);
         let authority = request.clone();
-        // A model from Providers runs on its provider; anything else
-        // (the development switch's demo) on the fake model.
+        // Aero runs on Powermove inference only; the development switch's
+        // demo runs on the fake model.
         let options = match request.model.as_deref() {
-            Some(model) if crate::sources::Source::of(model).is_some() => {
+            // A debug build's demo only: a release build never runs it.
+            Some(model) if crate::inference::runs_fake(model) => {
+                crate::aero::Options::development()
+            }
+            Some(model) => {
                 let effort = request.effort.as_deref().unwrap_or("");
-                let model = crate::sources::live(environment, model, effort)?;
+                let model = crate::inference::live(environment, model, effort)?;
                 crate::aero::Options::live(crate::aero::Model::live(model))
             }
-            Some(crate::sources::FAKE_MODEL) => crate::aero::Options::development(),
-            _ => return Err("Choose a model for Powermove, or add a provider in Settings › Providers.".into()),
+            None => return Err(crate::inference::CHOOSE.into()),
         };
-        let openai = request.model.as_deref().and_then(crate::sources::Source::of).is_some_and(|(source, _)| {
-            matches!(source, crate::sources::Source::ChatGpt | crate::sources::Source::OpenAiKey)
+        let handle = crate::aero::start(request, id, scope, options, move |path| {
+            open(&authority, path, &token)
         });
-        let run = request.run.clone();
-        let handle = crate::aero::start(
-            request, id, scope, options,
-            move |path| open(&authority, path, &token),
-        );
-        // A turn on the shared OpenAI sign-in ends when it is signed out or replaced.
-        let handle = if openai { watch_sign_in(handle, run) } else { handle };
         return Ok(handle.hold(grant));
     }
     let loaded = crate::user_mcp::load(request.provider, request.access, &environment.vars);
@@ -577,8 +582,14 @@ fn claude(
     // Code says plainly that it is signed out: a status that times out or
     // fails never bills the key (P1-5). Switch off: nothing is read.
     if env.providers()
-        && crate::account::claude_key_fallback(&crate::account::claude_status_of(&executable, &vars))
-        && let Some(key) = env.secrets.as_deref().and_then(|s| crate::sources::anthropic_key(s, env))
+        && crate::account::claude_key_fallback(&crate::account::claude_status_of(
+            &executable,
+            &vars,
+        ))
+        && let Some(key) = env
+            .secrets
+            .as_deref()
+            .and_then(|s| crate::keys::anthropic_key(s, env))
     {
         vars.insert("ANTHROPIC_API_KEY".into(), key);
     }
@@ -910,6 +921,7 @@ mod exec_reply_tests {
             composition_tools: vec![],
             compatible: None,
             aero: None,
+            powermove: None,
             secrets: None,
             net: None,
             keychain_prefix: String::new(),

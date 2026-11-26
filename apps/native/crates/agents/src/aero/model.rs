@@ -23,20 +23,18 @@ enum Transport {
     Live(Arc<Live>),
 }
 
-/// A real provider through Providers (`crate::sources::live`): the
-/// core's provider and its description (no credential), and the credential
-/// the edge adds for `origin` only. `credentials` gets the bearer a backend
-/// just refused, so it can refresh once.
+/// Powermove inference (`crate::inference::live`): the core's provider and
+/// its description (no credential), and the credential the edge adds for
+/// `origin` only. `credentials` gets the bearer a backend just refused.
 pub struct Live {
-    /// The OpenAI identity a turn started on: its requests stop when that
-    /// identity is signed out or replaced (P1-4).
-    pub identity: Option<Arc<crate::codex_auth::Identity>>,
     pub provider: String,
     pub configured: String,
     pub model: String,
-    /// The Codex catalog's answer, for the ChatGPT route.
-    pub catalog: Option<Value>,
     pub net: Arc<dyn crate::edge::Net>,
+    /// The turn's fence: false once the account it started on is signed
+    /// out or replaced. An open stream stops, its reply is discarded and no
+    /// tool runs after that.
+    pub current: Arc<dyn Fn() -> bool + Send + Sync>,
     #[allow(clippy::type_complexity)]
     pub credentials:
         Arc<dyn Fn(Option<&str>) -> Result<(String, Vec<(String, String)>), String> + Send + Sync>,
@@ -77,7 +75,7 @@ impl Model {
             || url.fragment().is_some()
         {
             return Err(
-                "Powermove replay requires an explicit HTTP URL on a numeric loopback address.".into(),
+                "Aero replay requires an explicit HTTP URL on a numeric loopback address.".into(),
             );
         }
         Ok(Self {
@@ -93,9 +91,22 @@ impl Model {
         }
     }
 
+    /// The account the turn started on is no longer signed in: nothing more
+    /// of it may run.
+    pub fn fenced(&self) -> bool {
+        match &self.transport {
+            Transport::Live(live) => !(live.current)(),
+            _ => false,
+        }
+    }
     /// Why the latest provider request failed, once.
     pub fn take_failure(&self) -> Option<String> {
         self.failure.lock().unwrap().take()
+    }
+    /// Whether the latest provider request failed in words the edge wrote:
+    /// the core's own account of it then repeats nothing a person needs.
+    pub fn failure_pending(&self) -> bool {
+        self.failure.lock().unwrap().is_some()
     }
 
     pub fn endpoint(&self) -> &str {
@@ -132,29 +143,19 @@ impl Model {
 /// reach it (the core refuses images to a model without vision), and the
 /// session's effort as its one reasoning option (the core refuses an effort
 /// the model does not list).
-/// A catalog GET: a live Codex route's own answer, else the fakes'.
+/// A catalog GET: the fakes' answer; Aero's own connection lists none.
 pub(super) fn catalog(
     edge: &Model,
     remote: Remote,
     fetch: u64,
-    url: &str,
+    _url: &str,
     model: &str,
     effort: &str,
 ) {
-    let Transport::Live(live) = &edge.transport else {
+    if !matches!(edge.transport, Transport::Live(_)) {
         return answer_catalog(remote, fetch, model, effort);
-    };
-    let body = live.catalog.as_ref().map(|catalog| {
-        if url.starts_with("https://registry.npmjs.org/") {
-            json!({"version": catalog["version"]}).to_string()
-        } else {
-            json!({"models": catalog["models"]}).to_string()
-        }
-    });
-    let ok = match body {
-        Some(body) => status(remote, fetch, 200).and_then(|_| push(remote, fetch, body.as_bytes())),
-        None => status(remote, fetch, 404),
-    };
+    }
+    let ok = status(remote, fetch, 404);
     let _ = remote.fetch_finish(fetch, ok.is_ok());
 }
 
@@ -181,12 +182,16 @@ pub(super) fn deliver(
 ) {
     let result = match &model.transport {
         Transport::Live(live) => {
-            let result = deliver_live(live, remote, fetch, url, headers, body);
+            *model.failure.lock().unwrap() = None;
+            let result = deliver_live(live, remote, fetch, url, headers, body, &model.failure);
             let mut failure = model.failure.lock().unwrap();
             match &result {
-                Ok(()) => *failure = None,
+                Ok(()) => {}
                 Err(_) if remote.fetch_disposition(fetch) == Disposition::Retired => {}
-                Err(error) => *failure = Some(error.clone()),
+                // Words the stream's own error was given stay.
+                Err(error) => {
+                    failure.get_or_insert_with(|| error.clone());
+                }
             }
             drop(failure);
             result
@@ -217,7 +222,7 @@ fn deliver_replay(
 ) -> Result<(), String> {
     let url = Url::parse(url).map_err(|e| e.to_string())?;
     if &url != base {
-        return Err("Powermove refused a model request outside the configured replay endpoint.".into());
+        return Err("Aero refused a model request outside the configured replay endpoint.".into());
     }
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -255,6 +260,7 @@ fn deliver_live(
     url: &str,
     headers: &[(String, String)],
     body: &[u8],
+    failed: &std::sync::Mutex<Option<String>>,
 ) -> Result<(), String> {
     use crate::edge::{Chunk, NetRequest};
     let origin = pm_aero_core::origin_of(url);
@@ -293,16 +299,18 @@ fn deliver_live(
             headers: &all,
             body,
         };
-        // Stops the request when the core retires it, or when the identity
-        // this turn started on is signed out or replaced (P1-4).
+        // Stops the request when the core retires it, or when the account
+        // the turn started on is signed out or replaced (read every 250 ms).
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
-            let (stop, done, identity) = (stop.clone(), done.clone(), live.identity.clone());
+            let (stop, done, current) = (stop.clone(), done.clone(), live.current.clone());
             thread::spawn(move || {
                 use std::sync::atomic::Ordering::{Acquire, Release};
+                let mut tick = 0u32;
                 while !done.load(Acquire) {
-                    let gone = identity.as_ref().is_some_and(|i| !i.current());
+                    tick += 1;
+                    let gone = tick.is_multiple_of(5) && !current();
                     if gone || remote.fetch_disposition(fetch) == Disposition::Retired {
                         stop.store(true, Release);
                         return;
@@ -313,6 +321,7 @@ fn deliver_live(
         }
         let mut code = 0;
         let mut failure = Vec::new();
+        let mut guard = SseGuard::default();
         let streamed = live.net.stream(&request, &stop, &mut |chunk| match chunk {
             Chunk::Status(401) if attempt == 0 && bearer.is_some() => {
                 retry = true;
@@ -334,11 +343,22 @@ fn deliver_live(
                 }
                 Ok(())
             }
-            Chunk::Data(bytes) => push(remote, fetch, bytes),
+            Chunk::Data(bytes) => {
+                let safe = guard.feed(bytes);
+                // Recorded before the core reads the event: it stops at an
+                // error and retires the request, ending this delivery early.
+                if let Some(words) = guard.failure.take() {
+                    *failed.lock().unwrap() = Some(words);
+                }
+                push(remote, fetch, &safe)
+            }
         });
         done.store(true, std::sync::atomic::Ordering::Release);
-        if live.identity.as_ref().is_some_and(|i| !i.current()) {
-            return Err("The OpenAI sign-in changed during this turn.".into());
+        // A reply that finished after the account changed is discarded:
+        // none of its tool calls may run.
+        if !(live.current)() {
+            *failed.lock().unwrap() = Some(crate::inference::CHANGED.into());
+            return Err(crate::inference::CHANGED.into());
         }
         if let Err(error) = streamed {
             return Err(if error.starts_with("The model stopped responding") {
@@ -346,9 +366,7 @@ fn deliver_live(
             } else if (200..300).contains(&code) {
                 "The connection to the model dropped before its reply finished. Try again.".into()
             } else {
-                format!(
-                    "Powermove couldn't reach the model ({error}). Check Settings › Providers and try again."
-                )
+                format!("Aero couldn't reach Powermove inference ({error}). Try again.")
             });
         }
         if retry {
@@ -360,8 +378,19 @@ fn deliver_live(
             // credential it was sent (P1-6, ABI rule 13).
             let shown: Vec<&str> = all.iter().map(|(_, v)| v.as_str()).collect();
             let safe = safe_failure(code, &failure, &shown);
+            // Aero's backend: the plan's credits are spent (the contract's 402).
+            if code == 402 {
+                *failed.lock().unwrap() = Some(
+                    "You’re out of Aero credits. They come back when your plan resets.".into(),
+                );
+            }
             return status(remote, fetch, code).and_then(|_| push(remote, fetch, &safe));
         }
+        let rest = guard.finish();
+        if let Some(words) = guard.failure.take() {
+            *failed.lock().unwrap() = Some(words);
+        }
+        push(remote, fetch, &rest)?;
         return Ok(());
     }
     Err("The provider refused the refreshed credential.".into())
@@ -399,13 +428,146 @@ pub(crate) fn safe_failure(code: u16, body: &[u8], sent: &[&str]) -> Vec<u8> {
         .into_bytes()
 }
 
+/// A provider error's category, kept only when it is one of these, and the
+/// words Powermove shows for it. Nothing else of the provider's error is kept.
+fn error_words(kind: &str) -> (&'static str, &'static str) {
+    let kind = kind.to_ascii_lowercase();
+    if kind.contains("overload") {
+        (
+            "overloaded_error",
+            "The model is overloaded right now. Try again in a moment.",
+        )
+    } else if kind.contains("rate_limit") || kind.contains("quota") {
+        (
+            "rate_limit_error",
+            "The provider's rate limit was reached. Wait a moment and try again.",
+        )
+    } else if kind.contains("auth")
+        || kind.contains("permission")
+        || kind.contains("api_key")
+        || kind.contains("unauthorized")
+    {
+        (
+            "authentication_error",
+            "Powermove refused the session. Sign in to Powermove again in Settings › Providers.",
+        )
+    } else if kind.contains("invalid_request") {
+        (
+            "invalid_request_error",
+            "The provider refused the request as invalid.",
+        )
+    } else {
+        (
+            "api_error",
+            "The provider failed while answering. Try again.",
+        )
+    }
+}
+
+/// Error events inside a successful (2xx) server-sent stream, rewritten
+/// before the core reads them: the provider's own message can quote the
+/// prompt, a header or a key, and the core would show it as the reply
+/// (P1-6). The event keeps its place and an allowlisted category; its words
+/// are Powermove's. Other events pass through whole, each as soon as it ends.
+#[derive(Default)]
+pub(crate) struct SseGuard {
+    pending: Vec<u8>,
+    /// Powermove's words for the error the stream carried.
+    pub(crate) failure: Option<String>,
+}
+impl SseGuard {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+        self.pending.extend_from_slice(bytes);
+        let mut out = Vec::new();
+        let end_of = |bytes: &[u8]| {
+            let lf = bytes.windows(2).position(|w| w == b"\n\n").map(|at| at + 2);
+            let crlf = bytes
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|at| at + 4);
+            match (lf, crlf) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            }
+        };
+        while let Some(end) = end_of(&self.pending) {
+            let event: Vec<u8> = self.pending.drain(..end).collect();
+            out.extend(self.event(&event));
+        }
+        out
+    }
+    /// What is left when the stream ends.
+    pub(crate) fn finish(&mut self) -> Vec<u8> {
+        let rest = std::mem::take(&mut self.pending);
+        if rest.is_empty() {
+            rest
+        } else {
+            self.event(&rest)
+        }
+    }
+    fn event(&mut self, raw: &[u8]) -> Vec<u8> {
+        let text = String::from_utf8_lossy(raw);
+        let data: String = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim_start)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !data.contains("error") && !data.contains("response.failed") {
+            return raw.to_vec();
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            return raw.to_vec();
+        };
+        let kind_of = |error: &Value| {
+            [&error["type"], &error["code"]]
+                .into_iter()
+                .find_map(Value::as_str)
+                .unwrap_or("")
+                .to_owned()
+        };
+        let safe = match value["type"].as_str() {
+            Some("error") => {
+                let kind = if value["error"].is_object() {
+                    kind_of(&value["error"])
+                } else {
+                    kind_of(&value)
+                };
+                let (kind, words) = error_words(&kind);
+                self.failure = Some(words.into());
+                json!({"type":"error","code":kind,"message":words,
+                    "error":{"type":kind,"message":words}})
+            }
+            Some("response.failed") => {
+                let (kind, words) = error_words(&kind_of(&value["response"]["error"]));
+                self.failure = Some(words.into());
+                let mut safe = value.clone();
+                safe["response"]["error"] = json!({"code":kind,"message":words});
+                safe
+            }
+            None if value["error"].is_object() => {
+                let (kind, words) = error_words(&kind_of(&value["error"]));
+                self.failure = Some(words.into());
+                json!({"error":{"type":kind,"code":kind,"message":words}})
+            }
+            _ => return raw.to_vec(),
+        };
+        let name = text
+            .lines()
+            .find_map(|line| line.strip_prefix("event:"))
+            .map(|name| format!("event: {}\n", name.trim()))
+            .unwrap_or_default();
+        format!("{name}data: {safe}\n\n").into_bytes()
+    }
+}
+
 fn status(remote: Remote, fetch: u64, code: u16) -> Result<(), String> {
     match remote
         .fetch_status(fetch, code, None)
         .map_err(|e| e.to_string())?
     {
         Outcome::Applied => Ok(()),
-        other => Err(format!("Powermove's fetch status was rejected: {other:?}")),
+        other => Err(format!("Aero's fetch status was rejected: {other:?}")),
     }
 }
 
@@ -416,7 +578,7 @@ fn push(remote: Remote, fetch: u64, bytes: &[u8]) -> Result<(), String> {
                 Outcome::Applied => break,
                 Outcome::Stale => return Ok(()),
                 Outcome::Backpressure | Outcome::Busy => thread::sleep(Duration::from_millis(2)),
-                other => return Err(format!("Powermove's fetch bytes were rejected: {other:?}")),
+                other => return Err(format!("Aero's fetch bytes were rejected: {other:?}")),
             }
         }
     }
@@ -466,8 +628,8 @@ pub(super) fn demo(bytes: &[u8]) -> Reply {
     if text.contains("Completion checks failed") {
         return Reply::Text("The synthetic run reached the completion checks.".into());
     }
-    if text.contains("Powermove demo edit") {
-        return Reply::Text("Renamed the first layer to Powermove demo edit.".into());
+    if text.contains("Aero demo edit") {
+        return Reply::Text("Renamed the first layer to Aero demo edit.".into());
     }
     let request: Value = serde_json::from_slice(bytes).unwrap_or_default();
     if let Some(header) = find_text(&request, "Project at session start\n")
@@ -480,11 +642,11 @@ pub(super) fn demo(bytes: &[u8]) -> Reply {
         return Reply::Tool {
             name: "edit".into(),
             args: json!({"op":"commands","revision":revision,
-            "args":{"label":"Powermove demo edit","commands":[{"type":"set_layer","target":id,
-            "patch":{"name":"Powermove demo edit"}}]}}),
+            "args":{"label":"Aero demo edit","commands":[{"type":"set_layer","target":id,
+            "patch":{"name":"Aero demo edit"}}]}}),
         };
     }
-    Reply::Text("Powermove is running on a fake model. Open a project with a layer and choose Project access to try the demo edit.".into())
+    Reply::Text("Aero is running on a fake model. Open a project with a layer and choose Project access to try the demo edit.".into())
 }
 
 fn find_text<'a>(value: &'a Value, marker: &str) -> Option<&'a str> {

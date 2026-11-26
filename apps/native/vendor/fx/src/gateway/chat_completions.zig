@@ -1,3 +1,5 @@
+// Powermove notice: modified from upstream fx (patch P-HOST-MESSAGES): the
+// protocol's reply reader and replay projection are public for the host transport.
 const std = @import("std");
 const codec = @import("chat_completions_protocol.zig");
 const definitions = @import("../core/config/configured_provider.zig");
@@ -96,7 +98,8 @@ pub fn build_for(definition: *const definitions.Definition, alloc: Allocator, re
 }
 
 /// How a connection's protocol reads a successful streamed reply.
-fn consumer(protocol: definitions.Protocol) transport.ConsumeFn {
+/// Powermove (P-HOST-MESSAGES): public for the host transport.
+pub fn consumer(protocol: definitions.Protocol) transport.ConsumeFn {
     return switch (protocol) {
         .@"openai-chat-completions" => consume,
         .@"openai-responses" => responses.consume,
@@ -105,7 +108,8 @@ fn consumer(protocol: definitions.Protocol) transport.ConsumeFn {
 }
 
 /// Which replay parts a connection's protocol keeps for a later request.
-fn replay_projection(protocol: definitions.Protocol) *const fn (Allocator, ?types.ProviderReplay, []const types.ToolCall, bool, bool) anyerror!?types.ProviderReplay {
+/// Powermove (P-HOST-MESSAGES): public for the host transport.
+pub fn replay_projection(protocol: definitions.Protocol) *const fn (Allocator, ?types.ProviderReplay, []const types.ToolCall, bool, bool) anyerror!?types.ProviderReplay {
     return switch (protocol) {
         .@"openai-chat-completions" => project_replay,
         .@"openai-responses" => responses_protocol.selectReplayParts,

@@ -96,12 +96,12 @@ pub struct Accounts {
     revision: AtomicU64,
     closed: AtomicBool,
     keys: Mutex<Keys>,
+    /// Aero on the Powermove account, and the refresh that last asked.
+    aero: Mutex<(crate::inference::Standing, u64)>,
 }
-/// API keys from Settings › Providers as Powermove reads them.
+/// API keys from Settings › Providers, for Claude Code and Codex.
 #[derive(Default)]
 struct Keys {
-    /// An OpenAI key Codex saved: the key's own model list, for Powermove.
-    openai: Vec<Model>,
     anthropic: KeyState,
     /// A key waiting for Codex to save it (`connect_openai_key`).
     pending_openai: Option<String>,
@@ -144,6 +144,7 @@ impl Accounts {
             revision: AtomicU64::new(1),
             closed: AtomicBool::new(false),
             keys: Mutex::default(),
+            aero: Mutex::default(),
         })
     }
     pub fn revision(&self) -> u64 {
@@ -170,7 +171,12 @@ impl Accounts {
             .get(provider.name())
             .is_some_and(|s| s.finding_models)
     }
+    /// Reads who is signed in again (Try Again): for Aero, its plan, credits
+    /// and catalogue.
     pub fn refresh(self: &Arc<Self>, provider: Provider) {
+        if provider == Provider::Aero {
+            return self.refresh_aero();
+        }
         self.start(provider, Job::Refresh);
     }
     pub fn connect(self: &Arc<Self>, provider: Provider) {
@@ -181,21 +187,25 @@ impl Accounts {
         self.keys.lock().unwrap().pending_openai = Some(key);
         self.start(Provider::Chatgpt, Job::ConnectKey);
     }
-    /// The OpenAI key's models (Powermove runs them), while Codex holds a key.
-    pub fn openai_key_models(&self) -> Vec<Model> {
-        self.keys.lock().unwrap().openai.clone()
-    }
     pub fn anthropic(&self) -> KeyState {
         self.keys.lock().unwrap().anthropic.clone()
     }
     /// Saves the Anthropic API key in the Keychain and lists its models.
     pub fn set_anthropic_key(self: &Arc<Self>, key: String) -> Result<(), String> {
         let key = key.trim().to_owned();
-        if !crate::sources::valid_key(&key) {
+        if !crate::keys::valid_key(&key) {
             return Err("That doesn’t look like an API key.".into());
         }
-        let secrets = self.environment.secrets.clone().ok_or("The Keychain is unavailable.")?;
-        secrets.write(&crate::sources::anthropic_service(&self.environment), "api-key", key.as_bytes())?;
+        let secrets = self
+            .environment
+            .secrets
+            .clone()
+            .ok_or("The Keychain is unavailable.")?;
+        secrets.write(
+            &crate::keys::anthropic_service(&self.environment),
+            "api-key",
+            key.as_bytes(),
+        )?;
         self.refresh_anthropic();
         Ok(())
     }
@@ -204,7 +214,7 @@ impl Accounts {
         let secrets = self.environment.secrets.clone().ok_or("The Keychain is unavailable.")?;
         let this = self.clone();
         std::thread::spawn(move || {
-            let service = crate::sources::anthropic_service(&this.environment);
+            let service = crate::keys::anthropic_service(&this.environment);
             match secrets.delete(&service, "api-key") {
                 Ok(()) => this.keys.lock().unwrap().anthropic = KeyState::default(),
                 Err(error) => this.keys.lock().unwrap().anthropic.detail = Some(error),
@@ -225,17 +235,17 @@ impl Accounts {
         };
         let this = self.clone();
         std::thread::spawn(move || {
-            let Some(key) = crate::sources::anthropic_key(secrets.as_ref(), &this.environment) else {
+            let Some(key) = crate::keys::anthropic_key(secrets.as_ref(), &this.environment) else {
                 this.keys.lock().unwrap().anthropic = KeyState::default();
                 return this.bump();
             };
             {
                 let mut keys = this.keys.lock().unwrap();
-                keys.anthropic.masked = Some(crate::sources::mask(&key));
+                keys.anthropic.masked = Some(crate::keys::mask(&key));
                 keys.anthropic.checking = true;
             }
             this.bump();
-            let listed = crate::sources::key_models(net.as_ref(), crate::sources::Source::AnthropicKey, &key);
+            let listed = crate::keys::anthropic_models(net.as_ref(), &key);
             {
                 let mut keys = this.keys.lock().unwrap();
                 keys.anthropic.checking = false;
@@ -249,6 +259,41 @@ impl Accounts {
             }
             this.bump();
         });
+    }
+    /// Where Aero stands: signed out, no plan yet, or its models and credits.
+    pub fn aero(&self) -> crate::inference::Standing {
+        self.aero.lock().unwrap().0.clone()
+    }
+    /// Reads Aero's plan, credits and models from the Powermove account on a
+    /// worker (the account changed, a turn spent credits). Switch off:
+    /// nothing is read. The newest refresh's answer wins.
+    pub fn refresh_aero(self: &Arc<Self>) {
+        if !self.environment.providers() {
+            return;
+        }
+        let asked = {
+            let mut aero = self.aero.lock().unwrap();
+            aero.1 += 1;
+            aero.1
+        };
+        let this = self.clone();
+        std::thread::spawn(move || {
+            let standing = crate::inference::standing(&this.environment);
+            let mut aero = this.aero.lock().unwrap();
+            if aero.1 == asked && aero.0 != standing {
+                aero.0 = standing;
+                drop(aero);
+                this.bump();
+            }
+        });
+    }
+    /// Opens the plan the backend offers (a Powermove https page; the
+    /// contract's `offer`) in the browser.
+    pub fn open_aero_offer(&self) -> Result<(), String> {
+        match self.aero() {
+            crate::inference::Standing::NoPlan(Some(offer)) => (self.open)(&offer.url),
+            _ => Err("No Aero plan is offered right now.".into()),
+        }
     }
     /// Sign-out wins over a login still waiting on the browser.
     pub fn disconnect(self: &Arc<Self>, provider: Provider) {
@@ -378,14 +423,13 @@ impl Accounts {
                     crate::codex_auth::identity_changed();
                 }
                 self.set_models(Provider::Chatgpt, vec![]);
-                self.keys.lock().unwrap().openai.clear();
                 return Ok(Status::of(State::Disconnected, None));
             }
             Job::ConnectKey => {
                 let Some(key) = self.keys.lock().unwrap().pending_openai.take() else {
                     return chatgpt_status(&mut peer);
                 };
-                if !crate::sources::valid_key(key.trim()) {
+                if !crate::keys::valid_key(key.trim()) {
                     return Ok(Status::of(State::Disconnected, Some("That doesn’t look like an API key.".into())));
                 }
                 peer.request("account/login/start", json!({"type":"apiKey","apiKey":key.trim()}), REQUEST)?;
@@ -452,8 +496,8 @@ impl Accounts {
         }
         Ok(status)
     }
-    /// With Codex on an API key: the key masked, and its own model list for
-    /// Powermove (read from the shared Keychain item, never from Codex).
+    /// With Codex on an API key: the key masked, as Settings › Providers
+    /// shows it (read from the shared Keychain item, never from Codex).
     fn read_openai_key(&self, status: &mut Status) {
         if !self.environment.providers() {
             return;
@@ -465,16 +509,7 @@ impl Accounts {
                 .and_then(|auth| auth.api_key),
             _ => None,
         };
-        status.key = key.as_deref().map(crate::sources::mask);
-        let models = match (key, &self.environment.net) {
-            (Some(key), Some(net)) => crate::sources::key_models(net.as_ref(), crate::sources::Source::OpenAiKey, &key)
-                .unwrap_or_else(|detail| {
-                    status.detail = Some(detail);
-                    vec![]
-                }),
-            _ => vec![],
-        };
-        self.keys.lock().unwrap().openai = models;
+        status.key = key.as_deref().map(crate::keys::mask);
     }
     fn claude(
         &self,
@@ -919,7 +954,6 @@ pub(crate) struct Peer {
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
     next: u64,
-    released: bool,
 }
 impl Peer {
     pub(crate) fn start(
@@ -954,7 +988,6 @@ impl Peer {
             stdin: Some(stdin),
             lines,
             next: 1,
-            released: false,
         })
     }
     fn write(&mut self, message: &Value) -> Result<(), String> {
@@ -988,25 +1021,9 @@ impl Peer {
         }
     }
 }
-impl Peer {
-    /// Closes its input and lets it exit by itself, reaped off this thread:
-    /// for a process that may be mid-way through a credential exchange.
-    pub(crate) fn release(mut self) {
-        self.released = true;
-    }
-}
 impl Drop for Peer {
     fn drop(&mut self) {
         self.stdin.take();
-        if self.released {
-            let pid = self.child.id();
-            std::thread::spawn(move || {
-                let mut status = 0;
-                // SAFETY: waits for our own child, whose handle is dropped.
-                unsafe { libc::waitpid(pid as i32, &mut status, 0) };
-            });
-            return;
-        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

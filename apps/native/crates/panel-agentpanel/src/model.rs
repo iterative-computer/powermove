@@ -1362,6 +1362,11 @@ impl Panel {
     }
 
     pub fn queued_thread(&self, available: impl Fn(Provider) -> bool) -> Option<String> {
+        self.queued_thread_with(|settings| available(settings.provider))
+    }
+    /// The next thread whose queued messages may go out, as `ready` judges
+    /// its settings (its harness, and the model it would run on).
+    pub fn queued_thread_with(&self, ready: impl Fn(&Settings) -> bool) -> Option<String> {
         self.sessions
             .iter()
             .filter(|(_, session)| {
@@ -1369,7 +1374,7 @@ impl Panel {
                     && session.run.is_none()
                     && !session.composer_disabled()
                     && (session.settings.access != Access::Computer || session.computer_consent)
-                    && available(session.settings.provider)
+                    && ready(&session.settings)
             })
             .map(|(id, _)| id)
             .min()

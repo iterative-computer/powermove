@@ -92,6 +92,19 @@ impl Fixture {
         model: Model,
         build: impl FnOnce(Tools) -> Box<dyn aero::Session> + Send + 'static,
     ) -> (Handle, mpsc::Receiver<Value>) {
+        self.start_choice(run, scope, prompt, (None, None), model, build)
+    }
+
+    /// A turn on the picker's `(model, effort)`, as the panel sends it.
+    fn start_choice(
+        &self,
+        run: &str,
+        scope: std::path::PathBuf,
+        prompt: &str,
+        (model_id, effort): (Option<&str>, Option<&str>),
+        model: Model,
+        build: impl FnOnce(Tools) -> Box<dyn aero::Session> + Send + 'static,
+    ) -> (Handle, mpsc::Receiver<Value>) {
         let host = self.host.clone();
         let project = self.project.clone();
         let revision = self.revision;
@@ -101,8 +114,8 @@ impl Fixture {
                 run: run.into(),
                 prompt: prompt.into(),
                 provider: Provider::Aero,
-                model: None,
-                effort: None,
+                model: model_id.map(str::to_owned),
+                effort: effort.map(str::to_owned),
                 access: Access::Project,
                 approval: Default::default(),
                 computer_consent: false,
@@ -307,19 +320,140 @@ fn a_dropped_or_silent_model_stream_ends_the_turn_with_a_plain_error() {
             "base_url":"http://127.0.0.1:9/v1","auth":{"type":"none"},"tool_choice_mode":"send",
             "model_metadata":{"m":{"supports_tool_use":true}}}});
         let live = aero::Live {
-            identity: None,
             provider: "custom".into(),
             configured: configured.to_string(),
             model: "m".into(),
-            catalog: None,
             net: Arc::new(Idle {
                 inner: Arc::new(broken),
                 after: Duration::from_millis(300),
             }),
+            current: Arc::new(|| true),
             credentials: Arc::new(|_| Ok(("http://127.0.0.1:9".into(), vec![]))),
         };
         let (turn, _notes) = fixture.start(Model::live(live), |tools| Box::new(tools));
         assert_eq!(complete(&turn), RunResult::failure(expected, false));
+    }
+}
+
+/// A provider error inside a streamed (HTTP 200) reply, at once or after
+/// some text, reaches the person only in Aero's words: never the backend's
+/// message, a session token it echoes, or its JSON, in the panel's result,
+/// the trace, the run's reports or the session's files (PM-746, Sol P1-1).
+#[test]
+fn a_streamed_provider_error_never_reaches_the_panel_trace_or_session_files() {
+    use pm_agents::edge::{Chunk, Net, NetRequest};
+    use pm_agents::inference::{PowermoveAccount, Session};
+    use std::sync::atomic::AtomicBool;
+    const TOKEN: &str = "pm-session-fake-leak-7f3a9c";
+    #[derive(Debug)]
+    struct Signed;
+    impl PowermoveAccount for Signed {
+        fn session(&self) -> Option<Session> {
+            Some(Session {
+                origin: "https://cloud.trypowermove.com".into(),
+                token: TOKEN.into(),
+            })
+        }
+    }
+    #[derive(Debug, Clone, Copy)]
+    struct Erroring {
+        mid: bool,
+    }
+    impl Net for Erroring {
+        fn stream(
+            &self,
+            request: &NetRequest<'_>,
+            _: &AtomicBool,
+            on: &mut dyn FnMut(Chunk<'_>) -> Result<(), String>,
+        ) -> Result<(), String> {
+            assert_eq!(
+                request.url,
+                "https://cloud.trypowermove.com/v1/aero/chat/completions"
+            );
+            on(Chunk::Status(200))?;
+            let mut sse = String::new();
+            if self.mid {
+                sse.push_str(&format!(
+                    "data: {}\n\n",
+                    json!({"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,
+                        "delta":{"role":"assistant","content":"Starting"},"finish_reason":null}]})
+                ));
+            }
+            let echoed = format!(
+                "bad header authorization: Bearer {TOKEN}; request {}",
+                json!({"internal_trace":{"prompt":"secret prompt"}})
+            );
+            let kind = if self.mid {
+                "permission_error"
+            } else {
+                "invalid_request_error"
+            };
+            sse.push_str(&format!(
+                "data: {}\n\n",
+                json!({"error":{"type":kind,"message":echoed}})
+            ));
+            // In two pieces, so an event arrives split.
+            let (a, b) = sse.as_bytes().split_at(sse.len() / 2);
+            on(Chunk::Data(a))?;
+            on(Chunk::Data(b))
+        }
+    }
+    for (mid, words) in [
+        (false, "The provider refused the request as invalid."),
+        (
+            true,
+            "Powermove refused the session. Sign in to Powermove again in Settings › Providers.",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let env = pm_agents::launch::Environment {
+            profile: fixture.profile.path().join("app"),
+            powermove: Some(Arc::new(Signed)),
+            net: Some(Arc::new(Erroring { mid })),
+            ..Default::default()
+        };
+        let model = "pm/anthropic/claude-opus-5-5";
+        let live = pm_agents::inference::live(&env, model, "high").unwrap();
+        let scope = fixture.profile.path().join("aero/sessions/leak");
+        let (turn, notes) = fixture.start_choice(
+            "leak",
+            scope.clone(),
+            "Say hello.",
+            (Some(model), Some("high")),
+            Model::live(live),
+            |tools| Box::new(tools),
+        );
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let result = loop {
+            match turn.try_event() {
+                Ok(Event::Completed { result, .. }) => break result,
+                Ok(Event::Trace { value, .. }) => seen.push(value.to_string()),
+                Ok(_) | Err(mpsc::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(3))
+                }
+                other => panic!("the turn did not finish: {other:?}"),
+            }
+        };
+        assert_eq!(result, RunResult::failure(words, false), "mid={mid}");
+        seen.extend(notes.try_iter().map(|note| note.to_string()));
+        fn files(dir: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    files(&path, out);
+                } else if let Ok(bytes) = std::fs::read(&path) {
+                    out.push(String::from_utf8_lossy(&bytes).into_owned());
+                }
+            }
+        }
+        files(&scope, &mut seen);
+        assert!(!seen.is_empty());
+        for text in &seen {
+            for leak in [TOKEN, "internal_trace", "secret prompt"] {
+                assert!(!text.contains(leak), "mid={mid}: {leak} reached {text}");
+            }
+        }
     }
 }
 
@@ -1255,7 +1389,7 @@ fn a_draft_survives_stop_after_a_compile_error_and_the_next_send() {
         RunResult::Success { text, .. } => assert_eq!(text, "The draft is still there."),
         RunResult::Failure { error, .. } => assert_eq!(
             error,
-            "Powermove stopped before its checks passed: 1 problem remains (1 unpublished draft). Review the result before you continue."
+            "Aero stopped before its checks passed: 1 problem remains (1 unpublished draft). Review the result before you continue."
         ),
     }
 }
@@ -1297,7 +1431,7 @@ fn a_draft_survives_an_exhausted_gate_and_the_next_send() {
     );
     let (result, _) = complete_with_progress(&first);
     assert!(
-        matches!(&result, RunResult::Failure { error, .. } if error.starts_with("Powermove stopped before its checks passed")),
+        matches!(&result, RunResult::Failure { error, .. } if error.starts_with("Aero stopped before its checks passed")),
         "{result:?}"
     );
     let mut reopened = fixture.tools_at(&scope, Access::Project);
@@ -1865,7 +1999,7 @@ fn an_exhausted_gate_ends_the_turn_in_plain_words() {
     );
     assert_eq!(
         error,
-        "Powermove stopped before its checks passed: 1 problem remains (1 hidden layer). Review the result before you continue."
+        "Aero stopped before its checks passed: 1 problem remains (1 hidden layer). Review the result before you continue."
     );
     assert!(
         !error.contains(['{', '[', '"']) && error.len() <= 400,
@@ -1952,7 +2086,7 @@ fn an_exhausted_gate_never_quotes_a_plan_or_the_project() {
     };
     assert_eq!(
         error,
-        "Powermove stopped before its checks passed: 1 problem remains (1 plan check). Review the result before you continue."
+        "Aero stopped before its checks passed: 1 problem remains (1 plan check). Review the result before you continue."
     );
     assert!(
         error.len() <= 200 && !error.contains(['{', '[', '"']),
@@ -2487,4 +2621,398 @@ fn switching_a_track_to_offline_media_is_caught() {
         "live",
         "the refused switch is taken back"
     );
+}
+
+/// Aero's one route, as each request leaves Powermove (PM-746, PM-750):
+/// emulate (`PM_EMULATE`, its executable) answers Chat Completions on a
+/// loopback port of its own, standing in for Powermove inference. Fake
+/// credentials only, in memory.
+mod routes {
+    use super::*;
+    use pm_agents::edge::{Chunk, Loopback, MemorySecrets, Net, NetRequest};
+    use pm_agents::inference::{PowermoveAccount, Session};
+    use pm_agents::launch::Environment;
+    use pm_agents::{codex_auth, compatible, keys};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::AtomicBool;
+
+    const ORIGIN: &str = "https://cloud.trypowermove.com";
+    const TOKEN: &str = "pm-session-fake-routes";
+
+    struct Emulate {
+        child: Child,
+        base: String,
+        _dir: tempfile::TempDir,
+    }
+    impl Drop for Emulate {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+    /// emulate with `rules`, or `None` (the test is skipped, and says so)
+    /// when `PM_EMULATE` is unset.
+    fn emulate(rules: Value) -> Option<Emulate> {
+        let Some(bin) = std::env::var_os("PM_EMULATE") else {
+            eprintln!("skipped: PM_EMULATE (emulate's executable) is not set");
+            return None;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let models = [
+            "openai/gpt-6-sol",
+            "anthropic/claude-opus-5-5",
+            "claude-opus-5-5",
+            "claude-opus-4-6",
+            "claude-haiku-4-5-20251001",
+            "claude-3-7-sonnet-20250219",
+        ];
+        let seed = json!({"ai":{"strict":false,"models":models,"rules":rules}});
+        let path = dir.path().join("seed.yaml");
+        std::fs::write(&path, seed.to_string()).unwrap();
+        let child = Command::new(bin)
+            .args(["start", "--service", "ai", "--host", "127.0.0.1", "--port"])
+            .arg(port.to_string())
+            .arg("--seed")
+            .arg(&path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let emulate = Emulate {
+            child,
+            base: format!("http://127.0.0.1:{port}"),
+            _dir: dir,
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let rules = format!("{}/_ai/rules", emulate.base);
+        let get = NetRequest {
+            method: "GET",
+            url: &rules,
+            headers: &[],
+            body: b"",
+        };
+        while pm_agents::edge::fetch(&Loopback, &get).map_or(true, |(code, _)| code != 200) {
+            assert!(Instant::now() < deadline, "emulate did not start");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Some(emulate)
+    }
+
+    /// One request as it left Powermove's fetch edge (credential headers
+    /// included), and the reply's bytes.
+    #[derive(Clone, Debug)]
+    struct Sent {
+        url: String,
+        headers: Vec<(String, String)>,
+        body: Value,
+    }
+    impl Sent {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        }
+    }
+    /// The app's network as the routes see it: every provider origin
+    /// (Powermove's and the ones Aero must never reach) goes to emulate.
+    #[derive(Debug)]
+    struct Wire {
+        base: String,
+        sent: Mutex<Vec<Sent>>,
+    }
+    impl Net for Wire {
+        fn stream(
+            &self,
+            request: &NetRequest<'_>,
+            stop: &AtomicBool,
+            on: &mut dyn FnMut(Chunk<'_>) -> Result<(), String>,
+        ) -> Result<(), String> {
+            let url = [
+                ORIGIN,
+                "https://chatgpt.com",
+                "https://api.openai.com",
+                "https://api.anthropic.com",
+            ]
+            .iter()
+            .find_map(|origin| request.url.strip_prefix(origin))
+            .map_or_else(
+                || request.url.to_owned(),
+                |rest| format!("{}{rest}", self.base),
+            );
+            self.sent.lock().unwrap().push(Sent {
+                url: request.url.into(),
+                headers: request.headers.to_vec(),
+                body: serde_json::from_slice(request.body).unwrap_or_default(),
+            });
+            Loopback.stream(
+                &NetRequest {
+                    url: &url,
+                    ..*request
+                },
+                stop,
+                on,
+            )
+        }
+    }
+
+    /// The signed-in Powermove account.
+    #[derive(Debug)]
+    struct Signed;
+    impl PowermoveAccount for Signed {
+        fn session(&self) -> Option<Session> {
+            Some(Session {
+                origin: ORIGIN.into(),
+                token: TOKEN.into(),
+            })
+        }
+    }
+    /// A saved custom endpoint (the Compatible connection), which Aero
+    /// never reaches.
+    #[derive(Debug)]
+    struct Custom(String);
+    impl compatible::ChatHost for Custom {
+        fn saved(&self) -> Option<compatible::Saved> {
+            Some(compatible::Saved {
+                base_url: self.0.clone(),
+                model: "gpt-5.5".into(),
+                vision: false,
+                models: vec![],
+            })
+        }
+        fn key(&self, _: &str) -> Option<String> {
+            Some("custom-fake-key".into())
+        }
+        fn stream(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Vec<u8>,
+            _: &AtomicBool,
+            _: &mut dyn FnMut(&[u8]) -> Result<(), String>,
+        ) -> Result<u16, String> {
+            Err("unused".into())
+        }
+    }
+
+    struct Routes {
+        fixture: Fixture,
+        env: Environment,
+        wire: Arc<Wire>,
+        emulate: Emulate,
+    }
+    fn routes(rules: Value) -> Option<Routes> {
+        let emulate = emulate(rules)?;
+        let fixture = Fixture::new();
+        let wire = Arc::new(Wire {
+            base: emulate.base.clone(),
+            sent: Mutex::default(),
+        });
+        let env = Environment {
+            profile: fixture.profile.path().join("app"),
+            keychain_prefix: "pm-effort-routes".into(),
+            secrets: Some(Arc::new(MemorySecrets::default())),
+            net: Some(wire.clone()),
+            powermove: Some(Arc::new(Signed)),
+            compatible: Some(Arc::new(Custom(format!("{}/custom/v1", emulate.base)))),
+            vars: [(
+                "PM_CODEX_KEYRING_SERVICE".to_owned(),
+                "pm-effort-routes Codex Auth".to_owned(),
+            )]
+            .into(),
+            ..Environment::default()
+        };
+        // Codex's login item is keyed by its home's canonical path.
+        std::fs::create_dir_all(codex_auth::codex_home(&env)).unwrap();
+        Some(Routes {
+            fixture,
+            env,
+            wire,
+            emulate,
+        })
+    }
+    impl Routes {
+        fn secret(&self, service: &str, account: &str, value: &[u8]) {
+            self.env
+                .secrets
+                .as_ref()
+                .unwrap()
+                .write(service, account, value)
+                .unwrap();
+        }
+        /// One turn on the picker's `id` at `effort` in `env`; the model
+        /// requests it sent.
+        fn turn_in(&self, env: &Environment, id: &str, effort: &str) -> Vec<Sent> {
+            let before = self.wire.sent.lock().unwrap().len();
+            let live = pm_agents::inference::live(env, id, effort).unwrap();
+            let run = format!("{}-{effort}", id.replace(['/', '.'], "-"));
+            let scope = self.fixture.profile.path().join("aero/sessions").join(&run);
+            let (turn, _notes) = self.fixture.start_choice(
+                &run,
+                scope,
+                "Say hello.",
+                (Some(id), Some(effort)),
+                Model::live(live),
+                |tools| Box::new(tools),
+            );
+            let result = complete(&turn);
+            let sent = self.wire.sent.lock().unwrap()[before..].to_vec();
+            assert!(
+                matches!(result, RunResult::Success { .. }),
+                "{id} at {effort}: {result:?}; sent {sent:#?}"
+            );
+            sent
+        }
+        fn turn(&self, id: &str, effort: &str) -> Vec<Sent> {
+            let sent = self.turn_in(&self.env, id, effort);
+            assert!(!sent.is_empty(), "{id} at {effort} sent nothing");
+            sent
+        }
+    }
+
+    fn hello() -> Value {
+        json!([{"id":"hello","reply":[{"type":"reasoning","text":"Considering the request."},
+            {"type":"text","text":"Hello from emulate."}]}])
+    }
+
+    /// Each picker level goes to Powermove inference as `reasoning_effort`,
+    /// on the Powermove session; no level sends none.
+    #[test]
+    fn the_aero_route_sends_each_picker_level_as_reasoning_effort_on_the_powermove_session() {
+        let Some(r) = routes(hello()) else { return };
+        for level in ["low", "medium", "high", "xhigh", "max", ""] {
+            for request in r.turn("pm/openai/gpt-6-sol", level) {
+                assert_eq!(request.url, format!("{ORIGIN}/v1/aero/chat/completions"));
+                assert_eq!(request.body["model"], "openai/gpt-6-sol");
+                if level.is_empty() {
+                    assert!(request.body.get("reasoning_effort").is_none());
+                } else {
+                    assert_eq!(request.body["reasoning_effort"], level, "{level}");
+                }
+                assert_eq!(
+                    request.header("authorization"),
+                    Some(format!("Bearer {TOKEN}").as_str())
+                );
+                assert!(request.header("x-powermove-client").is_some());
+            }
+        }
+    }
+
+    /// With an OpenAI key in Codex's item, an Anthropic key, a ChatGPT
+    /// sign-in's old model ids and a saved custom endpoint, every Aero
+    /// request still goes to Powermove inference on the Powermove session:
+    /// no key or other origin is ever reached.
+    #[test]
+    fn no_openai_key_anthropic_key_or_custom_connection_reaches_aero() {
+        let Some(r) = routes(hello()) else { return };
+        r.secret(
+            &keys::anthropic_service(&r.env),
+            "api-key",
+            b"sk-ant-fake-abcdef12",
+        );
+        let account = codex_auth::store_key(&codex_auth::codex_home(&r.env));
+        r.secret(
+            &codex_auth::service(&r.env),
+            &account,
+            json!({"auth_mode":"apikey","OPENAI_API_KEY":"sk-fake-openai-1234"})
+                .to_string()
+                .as_bytes(),
+        );
+        // Ids saved on the old routes never run on Aero at all.
+        for saved in [
+            "openai/gpt-6-sol",
+            "anthropic/claude-opus-5-5",
+            "custom/gpt-5.5",
+            "chatgpt/gpt-6-sol",
+        ] {
+            assert_eq!(
+                pm_agents::inference::live(&r.env, saved, "high")
+                    .err()
+                    .as_deref(),
+                Some(pm_agents::inference::CHOOSE),
+                "{saved}"
+            );
+        }
+        for id in ["pm/openai/gpt-6-sol", "pm/anthropic/claude-opus-5-5"] {
+            for request in r.turn(id, "high") {
+                assert_eq!(
+                    request.url,
+                    format!("{ORIGIN}/v1/aero/chat/completions"),
+                    "{id}"
+                );
+                assert_eq!(
+                    request.header("authorization"),
+                    Some(format!("Bearer {TOKEN}").as_str()),
+                    "{id}"
+                );
+                assert!(request.header("x-api-key").is_none(), "{id}");
+                assert!(request.header("chatgpt-account-id").is_none(), "{id}");
+                for (_, value) in &request.headers {
+                    assert!(!value.contains("sk-"), "{id}: a key reached Aero");
+                }
+            }
+        }
+        // Signed out of Powermove: Aero has no way in, whatever keys exist.
+        let signed_out = Environment {
+            powermove: None,
+            ..r.env.clone()
+        };
+        assert_eq!(
+            pm_agents::inference::live(&signed_out, "pm/openai/gpt-6-sol", "high")
+                .err()
+                .as_deref(),
+            Some(pm_agents::inference::SIGN_IN)
+        );
+    }
+
+    /// A development build with the switch on reaches the test endpoint
+    /// (emulate) directly, and nothing else.
+    #[test]
+    fn the_test_endpoint_reaches_emulate_with_the_development_switch_on() {
+        let Some(r) = routes(hello()) else { return };
+        let mut env = r.env.clone();
+        env.vars.insert(
+            pm_agents::inference::TEST_ENDPOINT.into(),
+            format!("{}/v1/aero", r.emulate.base),
+        );
+        // Switch off: the endpoint is not read.
+        assert!(!r.turn_in(&env, "pm/openai/gpt-6-sol", "low").is_empty());
+        env.aero = Some(aero::Launcher(Arc::new(|_, _, _| Err("unused".into()))));
+        assert!(
+            r.turn_in(&env, "pm/openai/gpt-6-sol", "low").is_empty(),
+            "the turn went to the test endpoint, not the network"
+        );
+    }
+
+    /// Claude Code on an Anthropic key: the key's model list offers each
+    /// Claude model the levels it takes, and none for one the table doesn't
+    /// know.
+    #[test]
+    fn the_anthropic_key_lists_claude_code_models_with_each_models_levels() {
+        let Some(r) = routes(hello()) else { return };
+        let models = keys::anthropic_models(&*r.wire, "sk-ant-fake-abcdef12").unwrap();
+        let levels = |id: &str| {
+            let model = models.iter().find(|m| m.id == id).unwrap();
+            (model.efforts.join(" "), model.default_effort.clone())
+        };
+        let high = Some("high".to_owned());
+        assert_eq!(
+            levels("claude-opus-5-5"),
+            ("low medium high xhigh max".into(), high.clone())
+        );
+        assert_eq!(
+            levels("claude-opus-4-6"),
+            ("low medium high max".into(), high.clone())
+        );
+        assert_eq!(
+            levels("claude-haiku-4-5-20251001"),
+            ("low medium high".into(), high)
+        );
+        assert_eq!(levels("claude-3-7-sonnet-20250219"), (String::new(), None));
+    }
 }

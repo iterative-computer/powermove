@@ -103,9 +103,13 @@ pub fn efforts(model: &str) -> Vec<String> {
 /// The effort sent for `requested` (v1's `modelEffort`): the nearest supported
 /// one at or below it, or none when the model takes none.
 pub fn effort(model: &str, requested: Option<&str>) -> Option<String> {
+    nearest(&efforts(model), requested)
+}
+/// The level of `supported` sent for `requested`: itself, else the nearest
+/// one below it, else the lowest; none when there are no levels.
+pub fn nearest(supported: &[String], requested: Option<&str>) -> Option<String> {
     const ALL: [&str; 7] = ["none", "low", "medium", "high", "xhigh", "max", "ultra"];
     let requested = requested?;
-    let supported = efforts(model);
     if supported.is_empty() {
         return None;
     }

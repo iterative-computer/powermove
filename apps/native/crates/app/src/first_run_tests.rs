@@ -1612,3 +1612,16 @@ fn chosen_speech_models_download_in_the_order_asked() {
     };
     assert_eq!(choices["speechModels"], json!([ids[6], ids[0]]));
 }
+/// Aero runs on the Powermove account: its Connect on the agent step goes
+/// back to the account step's sign-in, never to a ChatGPT sign-in.
+#[test]
+fn aeros_connect_on_the_agent_step_is_the_powermove_account_sign_in() {
+    let (_temp, mut flow) = on_account();
+    flow.action("not_now");
+    titled(&flow.frame(), "Choose your agent");
+    assert!(
+        flow.action("pill:aero").is_empty(),
+        "no agent sign-in starts"
+    );
+    titled(&flow.frame(), "Create your account");
+}

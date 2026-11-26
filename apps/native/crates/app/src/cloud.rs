@@ -447,6 +447,22 @@ impl Http {
     pub fn signed_in(&self) -> bool {
         stored_token(self.vault.as_ref(), self.origin).is_some()
     }
+    /// The session Aero runs on, with the origin it belongs to. A
+    /// development review account has no inference origin ("review").
+    fn session(&self) -> Option<pm_agents::inference::Session> {
+        let token = stored_token(self.vault.as_ref(), self.origin)?;
+        #[cfg(debug_assertions)]
+        if review_cloud() {
+            return Some(pm_agents::inference::Session {
+                origin: "review".into(),
+                token: token.expose().to_owned(),
+            });
+        }
+        Some(pm_agents::inference::Session {
+            origin: self.origin.into(),
+            token: token.expose().to_owned(),
+        })
+    }
     /// `DELETE /v1/me`, then the session is forgotten.
     pub fn delete_account(&mut self) -> pm_services::Result<()> {
         self.call("DELETE", "/v1/me", None, true)?;
@@ -613,7 +629,7 @@ pub fn init(profile: PathBuf, cx: &mut App) {
         if review_cloud() {
             return Ok(Http::new(
                 origin,
-                Box::new(review::Memory::default()),
+                Box::new(review::Memory::seeded(origin)),
                 worker_profile,
             ));
         }
@@ -679,6 +695,38 @@ async fn wait<T>(pending: pm_services::worker::Pending<T>, cx: &mut AsyncApp) ->
             .timer(std::time::Duration::from_millis(16))
             .await;
     }
+}
+/// The Powermove account as Aero reads it: the session, asked of the
+/// account's own worker each time (never cached), so a sign-out or another
+/// account is seen by the next request. Called on workers, never on main.
+#[derive(Clone)]
+pub struct AeroAccount(ServiceWorker<Http>);
+impl std::fmt::Debug for AeroAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AeroAccount")
+    }
+}
+impl pm_agents::inference::PowermoveAccount for AeroAccount {
+    fn session(&self) -> Option<pm_agents::inference::Session> {
+        let pending = self.0.submit(|host| Ok(host.session())).ok()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match pending.try_take() {
+                Ok(Some(session)) => return session,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+/// The account Aero runs on, once the account service has started.
+pub fn aero_account(
+    cx: &App,
+) -> Option<std::sync::Arc<dyn pm_agents::inference::PowermoveAccount>> {
+    let cloud = cx.try_global::<Cloud>()?;
+    Some(std::sync::Arc::new(AeroAccount(cloud.worker.clone())))
 }
 /// Settings › Account reads this through the built-in facts.
 pub fn fact(cx: &App) -> Value {
@@ -783,7 +831,8 @@ pub(crate) fn code_error(code: &str, verifying: bool) -> String {
     copy::auth_error(error, "", "")
 }
 /// Development builds: the account step against a review backend
-/// (`PM_NATIVE_REVIEW_CLOUD=1`): no network, no Keychain.
+/// (`PM_NATIVE_REVIEW_CLOUD=1`): no network, no Keychain; signed in from the
+/// start with `PM_NATIVE_REVIEW_SIGNED_IN=<email>`.
 #[cfg(debug_assertions)]
 fn review_cloud() -> bool {
     std::env::var_os("PM_NATIVE_REVIEW_CLOUD").is_some()
@@ -798,6 +847,21 @@ mod review {
     static EMAIL: Mutex<String> = Mutex::new(String::new());
     #[derive(Default)]
     pub struct Memory(Option<Vec<u8>>);
+    impl Memory {
+        /// Signed in from the start as `PM_NATIVE_REVIEW_SIGNED_IN` (an
+        /// email), when the review launch names one; else signed out.
+        pub fn seeded(origin: &str) -> Self {
+            let Ok(email) = std::env::var("PM_NATIVE_REVIEW_SIGNED_IN") else {
+                return Self::default();
+            };
+            *EMAIL.lock().unwrap() = email;
+            Self(Some(
+                json!({"origin":origin,"token":"review-session","expiresAt":"2099-01-01T00:00:00.000Z"})
+                    .to_string()
+                    .into_bytes(),
+            ))
+        }
+    }
     impl Vault for Memory {
         fn read(&self) -> Result<Option<Vec<u8>>, String> {
             Ok(self.0.clone())
