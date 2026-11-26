@@ -308,12 +308,23 @@ impl<'d> Comp<'d> {
     /// `indexOfLayer(comp, layer)`: the layer's position in `comp.layers`, by
     /// identity, or 0.
     pub fn index_of_layer(&self, layer: Option<&Node>) -> f64 {
-        let Some(layer) = layer else { return 0.0 };
-        self.layers()
-            .iter()
-            .position(|l| std::ptr::eq(l, layer))
+        layer
+            .and_then(|layer| self.layer_position(layer))
             .map_or(0.0, |i| i as f64)
     }
+
+    /// A layer's position in this immutable layer array, by identity.
+    /// Detached nodes and layers from another composition return `None`.
+    pub fn layer_position(&self, layer: &Node) -> Option<usize> {
+        layer_position(self.layers(), layer)
+    }
+}
+
+pub(crate) fn layer_position(layers: &[Node], layer: &Node) -> Option<usize> {
+    let start = layers.as_ptr() as usize;
+    let offset = (std::ptr::from_ref(layer) as usize).checked_sub(start)?;
+    let size = std::mem::size_of::<Node>();
+    (offset < std::mem::size_of_val(layers) && offset.is_multiple_of(size)).then(|| offset / size)
 }
 
 trait RateSource {

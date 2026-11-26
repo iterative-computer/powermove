@@ -441,10 +441,9 @@ pub(crate) fn order_pass<'d>(
     if let Ok(sc) = &scene {
         ctx.layers = depth_sets(scope, &ordered, sc, time)?;
     }
-    let indices = crate::reuse::layer_indices(scope.layers());
     ctx.ordered = ordered
         .iter()
-        .filter_map(|l| indices.get(&crate::reuse::address(l)).copied())
+        .filter_map(|l| scope.comp.layer_position(l))
         .collect();
     ctx.root_comp = root_comp;
     ctx.scene = Some(scene);

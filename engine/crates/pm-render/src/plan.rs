@@ -409,14 +409,22 @@ impl Build<'_> {
         }
         scaled_world(scope, layer, time, scale, self.origin)
     }
+    pub(crate) fn has_studio(&self) -> bool {
+        self.options3d.studio.is_some()
+    }
+
     pub(crate) fn can_reuse_draws(&self) -> bool {
         !self.compat_probe_only
             && self.material.is_none()
             && self.source_raster.is_none()
-            && self.options3d.studio.is_none()
-            && self.compat.is_none_or(|raster| {
-                !raster.producing(crate::compat::CompatSource::RasterOverride)
-            })
+            && self
+                .compat
+                .is_none_or(|raster| !raster.producing(crate::compat::CompatSource::RasterOverride))
+    }
+
+    pub(crate) fn interactive_rasters(&self) -> bool {
+        !self.final_output
+            && (self.read_ahead || self.sampling == crate::sampling::Sampling::Playback)
     }
 
     pub(crate) fn camera_preview(&self) -> bool {
@@ -755,8 +763,14 @@ impl TextDrawRun {
                         let mut quad =
                             text_texture(crate::text::TextContext::local_quad(plan, local.raster));
                         quad.offset_anchor(local.offset);
-                        if clip.is_some_and(|rect| !clip_local_raster(&mut quad, local.world, rect))
-                        {
+                        if clip.is_some_and(|rect| {
+                            !clip_local_raster(
+                                &mut quad,
+                                local.world,
+                                rect,
+                                b.interactive_rasters(),
+                            )
+                        }) {
                             continue;
                         }
                         let Quad::Texture {
@@ -942,6 +956,11 @@ pub(crate) fn comp_pass<'d>(
     }
     let parent_id = group_parent.map(|g| node::get(g, b"id").to_js());
     let facts = b.pass_facts(scope.comp, &all);
+    let omit_empty_groups = b.interactive_rasters()
+        && b.material.is_none()
+        && b.matte_depth == 0
+        && b.blur.is_none()
+        && !b.keep_empty_groups;
     // `compositingPass`: boundary groups stay one entry.
     let pass = {
         // `PM.transitionDef`: a host knows its registered transitions.
@@ -951,6 +970,15 @@ pub(crate) fn comp_pass<'d>(
         // applies (`opt.mblur !== false`).
         let blur_on = b.blur.is_some();
         let mut boundary = |s: &mut Scope<'_, 'd>, l: &'d Node| {
+            // In a 2D pass a non-drawing group can stand in for its whole
+            // subtree. In 3D those children can separate ordered runs.
+            if omit_empty_groups
+                && !facts.has_3d
+                && (facts.group_outside(l, time)
+                    || (statically_disabled(l) && facts.has_group_span(l)))
+            {
+                return Ok(true);
+            }
             s.group_creates_compositing_boundary(l, time, blur_on, &known)
         };
         let mut compute = |s: &mut Scope<'_, 'd>| {
@@ -1064,6 +1092,12 @@ pub(crate) fn comp_pass<'d>(
             continue;
         }
         let ty = js::layer_type(layer);
+        if omit_empty_groups
+            && ty == "group"
+            && (facts.group_outside(layer, time) || statically_disabled(layer))
+        {
+            continue;
+        }
         let has = |key| node::array(node::member(Some(layer), key)).is_some_and(|v| !v.is_empty());
         let candidate = batch_text
             && ty == "text"
@@ -1122,6 +1156,13 @@ pub(crate) fn comp_pass<'d>(
     text_run.flush(b, &mut plan.draws);
     b.pass3d.pop();
     plan
+}
+
+fn statically_disabled(layer: &Node) -> bool {
+    matches!(
+        layer.get("on").map(Node::kind),
+        Some(pm_model::NodeKind::Bool(false))
+    )
 }
 
 /// `groupContainsSolo(group, layers, ancestors)`.
@@ -1806,6 +1847,7 @@ fn layer_draw_with_padding<'d>(
             world,
             kurbo::Rect::new(0., 0., width.into(), height.into())
                 .inflate(margin.into(), margin.into()),
+            b.interactive_rasters(),
         )
     {
         return Ok(None);
@@ -2066,7 +2108,12 @@ fn matte_pass<'d>(
     plan
 }
 
-fn clip_local_raster(quad: &mut Quad, world: Mat2d, viewport: kurbo::Rect) -> bool {
+fn clip_local_raster(
+    quad: &mut Quad,
+    world: Mat2d,
+    viewport: kurbo::Rect,
+    keep_small_raster: bool,
+) -> bool {
     if let Quad::Texture {
         source,
         w,
@@ -2099,6 +2146,9 @@ fn clip_local_raster(quad: &mut Quad, world: Mat2d, viewport: kurbo::Rect) -> bo
             let Some(rect) = crate::raster_roi::visible(old, map, viewport) else {
                 return false;
             };
+            if keep_small_raster && old.area() <= 256 * 1024 {
+                return true;
+            }
             *ax -= (rect.x - old.x) as f64 * sx;
             *ay -= (rect.y - old.y) as f64 * sy;
             *w = rect.width as f64 * sx;
@@ -2294,11 +2344,8 @@ fn native_content_quad<'d>(
                 let mut plan = |scope: &mut Scope<'_, 'd>, world: &Mat2d, target| {
                     crate::vector::plan_shape(scope, layer, &d, time, world, target)
                 };
-                let playback = (b.read_ahead
-                    || b.sampling == crate::sampling::Sampling::Playback)
-                    && !b.final_output
-                    && b.source_raster.is_none()
-                    && b.material.is_none();
+                let playback =
+                    b.interactive_rasters() && b.source_raster.is_none() && b.material.is_none();
                 return local_level2(
                     scope,
                     layer,
@@ -2312,8 +2359,8 @@ fn native_content_quad<'d>(
                 );
             }
             let world = vector_world(scope, b, layer, time, scale)?;
-            if b.read_ahead
-                && !b.final_output
+            let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+            if b.interactive_rasters()
                 && b.source_raster.is_none()
                 && b.material.is_none()
                 && b.matte_depth == 0
@@ -2324,11 +2371,9 @@ fn native_content_quad<'d>(
                 && world[0] > 0.0
                 && world[3] > 0.0
                 && !crate::raster_roi::at_rest(&world)
-                && let Some(quad) = playback_shape(scope, layer, &d, time, &world)?
             {
-                return Ok(Some(quad));
+                return playback_shape(scope, layer, &d, time, &world, target);
             }
-            let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
             let quad = crate::vector::plan_shape(scope, layer, &d, time, &world, target)?;
             Ok(quad.map(device_quad))
         }
@@ -3466,46 +3511,72 @@ fn vector_world<'d>(
     Ok(mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]))
 }
 
-/// Raster small 2D shapes on a stable local grid during playback. The
-/// world transform moves the quad each frame, while its coverage can be
-/// reused until the geometry or the raster density changes.
+/// A small shape can keep its layer-space raster while the transform
+/// changes. Large shapes still paint directly into the visible target.
 fn playback_shape<'d>(
     scope: &mut Scope<'_, 'd>,
     layer: &'d Node,
     content: &pm_eval::Content,
     time: f64,
     world: &Mat2d,
+    target: pm_vector::render::scene::PixelRect,
 ) -> JsResult<Option<Quad>> {
-    let density = crate::text::continuous_raster_scale(world);
-    let local = [density, 0., 0., density, 0., 0.];
-    let bounds = crate::space25d::local::unbounded();
-    let Some(crate::vector::VectorQuad::Device { source, rect }) =
-        crate::vector::plan_shape(scope, layer, content, time, &local, bounds)?
+    use crate::vector::{VectorQuad, VectorSource};
+    let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let clip = crate::space25d::local::unbounded();
+    let Some(mut scene) = crate::vector::shape_coverage(scope, layer, content, time, &identity)?
     else {
         return Ok(None);
     };
-    // Large shapes keep the device path, where the viewport can bound the
-    // coverage before it is rasterized. A shape touching the local limit
-    // may have been clipped by the planning bounds.
-    if rect.area() > 256 * 1024
-        || rect.width > 4096
-        || rect.height > 4096
-        || rect.x <= bounds.x
-        || rect.y <= bounds.y
-        || i64::from(rect.x) + i64::from(rect.width)
-            >= i64::from(bounds.x) + i64::from(bounds.width)
-        || i64::from(rect.y) + i64::from(rect.height)
-            >= i64::from(bounds.y) + i64::from(bounds.height)
-    {
-        return Ok(None);
+    let density = crate::text::playback_raster_scale(world);
+    if let Some(rect) = scene.pixel_bounds(clip).filter(|rect| {
+        let w = f64::from(rect.width) * density + 2.0;
+        let h = f64::from(rect.height) * density + 2.0;
+        rect.x > clip.x
+            && rect.y > clip.y
+            && i64::from(rect.x) + i64::from(rect.width) < i64::from(clip.x) + i64::from(clip.width)
+            && i64::from(rect.y) + i64::from(rect.height)
+                < i64::from(clip.y) + i64::from(clip.height)
+            && w * h <= 256.0 * 1024.0
+            && w <= 4096.0
+            && h <= 4096.0
+    }) {
+        let affine = kurbo::Affine::new(*world);
+        let bounds = affine.transform_rect_bbox(kurbo::Rect::new(
+            f64::from(rect.x),
+            f64::from(rect.y),
+            f64::from(rect.x) + f64::from(rect.width),
+            f64::from(rect.y) + f64::from(rect.height),
+        ));
+        if bounds.x1 < -1.0
+            || bounds.y1 < -1.0
+            || bounds.x0 > f64::from(target.width) + 1.0
+            || bounds.y0 > f64::from(target.height) + 1.0
+        {
+            return Ok(None);
+        }
+        let affine = kurbo::Affine::scale(density);
+        for item in &mut scene.items {
+            item.transform = affine * item.transform;
+        }
+        return Ok(scene.pixel_bounds(clip).map(|rect| Quad::Texture {
+            source: Source::Vector(Arc::new(VectorSource::Scene { scene, rect })),
+            w: f64::from(rect.width) / density,
+            h: f64::from(rect.height) / density,
+            ax: -f64::from(rect.x) / density,
+            ay: -f64::from(rect.y) / density,
+            uv: [0., 0., 1., 1.],
+        }));
     }
-    Ok(Some(Quad::Texture {
-        source: Source::Vector(Arc::new(source)),
-        w: f64::from(rect.width) / density,
-        h: f64::from(rect.height) / density,
-        ax: -f64::from(rect.x) / density,
-        ay: -f64::from(rect.y) / density,
-        uv: [0., 0., 1., 1.],
+    let affine = kurbo::Affine::new(*world);
+    for item in &mut scene.items {
+        item.transform = affine * item.transform;
+    }
+    Ok(scene.pixel_bounds(target).map(|rect| {
+        device_quad(VectorQuad::Device {
+            source: VectorSource::Scene { scene, rect },
+            rect,
+        })
     }))
 }
 
@@ -3560,14 +3631,21 @@ fn local_level2<'d>(
     } = first
     {
         // During live playback, rasterize 2.5D vector scenes once in layer
-        // space at a quarter-octave stepped density and project the cached
+        // space at a stepped density and project the cached
         // GPU texture through the 2.5D plane, avoiding per-frame CPU curve
         // flattening (`project_scene`) and 100% vector cache misses while a
         // 3D group animates. Paused/settled/export frames keep exact
         // output-space `project_scene` coverage.
+        let plane = crate::space25d::local::content_plane(scope, layer, time, scale)?
+            .map(|p| plane_at_origin(p, origin));
         if playback {
-            let sdx = crate::space25d::local::stepped(dx, bounds[2]);
-            let sdy = crate::space25d::local::stepped(dy, bounds[3]);
+            if plane.is_some_and(|p| {
+                crate::space25d::local::outside_target(&p, bounds, target.width, target.height)
+            }) {
+                return Ok(None);
+            }
+            let sdx = crate::space25d::local::playback_density_capped(dx, bounds[2]);
+            let sdy = crate::space25d::local::playback_density_capped(dy, bounds[3]);
             let scale_aff = pm_vector::kurbo::Affine::scale_non_uniform(sdx, sdy);
             let mut local_scene = scene.clone();
             for item in &mut local_scene.items {
@@ -3591,9 +3669,7 @@ fn local_level2<'d>(
                 }));
             }
         }
-        if let Some(plane) = crate::space25d::local::content_plane(scope, layer, time, scale)?
-            .map(|p| plane_at_origin(p, origin))
-        {
+        if let Some(plane) = plane {
             let projected = crate::space25d::local::project_scene(&scene, &plane, dx.max(dy));
             return Ok(projected.pixel_bounds(target).map(|rect| {
                 device_quad(crate::vector::VectorQuad::Device {
@@ -3657,12 +3733,13 @@ fn text_quad<'d>(
     time: f64,
     target: (u32, u32),
     scale: (f64, f64),
-    measured: Option<crate::text::Level1Measured>,
+    mut measured: Option<crate::text::Level1Measured>,
     mut deferred: Option<DeferredText<'_>>,
 ) -> JsResult<Option<Quad>> {
     let comp_id = scope.comp.id().to_string_lossy();
     let world = b.world(scope, layer, time, scale)?;
     let camera_preview = b.camera_preview() && scope.view_camera.is_some();
+    let interactive = b.interactive_rasters() && b.source_raster.is_none() && b.material.is_none();
     let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
         b.unsupported.push(Unsupported::layer(
             &comp_id,
@@ -3679,7 +3756,7 @@ fn text_quad<'d>(
         defer.paint.flush(text);
     }
     if (level2 || camera_preview) && scope.is_3d_layer(layer)? {
-        return local_text(scope, b, layer, ty, time, scale);
+        return local_text(scope, b, layer, ty, time, target, scale);
     }
     if level2 {
         let offset = scope.size_anchor_offset(layer, time)?;
@@ -3705,10 +3782,11 @@ fn text_quad<'d>(
     }
     // Read-ahead identifies transport playback independently of sampling.
     // Reuse the local raster for plain 2D text during viewer playback.
-    let reuse_local =
-        b.read_ahead && !b.final_output && ty == "text" && crate::text::plain_level1(layer);
+    let reuse_local = interactive && ty == "text" && crate::text::plain_level1(layer);
     let plane = scope.is_3d_layer(layer)?;
-    let device_world = if plane {
+    let device_world = if reuse_local {
+        None
+    } else if plane {
         crate::space25d::local::content_plane(scope, layer, time, scale)?
             .map(|p| plane_at_origin(p, b.origin))
             .filter(|p| {
@@ -3720,7 +3798,7 @@ fn text_quad<'d>(
             })
             .filter(|m| m.iter().all(|v| v.is_finite()))
     } else {
-        (!reuse_local).then_some(world)
+        Some(world)
     };
     if let Some(m) = device_world.filter(|m| !crate::raster_roi::at_rest(m)) {
         let m = kurbo::Affine::new(m);
@@ -3742,7 +3820,30 @@ fn text_quad<'d>(
             }
         }));
     }
-    let density = crate::text::continuous_raster_scale(&world);
+    let density = if reuse_local {
+        if plane {
+            // Only paint the layer-local raster when some part of it can
+            // reach the viewport through the animated group plane.
+            if let Some(projected) =
+                crate::space25d::local::content_plane(scope, layer, time, scale)?
+            {
+                let (raster, local) = text.level1_raster(scope, layer, time)?;
+                let bounds = [-raster.anchor_x, -raster.anchor_y, raster.w, raster.h];
+                if crate::space25d::local::outside_target(
+                    &plane_at_origin(projected, b.origin),
+                    bounds,
+                    target.0,
+                    target.1,
+                ) {
+                    return Ok(None);
+                }
+                measured = local.or(measured);
+            }
+        }
+        crate::text::playback_raster_scale(&world)
+    } else {
+        crate::text::continuous_raster_scale(&world)
+    };
     let plain = !plane && crate::text::plain_level1(layer);
     if !plain && let Some(defer) = deferred.take() {
         defer.paint.flush(text);
@@ -3799,11 +3900,13 @@ fn local_text<'d>(
     layer: &'d Node,
     ty: &str,
     time: f64,
+    target: (u32, u32),
     scale: (f64, f64),
 ) -> JsResult<Option<Quad>> {
     const MARGIN: f64 = 65536.0;
     let comp_id = scope.comp.id().to_string_lossy();
     let camera_preview = b.camera_preview() && scope.view_camera.is_some();
+    let interactive = b.interactive_rasters() && b.material.is_none() && b.source_raster.is_none();
     let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
         return Ok(None);
     };
@@ -3831,15 +3934,28 @@ fn local_text<'d>(
     };
     let [x0, y0, x1, y1] = first.crop.map(f64::from);
     let bounds = [x0 - MARGIN, y0 - MARGIN, x1 - x0, y1 - y0];
+    if interactive
+        && let Some(plane) = crate::space25d::local::content_plane(scope, layer, time, scale)?
+        && crate::space25d::local::outside_target(
+            &plane_at_origin(plane, b.origin),
+            bounds,
+            target.0,
+            target.1,
+        )
+    {
+        return Ok(None);
+    }
     let (dx, dy) = if camera_preview {
         scale
     } else {
         crate::space25d::local::density(scope, layer, time, scale, bounds)?
     };
-    let (dx, dy) = (
-        crate::space25d::local::stepped(dx, bounds[2]),
-        crate::space25d::local::stepped(dy, bounds[3]),
-    );
+    let step = if interactive {
+        crate::space25d::local::playback_density_capped
+    } else {
+        crate::space25d::local::stepped
+    };
+    let (dx, dy) = (step(dx, bounds[2]), step(dy, bounds[3]));
     // Layer space at density, shifted so the content starts near the
     // canvas origin.
     let (ox, oy) = (

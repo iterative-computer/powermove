@@ -537,6 +537,9 @@ impl<'d> Scope<'_, 'd> {
         if flag(layer, "threeD") {
             return Ok(true);
         }
+        if !node::truthy(layer.get("group")) {
+            return Ok(false);
+        }
         Ok(self
             .group_ancestors(layer)?
             .iter()

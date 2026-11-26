@@ -77,6 +77,55 @@ pub fn stepped(density: f64, size: f64) -> f64 {
     step.min(MAX_RASTER / size.max(1.0)).max(1e-6)
 }
 
+/// Half-octave buckets keep a preview raster sharp over a range of scales.
+pub(crate) fn playback_density(density: f64) -> f64 {
+    let step = 2f64.powf(((density.log2() * 2.0) - 1e-9).ceil() / 2.0);
+    if step.is_finite() && step > 0.0 {
+        step
+    } else {
+        density
+    }
+}
+
+pub(crate) fn playback_density_capped(density: f64, size: f64) -> f64 {
+    playback_density(density)
+        .min(MAX_RASTER / size.max(1.0))
+        .max(1e-6)
+}
+
+/// A content box is outside a target when all four corners are beyond
+/// the same edge. Keep boxes near the camera plane, where projection can
+/// extend past the projected corners.
+pub(crate) fn outside_target(
+    plane: &super::Plane,
+    bounds: [f64; 4],
+    width: u32,
+    height: u32,
+) -> bool {
+    let [x, y, w, h] = bounds;
+    let mut projected = [[0.0; 2]; 4];
+    for (out, (x, y)) in projected
+        .iter_mut()
+        .zip([(x, y), (x + w, y), (x, y + h), (x + w, y + h)])
+    {
+        let z = plane[2] * x + plane[5] * y + plane[8];
+        if !z.is_finite() || z <= 1e-6 {
+            return false;
+        }
+        *out = [
+            (plane[0] * x + plane[3] * y + plane[6]) / z,
+            (plane[1] * x + plane[4] * y + plane[7]) / z,
+        ];
+        if !out.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+    }
+    projected.iter().all(|p| p[0] < -1.0)
+        || projected.iter().all(|p| p[0] > f64::from(width) + 1.0)
+        || projected.iter().all(|p| p[1] < -1.0)
+        || projected.iter().all(|p| p[1] > f64::from(height) + 1.0)
+}
+
 /// The plane of a layer's content coordinates (before the size anchor
 /// offset) in target pixels, or `None` for a flat layer.
 pub fn content_plane<'d>(

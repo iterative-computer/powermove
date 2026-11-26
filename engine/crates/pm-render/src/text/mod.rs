@@ -591,6 +591,15 @@ pub(crate) struct TextQuad {
 /// `continuousRasterScale(matrix)` (`legacy/gl/compositor.ts`): the layer's
 /// largest singular value, in quarter steps, within 0.25 to 32.
 pub fn continuous_raster_scale(m: &Mat2d) -> f64 {
+    let bounded = bounded_raster_scale(m);
+    libm::ceil(bounded * 4.0 - 1e-9) / 4.0
+}
+
+pub(crate) fn playback_raster_scale(m: &Mat2d) -> f64 {
+    crate::space25d::local::playback_density(bounded_raster_scale(m))
+}
+
+fn bounded_raster_scale(m: &Mat2d) -> f64 {
     let or0 = |v: f64| if v.is_nan() { 0.0 } else { v };
     let (m0, m1, m2, m3) = (or0(m[0]), or0(m[1]), or0(m[2]), or0(m[3]));
     let aa = m0 * m0 + m1 * m1;
@@ -599,8 +608,7 @@ pub fn continuous_raster_scale(m: &Mat2d) -> f64 {
     let disc = libm::sqrt(js_max(0.0, (aa - cc) * (aa - cc) + 4.0 * bb * bb));
     let largest = libm::sqrt(js_max(0.0, (aa + cc + disc) / 2.0));
     let requested = largest * 1.0;
-    let bounded = js_max(0.25, js_min(32.0, requested));
-    libm::ceil(bounded * 4.0 - 1e-9) / 4.0
+    js_max(0.25, js_min(32.0, requested))
 }
 
 fn js_max(a: f64, b: f64) -> f64 {

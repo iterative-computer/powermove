@@ -117,6 +117,8 @@ fn scene(c: &Value) -> Option<((u32, u32), CoverageScene)> {
                 repeat_x: n("repeatX"),
                 repeat_y: n("repeatY"),
                 repeat_rotation: n("repeatRotation"),
+                fill_group: None,
+                fill_rule: None,
                 vertices: p["vertices"]
                     .as_array()
                     .unwrap()

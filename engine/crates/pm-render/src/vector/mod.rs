@@ -237,25 +237,35 @@ pub fn plan_shape<'d>(
     world: &Mat2d,
     target: PixelRect,
 ) -> JsResult<Option<VectorQuad>> {
-    let has_paths = pm_eval::node::array(pm_eval::node::member(
-        pm_eval::node::member(Some(layer), "d"),
-        "paths",
-    ))
-    .is_some_and(|p| !p.is_empty());
-    let scene = if has_paths {
-        let (colors, layer_paths) = path_colors_and_layer(scope, layer, time)?;
-        paths_scene(&layer_paths, &colors, world)
-    } else {
-        let (content, colors) = shape_content(d);
-        match shape_scene(&content, &colors, world) {
-            Some(s) => s,
-            None => return Ok(None),
-        }
-    };
-    Ok(scene.pixel_bounds(target).map(|rect| VectorQuad::Device {
-        source: VectorSource::Scene { scene, rect },
-        rect,
-    }))
+    Ok(
+        shape_coverage(scope, layer, d, time, world)?.and_then(|scene| {
+            scene.pixel_bounds(target).map(|rect| VectorQuad::Device {
+                source: VectorSource::Scene { scene, rect },
+                rect,
+            })
+        }),
+    )
+}
+
+pub(crate) fn shape_coverage<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    d: &pm_eval::Content,
+    time: f64,
+    world: &Mat2d,
+) -> JsResult<Option<CoverageScene>> {
+    let has_paths = node::array(node::member(node::member(Some(layer), "d"), "paths"))
+        .is_some_and(|p| !p.is_empty());
+    if has_paths {
+        let geometry = scope.shared_path_geometry(layer, time)?;
+        return Ok(Some(paths_scene(
+            &geometry.2,
+            &extract_path_colors(&geometry.0),
+            world,
+        )));
+    }
+    let (content, colors) = shape_content(d);
+    Ok(shape_scene(&content, &colors, world))
 }
 
 /// A shape's fill and stroke: shape space (origin at the box's top-left
@@ -332,18 +342,6 @@ fn extract_path_colors(evaluated: &[pm_eval::bounds::EvaluatedPath]) -> Vec<Path
             }
         })
         .collect()
-}
-
-/// Colors and path geometry for rendering a shape layer's editable paths,
-/// without rebuilding the unused `Vec<PathNode>`.
-fn path_colors_and_layer<'d>(
-    scope: &mut Scope<'_, 'd>,
-    layer: &'d Node,
-    time: f64,
-) -> JsResult<(Vec<PathColors>, PathLayer)> {
-    let (evaluated, _, layer_paths) = scope.path_geometry(layer, time)?;
-    let colors = extract_path_colors(&evaluated);
-    Ok((colors, layer_paths))
 }
 
 /// A layer's editable paths: nodes, colors, and geometry.

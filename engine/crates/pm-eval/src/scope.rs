@@ -47,6 +47,7 @@ pub struct Scope<'a, 'd> {
 /// names one node and its content cannot change while the memo exists.
 #[derive(Default)]
 pub(crate) struct LocalMemo<'d> {
+    index: Option<Arc<LayerIndex>>,
     local: std::collections::HashMap<(usize, u64), crate::transform::Mat2d, BuildAddressHasher>,
     ancestors: std::collections::HashMap<usize, Vec<&'d Node>, BuildAddressHasher>,
     /// `local3D` and `parent3D` (its own parent lookup), by node and time:
@@ -152,7 +153,13 @@ impl<'a, 'd> Scope<'a, 'd> {
     }
 
     pub(crate) fn index(&mut self) -> Arc<LayerIndex> {
-        self.ev.layer_index(self.comp)
+        if let Some(memo) = &mut self.local_memo {
+            memo.index
+                .get_or_insert_with(|| self.ev.layer_index(self.comp))
+                .clone()
+        } else {
+            self.ev.layer_index(self.comp)
+        }
     }
 
     /// The composition's layer index (ids to positions, duplicated ids),

@@ -411,15 +411,23 @@ impl<'d> Scope<'_, 'd> {
     /// depends on the time (`crate::channel_memo`), and within one frame's
     /// memoized scope for animated paths.
     pub fn path_geometry(&mut self, layer: &'d Node, time: f64) -> JsResult<PathGeometry> {
+        Ok((*self.shared_path_geometry(layer, time)?).clone())
+    }
+
+    /// The evaluated path geometry shared by bounds and render planning.
+    pub fn shared_path_geometry(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+    ) -> JsResult<std::sync::Arc<PathGeometry>> {
         if let Some(kept) = self.ev.kept_path_geometry(self.comp, layer) {
-            return Ok((*kept).clone());
+            return Ok(kept);
         }
-        if let Some(kept) = self
-            .local_memo
-            .as_ref()
-            .and_then(|m| m.path_geom.get(&(crate::scope::address(layer), time.to_bits())))
-        {
-            return Ok((**kept).clone());
+        if let Some(kept) = self.local_memo.as_ref().and_then(|m| {
+            m.path_geom
+                .get(&(crate::scope::address(layer), time.to_bits()))
+        }) {
+            return Ok(kept.clone());
         }
         let mut fixed = true;
         let evaluated = self.layer_paths_noting(layer, time, &mut fixed)?;
@@ -448,18 +456,19 @@ impl<'d> Scope<'_, 'd> {
         } else {
             pm_vector::path::FillRule::NonZero
         };
-        let geometry = (
+        let geometry = std::sync::Arc::new((
             evaluated,
             matrices,
             PathLayer::new_with_options(&nodes, compound, fill_rule),
-        );
+        ));
         if fixed {
             self.ev
-                .keep_path_geometry(self.comp, layer, std::sync::Arc::new(geometry.clone()));
-        } else if let Some(memo) = self.local_memo.as_mut() {
+                .keep_path_geometry(self.comp, layer, geometry.clone());
+        }
+        if let Some(memo) = self.local_memo.as_mut() {
             memo.path_geom.insert(
                 (crate::scope::address(layer), time.to_bits()),
-                std::sync::Arc::new(geometry.clone()),
+                geometry.clone(),
             );
         }
         Ok(geometry)
@@ -625,7 +634,8 @@ impl<'d> Scope<'_, 'd> {
             return Ok(None);
         }
         if ty == "shape" && has_paths(layer)? {
-            let (_, _, paths) = self.path_geometry(layer, time)?;
+            let geometry = self.shared_path_geometry(layer, time)?;
+            let (_, _, paths) = &*geometry;
             let b = paths.bounds;
             return Ok(Some(Bounds {
                 x0: b.x0,

@@ -40,7 +40,7 @@
 //! `layers` array, by address) are kept, so nodes made during a plan (which
 //! can reuse a freed address) never reach the memo.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use pm_model::Node;
@@ -85,9 +85,12 @@ pub(crate) struct ChannelMemo {
     /// `PM.localMatrix(L, T)` by layer address when every channel it reads
     /// is time-independent (`None`: some channel is not; it is computed).
     locals: HashMap<usize, Option<crate::transform::Mat2d>, crate::scope::BuildAddressHasher>,
-    /// `pathGeometry(L, T)` by layer address when every path channel it
-    /// reads is time-independent: the same at every time then.
-    paths: HashMap<usize, Arc<crate::bounds::PathGeometry>, crate::scope::BuildAddressHasher>,
+    /// Static path geometry also survives copy-on-write transform edits:
+    /// its only input is the immutable shape content node.
+    path_document: Option<(usize, u64)>,
+    paths: HashMap<(usize, u64), StaticPath>,
+    path_order: VecDeque<(usize, u64)>,
+    path_vertices_kept: usize,
     /// Static evaluated vertices of an editable path, by `(layer, path)`
     /// node address, when no vertex channel of that path depends on time.
     path_vertices: HashMap<
@@ -100,6 +103,21 @@ pub(crate) struct ChannelMemo {
     prop_tracks: HashMap<(usize, usize), Found, crate::scope::BuildAddressHasher>,
     pub(crate) hits: u64,
     pub(crate) misses: u64,
+}
+
+struct StaticPath {
+    // Keep the object allocation alive for the lifetime of the address key.
+    _content: Node,
+    geometry: Arc<crate::bounds::PathGeometry>,
+    vertices: usize,
+}
+
+fn path_key(layer: &Node) -> Option<((usize, u64), &Node)> {
+    let content = layer.get("d")?;
+    let pm_model::NodeKind::Object(fields) = content.kind() else {
+        return None;
+    };
+    Some(((Arc::as_ptr(fields) as usize, content.rev()), content))
 }
 
 /// FNV-1a over the key's bytes.
@@ -115,13 +133,13 @@ impl ChannelMemo {
     /// Opens the memo for a document at `edition` (dropping entries found
     /// at another one).
     pub(crate) fn open(&mut self, doc: &pm_model::Document) {
+        self.path_document = doc.root().map(|root| (address(root), doc.revision()));
         let edition = doc.edition();
         if self.edition != Some(edition) {
             self.entries.clear();
             self.keys.clear();
             self.ancestors.clear();
             self.locals.clear();
-            self.paths.clear();
             self.path_vertices.clear();
             self.prop_tracks.clear();
             self.edition = Some(edition);
@@ -134,6 +152,7 @@ impl ChannelMemo {
 
     pub(crate) fn close(&mut self) {
         self.open = None;
+        self.path_document = None;
     }
 
     pub(crate) fn is_open(&self) -> bool {
@@ -147,6 +166,9 @@ impl ChannelMemo {
         self.ancestors.clear();
         self.locals.clear();
         self.paths.clear();
+        self.path_order.clear();
+        self.path_vertices_kept = 0;
+        self.path_document = None;
         self.path_vertices.clear();
         self.prop_tracks.clear();
         self.edition = None;
@@ -205,25 +227,67 @@ impl ChannelMemo {
         cx: &crate::Comp<'_>,
         layer: &Node,
     ) -> Option<Arc<crate::bounds::PathGeometry>> {
-        if !self.answers(cx) || !is_element(cx.layers(), layer) {
+        if !self.paths_open(cx, layer) {
             return None;
         }
-        let found = self.paths.get(&address(layer))?.clone();
-        self.hits += 1;
-        Some(found)
+        let (key, _) = path_key(layer)?;
+        let geometry = self.paths.get(&key)?.geometry.clone();
+        if self.answers(cx) {
+            self.hits += 1;
+        }
+        Some(geometry)
     }
 
-    /// Keeps `layer`'s time-independent path geometry.
+    /// Keeps `layer`'s time-independent path geometry, within a bounded
+    /// set of recently admitted content nodes.
     pub(crate) fn keep_path_geometry(
         &mut self,
         cx: &crate::Comp<'_>,
         layer: &Node,
         geometry: Arc<crate::bounds::PathGeometry>,
     ) {
-        if self.answers(cx) && is_element(cx.layers(), layer) {
-            self.misses += 1;
-            self.paths.insert(address(layer), geometry);
+        const MAX_SHAPES: usize = 256;
+        const MAX_VERTICES: usize = 128 * 1024;
+        if !self.paths_open(cx, layer) {
+            return;
         }
+        let Some((key, content)) = path_key(layer) else {
+            return;
+        };
+        let vertices = geometry
+            .0
+            .iter()
+            .map(|path| path.vertices.len())
+            .sum::<usize>();
+        if vertices > MAX_VERTICES || self.paths.contains_key(&key) {
+            return;
+        }
+        while self.paths.len() >= MAX_SHAPES || self.path_vertices_kept + vertices > MAX_VERTICES {
+            let Some(oldest) = self.path_order.pop_front() else {
+                break;
+            };
+            if let Some(old) = self.paths.remove(&oldest) {
+                self.path_vertices_kept -= old.vertices;
+            }
+        }
+        self.path_order.push_back(key);
+        self.path_vertices_kept += vertices;
+        self.paths.insert(
+            key,
+            StaticPath {
+                _content: content.clone(),
+                geometry,
+                vertices,
+            },
+        );
+        if self.answers(cx) {
+            self.misses += 1;
+        }
+    }
+
+    fn paths_open(&self, cx: &crate::Comp<'_>, layer: &Node) -> bool {
+        self.path_document == Some((address(cx.root()), cx.revision()))
+            && is_element(cx.layers(), layer)
     }
 
     /// The time-independent vertex list kept for `path` (a node inside `layer`).
@@ -387,11 +451,7 @@ impl ChannelMemo {
 
 /// `node`'s position in `layers`, when it is one of its elements.
 fn position(layers: &[Node], node: &Node) -> Option<u32> {
-    if !is_element(layers, node) {
-        return None;
-    }
-    let i = (address(node) - layers.as_ptr() as usize) / std::mem::size_of::<Node>();
-    u32::try_from(i).ok()
+    u32::try_from(crate::comp::layer_position(layers, node)?).ok()
 }
 
 fn address(node: &Node) -> usize {
@@ -400,11 +460,5 @@ fn address(node: &Node) -> usize {
 
 /// Whether `node` is one of the elements of `layers` (by address).
 fn is_element(layers: &[Node], node: &Node) -> bool {
-    let start = layers.as_ptr() as usize;
-    let size = std::mem::size_of::<Node>();
-    let at = address(node);
-    size != 0
-        && at >= start
-        && at < start + std::mem::size_of_val(layers)
-        && (at - start).is_multiple_of(size)
+    crate::comp::layer_position(layers, node).is_some()
 }
