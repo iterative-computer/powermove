@@ -36,6 +36,8 @@ const ROW_INSET: f64 = 16.;
 const ROW_PADDING: f64 = 8.;
 const ROW_HEIGHT: f64 = 42.;
 const GROUP_RADIUS: f64 = 14.;
+/// The air a title's line leaves above its text: (line − text) / 2.
+const TITLE_AIR: f64 = 5.;
 const LABEL_SIZE: f64 = 14.;
 const FOOTER_SIZE: f64 = 12.;
 const LIST_ROW_HEIGHT: f64 = ROW_HEIGHT + 1.;
@@ -783,6 +785,16 @@ impl Row {
         views.push(self.space.clone());
         views.extend(trailing);
         self.line.set(&views);
+        // The title is centred in its line, which leaves air above its text;
+        // a row with a line under the title gets the same air below it, so
+        // its text sits in the middle of the row.
+        let mut insets = self.body.stack.edgeInsets();
+        insets.bottom = if footers.is_empty() {
+            insets.top
+        } else {
+            insets.top + TITLE_AIR
+        };
+        self.body.stack.setEdgeInsets(insets);
         self.body.set(
             &std::iter::once(Retained::into_super(self.line.stack.clone()))
                 .chain(footers)
@@ -1772,12 +1784,19 @@ define_class!(
     impl HelpButton {
         #[unsafe(method(mouseEntered:))]
         fn entered(&self, _: &NSEvent) {
-            unsafe {
-                let _: () = msg_send![self, performSelector: objc2::sel!(reveal:), withObject: std::ptr::null::<objc2::runtime::AnyObject>(), afterDelay: HELP_DELAY];
+            self.schedule();
+        }
+        /// Movement over ⓘ also counts as arriving (an event that entered
+        /// without an entry, as a window coming forward under a still pointer).
+        #[unsafe(method(mouseMoved:))]
+        fn moved(&self, _: &NSEvent) {
+            if !self.ivars().waiting.get() && !self.shown() {
+                self.schedule();
             }
         }
         #[unsafe(method(mouseExited:))]
         fn exited(&self, _: &NSEvent) {
+            self.ivars().waiting.set(false);
             unsafe {
                 let _: () = msg_send![objc2::class!(NSObject), cancelPreviousPerformRequestsWithTarget: self, selector: objc2::sel!(reveal:), object: std::ptr::null::<objc2::runtime::AnyObject>()];
             }
@@ -1788,6 +1807,7 @@ define_class!(
         /// The pointer rested on ⓘ.
         #[unsafe(method(reveal:))]
         fn reveal(&self, _: *mut objc2::runtime::AnyObject) {
+            self.ivars().waiting.set(false);
             if self.shown() {
                 return;
             }
@@ -1811,12 +1831,21 @@ struct HelpState {
     popover: std::cell::RefCell<Option<Retained<NSPopover>>>,
     /// The popover was opened by hovering, so leaving closes it.
     hovered: std::cell::Cell<bool>,
+    /// A reveal is scheduled.
+    waiting: std::cell::Cell<bool>,
 }
 
 /// How long the pointer rests on ⓘ before its explanation opens.
 const HELP_DELAY: f64 = 0.3;
 
 impl HelpButton {
+    /// The explanation opens once the pointer has rested on ⓘ.
+    fn schedule(&self) {
+        self.ivars().waiting.set(true);
+        unsafe {
+            let _: () = msg_send![self, performSelector: objc2::sel!(reveal:), withObject: std::ptr::null::<objc2::runtime::AnyObject>(), afterDelay: HELP_DELAY];
+        }
+    }
     fn shown(&self) -> bool {
         self.ivars()
             .popover
@@ -1873,6 +1902,7 @@ fn help_button(mtm: objc2::MainThreadMarker, help: &str) -> Retained<NSButton> {
             NSTrackingArea::alloc(),
             objc2_foundation::NSRect::ZERO,
             NSTrackingAreaOptions::MouseEnteredAndExited
+                | NSTrackingAreaOptions::MouseMoved
                 | NSTrackingAreaOptions::ActiveAlways
                 | NSTrackingAreaOptions::InVisibleRect,
             Some(&button),

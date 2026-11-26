@@ -103,6 +103,37 @@ const SEGMENTED = new Set([
   "appearance",
   "open-projects-in",
 ]);
+/** Rows whose explanation is worth an ⓘ: what they do, or what they cost,
+ *  is not plain from the title. Other rows' explanations stay with
+ *  VoiceOver (the control's description) and out of the window. */
+const EXPLAINED = new Set([
+  "workspace",
+  "preview-memory",
+  "media.backgroundRender",
+  "media.backgroundDelay",
+  "timeline.skimming",
+  "cloud-media",
+  "media.proxyCreate",
+  "media.renderLimit",
+  "media.cacheLimit",
+  "media.clear",
+  "media.folders",
+  "project.colorDepth",
+  "project.masteringPeak",
+  "memory.enabled",
+  "share-usage-data",
+  "notifications.agent",
+  "account.bring-sign-ins",
+  "storage.native.library",
+  "storage.native.media",
+  "storage.native.migration",
+  "storage.native.tools",
+]);
+const explained = (id: string) =>
+  EXPLAINED.has(id) ||
+  // What "Add Powermove" does to each agent app, and the app you came from.
+  id.startsWith("agents.") ||
+  id.startsWith("storage.original.");
 /** Rows whose detail is their reading, shown under the title (a long one
  *  as a value would crush the title). */
 const READINGS = new Set(["media.used"]);
@@ -323,10 +354,17 @@ function SettingRow({
     >
       <RowCopy
         title={row.label}
-        detail={row.id === "media.location" ? undefined : row.detail}
         // A provider's detail is its state (signed in as…, not added) and
         // Space Used's its reading: data, not an explanation, so it stays
-        // in view.
+        // in view. Other explanations show behind ⓘ only where they help.
+        detail={
+          row.id === "media.location" ||
+          (row.section !== "providers" &&
+            !READINGS.has(row.id) &&
+            !explained(row.id))
+            ? undefined
+            : row.detail
+        }
         help={row.section !== "providers" && !READINGS.has(row.id)}
       >
         {row.error && (
@@ -729,8 +767,6 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
         >
           <RowCopy
             title="Powermove Store"
-            detail="Publish and manage your extensions on the Store."
-            help
           />
           <div metadata={{ settingsLayout: "line" }}>
             <Button
@@ -880,8 +916,6 @@ function ShareRow({ model }: { model: SettingsModel; key?: string }) {
     >
       <RowCopy
         title="Share Shortcuts"
-        detail="Bring in keys from another Mac or your agent, or save them to a file."
-        help
       />
       <div metadata={{ settingsLayout: "line" }}>
         <Button

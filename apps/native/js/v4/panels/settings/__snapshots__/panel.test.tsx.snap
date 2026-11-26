@@ -12,8 +12,6 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
                 div
                   text
                     text "Appearance"
-                  text
-                    text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
           div
@@ -53,15 +51,11 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
                 div
                   text
                     text "Open Projects In"
-                  text
-                    text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
                 div
               div group settings.row.restore-windows label="Reopen Last Project on Launch"
                 div
                   text
                     text "Reopen Last Project on Launch"
-                  text
-                    text "Open only the project you were last working on."
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
 Focus: ["Bring My Workspace…"]"
@@ -79,8 +73,6 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
                 div
                   text
                     text "Appearance"
-                  text
-                    text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
           div
@@ -120,15 +112,11 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
                 div
                   text
                     text "Open Projects In"
-                  text
-                    text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
                 div
               div group settings.row.restore-windows label="Reopen Last Project on Launch"
                 div
                   text
                     text "Reopen Last Project on Launch"
-                  text
-                    text "Open only the project you were last working on."
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
 Focus: ["Bring My Workspace…"]"
@@ -170,36 +158,26 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
                 div
                   text
                     text "API Base URL"
-                  text
-                    text "Base URL of the API, ending in /v1."
                 div
               div group settings.row.account.key label="API Key"
                 div
                   text
                     text "API Key"
-                  text
-                    text "Key saved securely. Leave blank to keep it."
                 div
               div group settings.row.account.model label="Model Name"
                 div
                   text
                     text "Model Name"
-                  text
-                    text "The exact model name your provider expects."
                 div
               div group settings.row.account.vision label="This Model Supports Images"
                 div
                   text
                     text "This Model Supports Images"
-                  text
-                    text "The model can read pictures you attach to a message."
                 div
               div group settings.row.account.status label="Status"
                 div
                   text
                     text "Status"
-                  text
-                    text "Restart Powermove to enable API and local connections."
                 div
                   button push-button label="Test and Connect" disabled
                     text "Test and Connect"
@@ -218,8 +196,6 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
                 div
                   text
                     text "Appearance"
-                  text
-                    text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
           div
@@ -259,15 +235,11 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
                 div
                   text
                     text "Open Projects In"
-                  text
-                    text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
                 div
               div group settings.row.restore-windows label="Reopen Last Project on Launch"
                 div
                   text
                     text "Reopen Last Project on Launch"
-                  text
-                    text "Open only the project you were last working on."
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
 Focus: ["Bring My Workspace…"]"
@@ -285,8 +257,6 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
                 div
                   text
                     text "Appearance"
-                  text
-                    text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
           div
@@ -326,15 +296,11 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
                 div
                   text
                     text "Open Projects In"
-                  text
-                    text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
                 div
               div group settings.row.restore-windows label="Reopen Last Project on Launch"
                 div
                   text
                     text "Reopen Last Project on Launch"
-                  text
-                    text "Open only the project you were last working on."
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
 Focus: ["Bring My Workspace…"]"
@@ -352,8 +318,6 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
                 div
                   text
                     text "Appearance"
-                  text
-                    text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
           div
@@ -393,15 +357,11 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
                 div
                   text
                     text "Open Projects In"
-                  text
-                    text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
                 div
               div group settings.row.restore-windows label="Reopen Last Project on Launch"
                 div
                   text
                     text "Reopen Last Project on Launch"
-                  text
-                    text "Open only the project you were last working on."
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
 Focus: ["Bring My Workspace…"]"
@@ -419,8 +379,6 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
                 div
                   text
                     text "Appearance"
-                  text
-                    text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
           div
@@ -460,15 +418,11 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
                 div
                   text
                     text "Open Projects In"
-                  text
-                    text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
                 div
               div group settings.row.restore-windows label="Reopen Last Project on Launch"
                 div
                   text
                     text "Reopen Last Project on Launch"
-                  text
-                    text "Open only the project you were last working on."
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
 Focus: ["Bring My Workspace…"]"
@@ -486,8 +440,6 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
                 div
                   text
                     text "Appearance"
-                  text
-                    text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
           div
@@ -527,15 +479,11 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
                 div
                   text
                     text "Open Projects In"
-                  text
-                    text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
                 div
               div group settings.row.restore-windows label="Reopen Last Project on Launch"
                 div
                   text
                     text "Reopen Last Project on Launch"
-                  text
-                    text "Open only the project you were last working on."
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
 Focus: ["Bring My Workspace…"]"
@@ -565,8 +513,6 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
                 div
                   text
                     text "Appearance"
-                  text
-                    text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
           div
@@ -606,15 +552,11 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
                 div
                   text
                     text "Open Projects In"
-                  text
-                    text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
                 div
               div group settings.row.restore-windows label="Reopen Last Project on Launch"
                 div
                   text
                     text "Reopen Last Project on Launch"
-                  text
-                    text "Open only the project you were last working on."
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
 Focus: ["Bring My Workspace…"]"
@@ -632,8 +574,6 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
                 div
                   text
                     text "Appearance"
-                  text
-                    text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
           div
@@ -673,15 +613,11 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
                 div
                   text
                     text "Open Projects In"
-                  text
-                    text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
                 div
               div group settings.row.restore-windows label="Reopen Last Project on Launch"
                 div
                   text
                     text "Reopen Last Project on Launch"
-                  text
-                    text "Open only the project you were last working on."
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
 Focus: ["Bring My Workspace…"]"
@@ -699,8 +635,6 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
                 div
                   text
                     text "Appearance"
-                  text
-                    text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
           div
@@ -740,15 +674,11 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
                 div
                   text
                     text "Open Projects In"
-                  text
-                    text "Tabs keeps your projects in one window, side by side in the toolbar. Separate Windows gives each project a window of its own."
                 div
               div group settings.row.restore-windows label="Reopen Last Project on Launch"
                 div
                   text
                     text "Reopen Last Project on Launch"
-                  text
-                    text "Open only the project you were last working on."
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
 Focus: ["Bring My Workspace…"]"
@@ -1289,8 +1219,6 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
                 div
                   text
                     text "Powermove Store"
-                  text
-                    text "Publish and manage your extensions on the Store."
                 div
                   button push-button label="Open Store"
                     text "Open Store"
@@ -1312,8 +1240,6 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
                 div
                   text
                     text "Name"
-                  text
-                    text "Shown in the title bar and used for exported file names."
                 div
         div group label="Composition"
           div
@@ -1325,8 +1251,6 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
                 div
                   text
                     text "Size"
-                  text
-                    text "Pick a common size, or set your own pixel dimensions."
                 div
               div group settings.row.project.width label="Width"
                 div
@@ -1342,8 +1266,6 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
                 div
                   text
                     text "Frame Rate"
-                  text
-                    text "Frames rendered per second of the composition — any rate from 1 to 240."
                 div
               div group settings.row.project.duration label="Duration"
                 div
@@ -1354,8 +1276,6 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
                 div
                   text
                     text "Background"
-                  text
-                    text "Colour shown behind every layer of the composition."
                 div
               div group settings.row.project.colorDepth label="Color Depth"
                 div
@@ -1374,57 +1294,41 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
                 div
                   text
                     text "Format"
-                  text
-                    text "Container and codec of the exported file."
                 div
               div group settings.row.project.resolution label="Resolution"
                 div
                   text
                     text "Resolution"
-                  text
-                    text "Rendered size relative to the composition, or any pixel size."
                 div
               div group settings.row.project.export-fps label="Frame Rate"
                 div
                   text
                     text "Frame Rate"
-                  text
-                    text "Frames written per second of exported video."
                 div
               div group settings.row.project.range label="Range"
                 div
                   text
                     text "Range"
-                  text
-                    text "Export the work area or the whole composition."
                 div
               div group settings.row.project.quality label="Quality"
                 div
                   text
                     text "Quality"
-                  text
-                    text "Video bitrate used for video exports."
                 div
               div group settings.row.project.motion-blur label="Motion Blur"
                 div
                   text
                     text "Motion Blur"
-                  text
-                    text "Render motion blur for moving layers."
                 div
               div group settings.row.project.audio label="Include Audio"
                 div
                   text
                     text "Include Audio"
-                  text
-                    text "Mix composition audio into the video."
                 div
               div group settings.row.project.alpha label="Transparent Background"
                 div
                   text
                     text "Transparent Background"
-                  text
-                    text "Keep the background see-through, with straight alpha."
                 div
 Focus: []"
 `;
