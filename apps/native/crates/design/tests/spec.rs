@@ -58,6 +58,8 @@ const ROLES: &[(&str, &str)] = &[
     ("settings.credits_meter", "Settings › Account credits meter thickness"),
     ("settings.credits_chart", "Settings › Account daily credits chart height"),
     ("settings.credits_bar", "A day's bar width in the daily credits chart, at most"),
+    ("settings.credits_bar_radius", "The daily credits chart's bar caps' corner"),
+    ("settings.credits_today", "Today's marker under the daily credits chart"),
     ("settings.credits_bar_gap", "Least space between the daily credits chart's bars"),
     ("settings.credits_air", "Air above the credits meter and the daily chart"),
     ("settings.app_icon", "Settings › Agents app mark side"),

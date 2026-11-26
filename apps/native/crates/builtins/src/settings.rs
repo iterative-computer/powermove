@@ -1446,26 +1446,32 @@ pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
                 "account.subscribe",
                 "Continue…",
             );
-            let name = |p: &Value| p["name"].as_str().unwrap_or_default().to_owned();
+            // Each plan's card: its name, price and monthly credits, and for
+            // a plan that gives more per dollar than the smallest, how much
+            // more (the website's wording).
+            let price = |p: &Value| p["priceCents"].as_u64().unwrap_or(0);
+            let credits = |p: &Value| p["credits"].as_u64().unwrap_or(0);
+            let per_dollar = |p: &Value| credits(p) as f64 / price(p).max(1) as f64;
+            let base = plans.iter().map(per_dollar).fold(f64::INFINITY, f64::min);
             choose["options"] = plans
                 .iter()
                 .map(|p| {
-                    let price = dollars(p["priceCents"].as_u64().unwrap_or(0));
-                    json!({"v": p["id"], "label": format!("{} · {price}", name(p))})
+                    let mut lines = vec![
+                        p["name"].as_str().unwrap_or_default().to_owned(),
+                        format!("{} a month", dollars(price(p))),
+                        format!(
+                            "{} credits a month",
+                            pm_agents::inference::grouped(credits(p))
+                        ),
+                    ];
+                    let more = ((per_dollar(p) / base - 1.) * 100.).round();
+                    if more >= 1. {
+                        lines.push(format!("{more}% more credits per dollar"));
+                    }
+                    json!({"v": p["id"], "label": lines.join("\n")})
                 })
                 .collect();
-            // What each plan holds, then the rules: monthly, no roll-over.
-            let holds: Vec<String> = plans
-                .iter()
-                .map(|p| {
-                    let credits = pm_agents::inference::grouped(p["credits"].as_u64().unwrap_or(0));
-                    format!("{} has {credits} credits a month", name(p))
-                })
-                .collect();
-            choose["detail"] = json!(format!(
-                "{}. Credits reset each month and don’t roll over.",
-                holds.join(", ")
-            ));
+            choose["detail"] = json!("Credits reset each month and don’t roll over.");
             if let Some(error) = billing["error"].as_str() {
                 choose["error"] = json!(error);
             }
@@ -1518,11 +1524,8 @@ pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
         "{} used",
         pm_agents::inference::grouped(count("used"))
     ));
-    // Bars once anything is spent: a new period's empty days draw nothing.
-    if count("used") > 0 {
-        daily["days"] = billing["daily"].clone();
-        daily["slots"] = billing["periodDays"].clone();
-    }
+    daily["days"] = billing["daily"].clone();
+    daily["slots"] = billing["periodDays"].clone();
     rows.push(daily);
     if count("remaining") == 0
         && let Some(upgrade) = billing["upgrade"].as_object()
@@ -1873,13 +1876,13 @@ mod cloud_tests {
         assert_eq!(free[1]["control"], "plans");
         assert_eq!(free[1]["action"], "account.subscribe");
         assert_eq!(free[1]["actionLabel"], "Continue…");
-        assert_eq!(free[1]["options"][0]["label"], "Aerolite · $9.99");
-        assert_eq!(free[1]["options"][1]["label"], "Aero · $19.99");
-        assert!(
-            free[1]["detail"]
-                .as_str()
-                .unwrap()
-                .contains("Aero has 2,500 credits a month")
+        assert_eq!(
+            free[1]["options"][0]["label"],
+            "Aerolite\n$9.99 a month\n1,000 credits a month"
+        );
+        assert_eq!(
+            free[1]["options"][1]["label"],
+            "Aero\n$19.99 a month\n2,500 credits a month\n25% more credits per dollar"
         );
         // Waiting for Checkout: a quiet line with Cancel instead.
         let waiting = billing_rows(
@@ -1921,7 +1924,7 @@ mod cloud_tests {
             &ready(json!({"upgrade":null,"credits":{"included":2500,"used":2500,"remaining":0}})),
             false,
         );
-        // A new period with nothing spent: no bars.
+        // A new period with nothing spent still shows its days (all ticks).
         let fresh = billing_rows(
             &ready(
                 json!({"credits":{"included":1000,"used":0,"remaining":1000},
@@ -1929,7 +1932,7 @@ mod cloud_tests {
             ),
             false,
         );
-        assert!(fresh[2].get("days").is_none());
+        assert_eq!(fresh[2]["days"], json!([["Nov 25", 0]]));
         assert_eq!(
             ids(&top),
             ["account.plan", "account.credits", "account.daily"]

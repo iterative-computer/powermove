@@ -1,5 +1,5 @@
-//! Settings › Account's credits this month: a quiet meter of what is used
-//! (the accent on a faint track) and the period's daily use as thin bars,
+//! Settings › Account's credits this month: a quiet meter of what is left
+//! (the accent on a faint track, the warning colour under a tenth) and the period's daily use as thin bars,
 //! one slot per day of the period so the month's shape reads at a glance.
 //! Hovering a day names it and its credits above its bar. No axes. Every
 //! size and colour is a token (`pm_design::Settings`, `Colors`, `Ink`).
@@ -39,7 +39,7 @@ pub(super) struct MeterState {
 }
 
 define_class!(
-    /// `used / included` as a rounded bar: the accent over a faint track.
+    /// What is left of `included` as a rounded bar over a faint track.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[name = "PMSettingsCreditsMeter"]
@@ -62,13 +62,17 @@ define_class!(
                 NSSize::new(bounds.size.width, h),
             );
             fill(track, h / 2., &colour(c.text, Ink::new().edge as f64));
+            // A fuel gauge: the fill is what is left, draining as credits
+            // are spent, and turns to the warning colour under a tenth.
             let (used, included) = (self.ivars().used.get(), self.ivars().included.get());
-            if included > 0 && used > 0 {
-                let share = (used as f64 / included as f64).min(1.);
+            let left = included.saturating_sub(used);
+            if included > 0 && left > 0 {
+                let share = left as f64 / included as f64;
+                let ink = if left * 10 < included { c.warning } else { c.accent };
                 // Never thinner than its own round ends.
                 let width = (bounds.size.width * share).max(h);
                 let bar = NSRect::new(track.origin, NSSize::new(width, h));
-                fill(bar, h / 2., &colour(c.accent, 1.));
+                fill(bar, h / 2., &colour(ink, 1.));
             }
         }
     }
@@ -152,26 +156,32 @@ define_class!(
             let hovered = state.hovered.get();
             let quiet = colour(c.secondary, 1.);
             let lit = colour(c.accent, 1.);
-            let rest = colour(c.text, Ink::new().edge as f64);
-            // A spent day reaches up from the baseline by its share of the
-            // busiest day; a day with none keeps a hairline stub.
-            let stub = s.credits_bar_gap as f64;
-            for (i, (_, credits)) in days.iter().enumerate() {
-                let h = if *credits == 0 {
-                    stub
+            let faint = colour(c.text, Ink::new().edge as f64);
+            let caps = s.credits_bar_radius as f64;
+            // Every day of the period has a slot: a day spent reaches up
+            // from the baseline by its share of the busiest day; a day with
+            // none, and every day still to come, is a faint baseline tick.
+            let tick = s.credits_bar_gap as f64;
+            for i in 0..state.slots.get().max(days.len()) {
+                let x = i as f64 * slot + (slot - bar) / 2.;
+                let spent = days.get(i).map_or(0, |(_, c)| *c);
+                let (h, ink) = if spent == 0 {
+                    (tick, if hovered == Some(i) { &lit } else { &faint })
                 } else {
-                    (height * *credits as f64 / most as f64).max(bar.min(height))
+                    let h = (height * spent as f64 / most as f64).max(bar.min(height));
+                    (h, if hovered == Some(i) { &lit } else { &quiet })
                 };
-                let rect = NSRect::new(
-                    NSPoint::new(i as f64 * slot + (slot - bar) / 2., top + height - h),
-                    NSSize::new(bar, h),
+                let rect = NSRect::new(NSPoint::new(x, top + height - h), NSSize::new(bar, h));
+                fill(rect, caps.min(h / 2.), ink);
+            }
+            // Today (the last day read): a small dot under its slot.
+            if let Some(today) = days.len().checked_sub(1) {
+                let d = s.credits_today as f64;
+                let dot = NSRect::new(
+                    NSPoint::new((today as f64 + 0.5) * slot - d / 2., top + height + tick),
+                    NSSize::new(d, d),
                 );
-                let ink = match (hovered == Some(i), *credits == 0) {
-                    (true, _) => &lit,
-                    (false, true) => &rest,
-                    (false, false) => &quiet,
-                };
-                fill(rect, (bar / 2.).min(h / 2.), ink);
+                fill(dot, d / 2., &quiet);
             }
             // The hovered day and its credits, over its bar, kept inside
             // the chart's width.
@@ -220,7 +230,10 @@ impl Chart {
         let s = st();
         view.heightAnchor()
             .constraintEqualToConstant(
-                s.credits_air as f64 + view.caption_height() + s.credits_chart as f64,
+                s.credits_air as f64
+                    + view.caption_height()
+                    + s.credits_chart as f64
+                    + (s.credits_bar_gap + s.credits_today) as f64,
             )
             .setActive(true);
         let tracking = unsafe {
