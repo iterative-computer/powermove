@@ -655,6 +655,11 @@ impl Graph {
             ),
             |(a, b, c, d), (x, y)| (a.min(*x), b.max(*x), c.min(*y), d.max(*y)),
         );
+        // Co-located keys (e.g. linked Scale X/Y at a single time & value)
+        // have no box span; drawing 8 grips on top of one vertex obscures it.
+        if (x1 - x0) < 1. && (y1 - y0) < 1. {
+            return None;
+        }
         (x0, x1, y0, y1) = (x0 - pad, x1 + pad, y0 - pad, y1 + pad);
         if x1 - x0 < 16. {
             let m = (x0 + x1) / 2.;

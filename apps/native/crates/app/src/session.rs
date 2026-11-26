@@ -2134,6 +2134,9 @@ impl Controller {
             })
         });
         self.published = Some(p);
+        if document_changed {
+            self.reconcile_missing_definitions();
+        }
         if let Some(runtime) = &self.builtins.runtime {
             if let Some(payload) = doc_payload {
                 runtime.emit_event("document", &payload);

@@ -1262,9 +1262,10 @@ pub struct Drag {
     /// the press. A vertical drag there changes speeds (as v1 does), never
     /// the keys' values.
     speed_eases: Option<Vec<(String, EaseSide, TemporalEase)>>,
-    /// A handle drag: its key's layer-local time and value, and the other
-    /// side's ease, which follows the dragged side unless ⌥ splits them (v1).
-    handle_key: Option<(f64, f64, Option<TemporalEase>)>,
+    /// A handle drag: each target key's id (expanded across linked scale axes),
+    /// its layer-local time, value, dragged-side neighbour span `dt`, and the
+    /// opposite side's ease (which follows the dragged tangent unless ⌥ splits).
+    handle_keys: Vec<(String, f64, f64, Option<f64>, Option<TemporalEase>)>,
     /// Locked layers a move or trim left where they were (After Effects skips
     /// locked layers in a mixed selection instead of refusing the gesture).
     skipped_locked: usize,
@@ -1565,21 +1566,38 @@ impl Drag {
             }
             _ => None,
         };
-        let handle_key = match &kind {
-            DragKind::Handle { id, side } => index.key(id).and_then(|(_, _, key)| {
-                let value = key.value.as_f64()?;
+        let handle_keys = match &kind {
+            DragKind::Handle { id, side } => {
                 let other = if *side == EaseSide::In {
                     EaseSide::Out
                 } else {
                     EaseSide::In
                 };
-                let opposite = key_eases(index, std::slice::from_ref(id))
+                model
+                    .expand_scale_keys(std::slice::from_ref(id))
                     .into_iter()
-                    .find(|(_, s, _)| *s == other)
-                    .map(|(_, _, e)| e);
-                Some((key.time, value, opposite))
-            }),
-            _ => None,
+                    .filter_map(|target_id| {
+                        let (_, channel, key) = index.key(&target_id)?;
+                        let value = key.value.as_f64()?;
+                        let idx = channel.keys.iter().position(|k| k.id == target_id)?;
+                        let neighbour_dt = match side {
+                            EaseSide::In => idx
+                                .checked_sub(1)
+                                .map(|i| (key.time - channel.keys[i].time).abs()),
+                            _ => channel
+                                .keys
+                                .get(idx + 1)
+                                .map(|n| (n.time - key.time).abs()),
+                        };
+                        let opposite = key_eases(index, std::slice::from_ref(&target_id))
+                            .into_iter()
+                            .find(|(_, s, _)| *s == other)
+                            .map(|(_, _, e)| e);
+                        Some((target_id, key.time, value, neighbour_dt, opposite))
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
         };
         let lanes = (model.mode == crate::TimelineMode::Tracks
             && matches!(
@@ -1592,7 +1610,7 @@ impl Drag {
         .then(|| crate::tracks::relative_lanes(index, &model.reveal));
         Ok(Self {
             lanes,
-            handle_key,
+            handle_keys,
             skipped_locked,
             trim_limit,
             speed_eases,
@@ -2069,45 +2087,71 @@ impl Drag {
             DragKind::Handle { id, side } => {
                 finite(sample.handle_time)?;
                 finite(sample.handle_value)?;
-                let (t, mut v) = (sample.handle_time, sample.handle_value);
-                // ⇧ lays the handle flat (v1's `moveBezierHandle` flat side).
-                if let Some((_, key_value, _)) = self.handle_key
-                    && sample.modifiers.shift
-                {
-                    v = key_value;
-                }
-                out.push(
-                    KeyframeCommand::SetHandle {
-                        key_id: id.clone(),
-                        side: *side,
-                        value: HandleValue::Point { t, v },
-                        split: sample.modifiers.alt,
+                let (t, raw_v) = (sample.handle_time, sample.handle_value);
+                let primary_value = self
+                    .handle_keys
+                    .first()
+                    .map(|(_, _, kv, _, _)| *kv);
+                let targets: Vec<_> = if self.handle_keys.is_empty() {
+                    vec![(id.clone(), 0., raw_v, None, None)]
+                } else {
+                    self.handle_keys.clone()
+                };
+                for (target_id, key_time, key_value, neighbour_dt, opposite) in targets {
+                    // For linked scale axes with a different base value, apply
+                    // the same value offset from the key rather than snapping
+                    // both curves to one absolute y.
+                    let mut v = match primary_value {
+                        Some(base) if target_id != *id => key_value + (raw_v - base),
+                        _ => raw_v,
+                    };
+                    // ⇧ lays the handle flat (v1's `moveBezierHandle` flat side).
+                    if sample.modifiers.shift {
+                        v = key_value;
                     }
-                    .into(),
-                );
-                // Unless ⌥ splits them, the other handle stays on the same
-                // tangent through the key, keeping its own length (v1's
-                // `mirroredBezierHandlePoint`).
-                if let Some((key_time, key_value, Some(opposite))) = self.handle_key
-                    && !sample.modifiers.alt
-                    && (t - key_time).abs() > 1e-9
-                {
                     out.push(
                         KeyframeCommand::SetHandle {
-                            key_id: id.clone(),
-                            side: if *side == EaseSide::In {
-                                EaseSide::Out
-                            } else {
-                                EaseSide::In
-                            },
-                            value: HandleValue::Ease(TemporalEase {
-                                speed: (v - key_value) / (t - key_time),
-                                influence: opposite.influence,
-                            }),
-                            split: false,
+                            key_id: target_id.clone(),
+                            side: *side,
+                            value: HandleValue::Point { t, v },
+                            split: sample.modifiers.alt,
                         }
                         .into(),
                     );
+                    // Unless ⌥ splits them, the opposite handle stays on the
+                    // exact same clamped tangent speed as the dragged handle,
+                    // keeping its own length (`mirroredBezierHandlePoint`).
+                    if let (Some(dt), Some(opposite)) = (neighbour_dt, opposite)
+                        && !sample.modifiers.alt
+                        && dt > 1e-6
+                    {
+                        let reach = match side {
+                            EaseSide::In => key_time - t,
+                            _ => t - key_time,
+                        };
+                        let influence = (reach.max(0.) / dt * 100.).clamp(0.1, 100.);
+                        let span = influence / 100. * dt;
+                        let rise = match side {
+                            EaseSide::In => key_value - v,
+                            _ => v - key_value,
+                        };
+                        out.push(
+                            KeyframeCommand::SetHandle {
+                                key_id: target_id,
+                                side: if *side == EaseSide::In {
+                                    EaseSide::Out
+                                } else {
+                                    EaseSide::In
+                                },
+                                value: HandleValue::Ease(TemporalEase {
+                                    speed: rise / span,
+                                    influence: opposite.influence,
+                                }),
+                                split: false,
+                            }
+                            .into(),
+                        );
+                    }
                 }
             }
             DragKind::Property { targets, time } => {

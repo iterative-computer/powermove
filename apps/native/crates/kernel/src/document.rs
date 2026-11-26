@@ -18,7 +18,7 @@
 //! Revisions only increase. Undo and redo publish *new* revisions whose
 //! operations restore old content (boundary doc, section 6 step 7).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 
 use pm_model::ops::diff_node_ops;
@@ -867,6 +867,115 @@ impl DocumentStore {
                 origin,
             },
         ))
+    }
+
+    /// Clears stale persisted `"missing": true` flags on effects and transitions
+    /// whose provider is now registered (and whose saved built-in revision, if
+    /// any, is supported by this build), matching Electron's hydration pass.
+    /// Does not push an undo step or mark an unmodified file dirty.
+    pub fn reconcile_missing_definitions(
+        &mut self,
+        effects: &BTreeSet<String>,
+        builtin_effects: &BTreeSet<String>,
+        transitions: &BTreeSet<String>,
+    ) -> Result<bool, TransactionError> {
+        if self.gesture.is_some() {
+            return Ok(false);
+        }
+        let Some(root) = self.current.root() else {
+            return Ok(false);
+        };
+        let saving_version = self.current.saving_app_version();
+        let mut ops = Vec::new();
+        let mut scan_layers = |comp_id: Option<&str>, layers: &[Node]| {
+            for (layer_index, layer) in layers.iter().enumerate() {
+                if let Some(NodeKind::Array(fxs)) = layer.get("fx").map(Node::kind) {
+                    for (fx_index, fx) in fxs.iter().enumerate() {
+                        if !matches!(fx.get("missing").map(Node::kind), Some(NodeKind::Bool(true))) {
+                            continue;
+                        }
+                        let Some(ty) = fx.get("type").and_then(model::str_of) else {
+                            continue;
+                        };
+                        let available = if effects.contains(ty) {
+                            true
+                        } else if builtin_effects.contains(ty) {
+                            let version = fx.get("version").and_then(|v| {
+                                serde_json::from_str::<serde_json::Value>(
+                                    &pm_model::json::to_canonical_string(&v.to_value()),
+                                )
+                                .ok()
+                            });
+                            pm_fx_defs::catalog::definition_for_file(
+                                ty,
+                                version.as_ref(),
+                                saving_version,
+                            )
+                            .is_ok()
+                        } else {
+                            false
+                        };
+                        if available {
+                            let mut path = model::comp_path(comp_id);
+                            path.push("layers".into());
+                            path.push(layer_index.into());
+                            path.push("fx".into());
+                            path.push(fx_index.into());
+                            path.push("missing".into());
+                            ops.push(Op::Leaf(Patch::delete(path)));
+                        }
+                    }
+                }
+                for field in ["transitionIn", "transitionOut"] {
+                    let Some(tr) = layer.get(field) else {
+                        continue;
+                    };
+                    if !matches!(tr.get("missing").map(Node::kind), Some(NodeKind::Bool(true))) {
+                        continue;
+                    }
+                    let Some(ty) = tr.get("type").and_then(model::str_of) else {
+                        continue;
+                    };
+                    if transitions.contains(ty) {
+                        let mut path = model::comp_path(comp_id);
+                        path.push("layers".into());
+                        path.push(layer_index.into());
+                        path.push(field.into());
+                        path.push("missing".into());
+                        ops.push(Op::Leaf(Patch::delete(path)));
+                    }
+                }
+            }
+        };
+        if let Some(NodeKind::Array(layers)) = root.get("layers").map(Node::kind) {
+            scan_layers(None, layers);
+        }
+        if let Some(NodeKind::Object(comps)) = root.get("comps").map(Node::kind) {
+            for (comp_id, comp) in comps.iter() {
+                if let Some(id) = comp_id.as_str()
+                    && let Some(NodeKind::Array(layers)) = comp.get("layers").map(Node::kind)
+                {
+                    scan_layers(Some(id), layers);
+                }
+            }
+        }
+        if ops.is_empty() {
+            return Ok(false);
+        }
+        let staged = self.stage_ops(&ops, false)?;
+        if !staged.changed {
+            return Ok(false);
+        }
+        self.upgraded_on_open = true;
+        self.publish(
+            staged.document,
+            staged.forward.into(),
+            ChangeCause::Edit {
+                label: "Reconcile effects".into(),
+                origin: Origin::Extension,
+            },
+        );
+        Ok(true)
     }
 
     fn commit_staged(
@@ -1782,6 +1891,33 @@ impl DocumentStore {
                 options.portable || !self.file.media.is_linked(&m.id) || !retained
             })
             .cloned()
+            .map(|mut m| {
+                // If a retained cache copy in App Support went missing (e.g.
+                // synced project opened on another profile or cleared cache),
+                // fall back to the asset's sourcePath when it exists with the
+                // expected byte length; save.rs still verifies the SHA-256.
+                if let project_io::MediaSource::File {
+                    ref mut path,
+                    length,
+                    ..
+                } = m.source
+                    && !path.exists()
+                    && let Some(reference) = self
+                        .root()
+                        .and_then(|r| r.get("assets"))
+                        .and_then(|a| m.id.as_str().and_then(|id| a.get(id)))
+                        .and_then(|a| a.get("sourcePath"))
+                        .and_then(model::str_of)
+                {
+                    let candidate = std::path::Path::new(reference);
+                    if std::fs::metadata(candidate)
+                        .is_ok_and(|meta| meta.is_file() && meta.len() == length)
+                    {
+                        *path = candidate.to_path_buf();
+                    }
+                }
+                m
+            })
             .collect();
         let live_media = self.reachable_assets();
         let source_links = self
@@ -2941,4 +3077,133 @@ pub(crate) fn assert_inverse_restores(before: Option<&Node>, after: Option<&Node
         before.map(Node::to_value),
         "inverse restores the state"
     );
+}
+
+#[cfg(test)]
+mod reconcile_missing_tests {
+    use super::*;
+    use pm_model::json::parse;
+
+    #[test]
+    fn reconciles_stale_missing_flags_without_dirtying_or_pushing_undo() {
+        let project = parse(
+            r#"{
+                "id": "p1",
+                "name": "Test",
+                "w": 1920,
+                "h": 1080,
+                "fps": 30,
+                "dur": 10,
+                "layers": [{
+                    "id": "L1",
+                    "type": "solid",
+                    "name": "One",
+                    "from": 0,
+                    "dur": 5,
+                    "fx": [
+                        {"id": "f1", "type": "dot-matrix-resolve", "on": true, "missing": true, "p": {}},
+                        {"id": "f2", "type": "blur", "on": true, "missing": true, "p": {}},
+                        {"id": "f3", "type": "invert", "version": 999, "on": true, "missing": true, "p": {}},
+                        {"id": "f4", "type": "uninstalled.fx", "on": true, "missing": true, "p": {}}
+                    ],
+                    "transitionIn": {"type": "crossfade", "dur": 0.5, "missing": true, "p": {}},
+                    "transitionOut": {"type": "unknown.tr", "dur": 0.5, "missing": true, "p": {}}
+                }],
+                "comps": {
+                    "Main": {
+                        "id": "Main",
+                        "name": "Main",
+                        "w": 1920,
+                        "h": 1080,
+                        "fps": 30,
+                        "dur": 10,
+                        "layers": [{
+                            "id": "L2",
+                            "type": "solid",
+                            "name": "Two",
+                            "from": 0,
+                            "dur": 5,
+                            "fx": [
+                                {"id": "f5", "type": "progressive-blur", "on": true, "missing": true, "p": {}}
+                            ]
+                        }]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let mut store = DocumentStore::new_untitled(project);
+        store.mark_library_saved();
+        assert!(!store.is_dirty());
+        let rev0 = store.revision();
+
+        let effects: BTreeSet<String> = ["dot-matrix-resolve", "progressive-blur"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let builtins: BTreeSet<String> = ["blur", "invert"].into_iter().map(str::to_owned).collect();
+        let transitions: BTreeSet<String> = ["crossfade"].into_iter().map(str::to_owned).collect();
+
+        assert!(
+            store
+                .reconcile_missing_definitions(&effects, &builtins, &transitions)
+                .unwrap()
+        );
+        assert_eq!(store.revision(), rev0 + 1);
+        assert!(!store.is_dirty(), "reconciliation must not mark clean files dirty");
+        assert!(!store.as_saved(), "save should persist cleaned missing flags");
+        assert!(!store.can_undo(), "reconciliation must not push an undo step");
+
+        // Second call with same definitions is a no-op.
+        assert!(
+            !store
+                .reconcile_missing_definitions(&effects, &builtins, &transitions)
+                .unwrap()
+        );
+        assert_eq!(store.revision(), rev0 + 1);
+
+        let root = store.root().unwrap();
+        let layer0 = match root.get("layers").unwrap().kind() {
+            NodeKind::Array(a) => &a[0],
+            _ => panic!("layers array"),
+        };
+        let fxs = match layer0.get("fx").unwrap().kind() {
+            NodeKind::Array(a) => a,
+            _ => panic!("fx array"),
+        };
+        assert!(fxs[0].get("missing").is_none(), "registered extension effect cleared");
+        assert!(fxs[1].get("missing").is_none(), "supported builtin effect cleared");
+        assert_eq!(
+            fxs[2].get("missing").map(Node::to_value),
+            Some(Value::Bool(true)),
+            "unsupported future builtin revision stays missing"
+        );
+        assert_eq!(
+            fxs[3].get("missing").map(Node::to_value),
+            Some(Value::Bool(true)),
+            "uninstalled effect stays missing"
+        );
+        assert!(layer0.get("transitionIn").unwrap().get("missing").is_none());
+        assert_eq!(
+            layer0.get("transitionOut").unwrap().get("missing").map(Node::to_value),
+            Some(Value::Bool(true))
+        );
+        let main_layers = match root
+            .get("comps")
+            .unwrap()
+            .get("Main")
+            .unwrap()
+            .get("layers")
+            .unwrap()
+            .kind()
+        {
+            NodeKind::Array(a) => a,
+            _ => panic!("main layers"),
+        };
+        let main_fxs = match main_layers[0].get("fx").unwrap().kind() {
+            NodeKind::Array(a) => a,
+            _ => panic!("main fx"),
+        };
+        assert!(main_fxs[0].get("missing").is_none(), "nested comp effect cleared");
+    }
 }

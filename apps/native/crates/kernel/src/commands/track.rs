@@ -598,7 +598,7 @@ pub(crate) fn set_handle(
                     Side::Out => t - key.t,
                     Side::In => key.t - t,
                 };
-                let influence = clamp_influence(reach.abs() / dt * 100.0);
+                let influence = clamp_influence(reach.max(0.0) / dt * 100.0);
                 let span = influence / 100.0 * dt;
                 let key_value = key.v.unwrap_or(0.0);
                 let rise = match side {

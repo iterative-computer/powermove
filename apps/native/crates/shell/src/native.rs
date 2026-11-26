@@ -6841,7 +6841,7 @@ impl Host {
         toolbar_top_inset(
             (self.gpui.bounds().size.height - self.window.contentLayoutRect().size.height) as f32,
             self.is_fullscreen(),
-            self.window.toolbar().is_some_and(|tb| tb.isVisible()),
+            self.window.toolbar().is_some(),
             &self.tokens.metrics,
         )
     }
@@ -8582,6 +8582,35 @@ fn style_popup_search(search: &NSTextField, t: &Tokens, surface: Surface) {
         search.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
     }
 }
+/// Switches a popup's `NSSearchField` between the borderless header style used
+/// by the Threads picker (where `PopupLayout::rebuild` draws a crisp SF Symbol
+/// leading icon aligned with the rows below) and the standard bezeled search
+/// field used by other searchable popups.
+fn configure_threads_search_field(search: &NSTextField, t: &Tokens, is_threads: bool) {
+    search.setBezeled(!is_threads);
+    search.setBordered(false);
+    search.setDrawsBackground(!is_threads);
+    search.setFont(Some(&NSFont::systemFontOfSize(if is_threads {
+        t.typography.body as f64
+    } else {
+        t.typography.title as f64
+    })));
+    search.setTextColor(Some(&native_color(t.colors.text)));
+    if let Some(cell) = search
+        .cell()
+        .and_then(|cell| cell.downcast::<NSSearchFieldCell>().ok())
+    {
+        if is_threads {
+            cell.setSearchButtonCell(None);
+            cell.setCancelButtonCell(None);
+            cell.setUsesSingleLineMode(true);
+            cell.setScrollable(true);
+        } else {
+            cell.resetSearchButtonCell();
+            cell.resetCancelButtonCell();
+        }
+    }
+}
 
 /// The field menu's search placeholder (`fieldMenu`).
 const FIELD_PLACEHOLDER: &str = "Search fields";
@@ -9002,16 +9031,7 @@ impl Popup {
         self.set_searchable(composer.is_none_or(|(_, on)| on));
         let is_threads = self.composer == Some(ComposerPicker::Threads);
         if self.surface != Surface::Palette {
-            self.search.setBezeled(!is_threads);
-            self.search.setBordered(false);
-            self.search.setDrawsBackground(!is_threads);
-            self.search.setFont(Some(&NSFont::systemFontOfSize(if is_threads {
-                self.tokens.typography.body as f64
-            } else {
-                self.tokens.typography.title as f64
-            })));
-            self.search
-                .setTextColor(Some(&native_color(self.tokens.colors.text)));
+            configure_threads_search_field(&self.search, &self.tokens, is_threads);
         }
         let owner = self.parent.contentRectForFrameRect(self.parent.frame());
         let interior = composer_picker_interior(crate::layout::Rect {
@@ -10536,8 +10556,10 @@ impl PopupLayout<'_> {
         for decoration in self.cache.palette_rows.iter().skip(chosen.len()) {
             decoration.set_hidden(true);
         }
-        let field_h = if is_palette || (is_threads && self.searchable) {
+        let field_h = if is_palette {
             24.
+        } else if is_threads && self.searchable {
+            body_h
         } else if self.searchable {
             self.search.fittingSize().height.ceil()
         } else {
@@ -10563,7 +10585,11 @@ impl PopupLayout<'_> {
         let (left, right, top) = if is_palette {
             (44., 44., (spotlight::HEADER - field_h) / 2.)
         } else if is_threads && self.searchable {
-            (edge - 2., edge - 2., (above - field_h) / 2.)
+            (
+                edge + f64::from(m.symbol_inline + t.space.sm) - 2.,
+                edge,
+                (above - field_h) / 2.,
+            )
         } else {
             (inset, inset, inset + title_h)
         };
@@ -10578,6 +10604,23 @@ impl PopupLayout<'_> {
             && self.searchable
             && let Some(body) = unsafe { self.search.superview() }
         {
+            let glyph = NSImageView::imageViewWithImage(&symbol("magnifyingglass", ""), mtm);
+            glyph.setSymbolConfiguration(Some(
+                &NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                    f64::from(m.symbol_inline - 2.),
+                    unsafe { NSFontWeightMedium },
+                ),
+            ));
+            glyph.setContentTintColor(Some(&native_color(t.colors.muted)));
+            glyph.setAccessibilityElement(false);
+            let icon_h = glyph.fittingSize().height.ceil();
+            glyph.setFrame(NSRect::new(
+                NSPoint::new(edge, height - above + ((above - icon_h) / 2.).floor()),
+                NSSize::new(f64::from(m.symbol_inline), icon_h),
+            ));
+            body.addSubview(&glyph);
+            self.parts
+                .push(Retained::into_super(Retained::into_super(glyph)));
             let thickness = self
                 .list
                 .window()
@@ -10734,6 +10777,9 @@ pub fn capture_agent_picker(
         input["placeholder"].as_str().unwrap_or_default(),
         surface,
     );
+    if surface != Surface::Palette {
+        configure_threads_search_field(&search, t, kind == Some(ComposerPicker::Threads));
+    }
     search.setHidden(!searchable);
     search.setStringValue(&NSString::from_str(query));
     let mut model = Picker {
@@ -12869,9 +12915,13 @@ mod restore_tab_tests {
     }
 }
 
-fn toolbar_top_inset(measured: f32, fullscreen: bool, visible: bool, m: &pm_design::Metrics) -> f32 {
-    if fullscreen && measured < 1. {
-        if visible { m.toolbar } else { m.dock_gap }
+fn toolbar_top_inset(measured: f32, fullscreen: bool, has_toolbar: bool, m: &pm_design::Metrics) -> f32 {
+    if fullscreen {
+        if has_toolbar {
+            measured.max(m.toolbar)
+        } else {
+            measured.max(m.dock_gap)
+        }
     } else {
         measured.max(0.)
     }
@@ -12883,7 +12933,9 @@ fn fullscreen_overlay_reserves_top_space_without_a_content_layout_inset() {
     let t = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
     let m = &t.metrics;
     assert_eq!(toolbar_top_inset(0., true, true, m), m.toolbar);
+    assert_eq!(toolbar_top_inset(8., true, true, m), m.toolbar);
+    assert_eq!(toolbar_top_inset(40., true, true, m), m.toolbar);
+    assert_eq!(toolbar_top_inset(60., true, true, m), 60.);
     assert_eq!(toolbar_top_inset(0.5, true, false, m), m.dock_gap);
-    assert_eq!(toolbar_top_inset(40., true, true, m), 40.);
     assert_eq!(toolbar_top_inset(-1., false, false, m), 0.);
 }

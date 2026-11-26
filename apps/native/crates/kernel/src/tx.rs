@@ -51,7 +51,7 @@
 //!   generation it forms a [`TxId`]. A retry returns the stored [`Ack`]
 //!   without running again; [`Call::QueryTx`] answers a lost acknowledgement.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use pm_model::patch::{Patch, PathPart};
@@ -192,6 +192,13 @@ pub enum Call {
     OpenComposition {
         comp_id: String,
         document: u64,
+    },
+    /// Clears stale persisted `"missing": true` flags on effects and transitions
+    /// whose provider is now registered (matching Electron's hydrate pass).
+    ReconcileMissingDefinitions {
+        effects: BTreeSet<String>,
+        builtin_effects: BTreeSet<String>,
+        transitions: BTreeSet<String>,
     },
     /// Lost acknowledgement: the stored ack of `txid`, if any.
     QueryTx {
@@ -874,6 +881,7 @@ impl Project {
             Call::Selection(_)
                 | Call::Workspace(_)
                 | Call::Memory(_)
+                | Call::ReconcileMissingDefinitions { .. }
                 | Call::History(HistoryCall::Mark)
         );
         let before_revision = self.revision();
@@ -987,6 +995,31 @@ impl Project {
             Call::OpenComposition { comp_id, document } => {
                 let ack = self.open_composition(caller, txid, comp_id, document);
                 Handled::reply(ack)
+            }
+            Call::ReconcileMissingDefinitions {
+                effects,
+                builtin_effects,
+                transitions,
+            } => {
+                let reply = if self.entry.is_some() {
+                    Reply::Applied {
+                        revision: self.revision(),
+                        changed: false,
+                    }
+                } else {
+                    match self.store.reconcile_missing_definitions(
+                        &effects,
+                        &builtin_effects,
+                        &transitions,
+                    ) {
+                        Ok(changed) => Reply::Applied {
+                            revision: self.revision(),
+                            changed,
+                        },
+                        Err(error) => Reply::Throw(error.into()),
+                    }
+                };
+                Handled::reply(self.ack(txid, None, None, reply))
             }
             Call::DirectWrite { ops } => Handled::reply(self.direct_write(caller, txid, ops)),
             Call::RealmFailed => self.realm_failed(caller, txid),

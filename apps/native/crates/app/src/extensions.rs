@@ -293,6 +293,9 @@ pub struct Extensions {
     /// Whether the open composition waits on such effects, for a document
     /// revision and resource generation.
     awaiting: std::cell::Cell<Option<(AwaitKey, bool)>>,
+    /// `(doc_id, revision, resource_generation)` last reconciled for stale
+    /// persisted `"missing": true` flags on effects and transitions.
+    reconciled: Option<(u64, u64, u64)>,
 }
 impl Default for Extensions {
     fn default() -> Self {
@@ -371,6 +374,7 @@ impl Default for Extensions {
             focus_text: None,
             settle_after: None,
             awaiting: Default::default(),
+            reconciled: None,
         }
     }
 }
@@ -545,6 +549,53 @@ fn builtin_effects() -> &'static BTreeSet<String> {
             .collect()
     });
     &BUILTIN
+}
+/// Transition types the engine draws without any extension.
+fn builtin_transitions() -> &'static BTreeSet<String> {
+    static BUILTIN: std::sync::LazyLock<BTreeSet<String>> = std::sync::LazyLock::new(|| {
+        pm_render::effects::versions::builtin_snapshot()
+            .definitions
+            .into_iter()
+            .filter(|d| d.kind == pm_protocol::definitions::DefinitionKind::Transition)
+            .map(|d| d.id.as_str().to_owned())
+            .collect()
+    });
+    &BUILTIN
+}
+/// Fast check: does the document contain any persisted `"missing": true` flag
+/// on an effect or transition? Avoids queuing a kernel call for clean files.
+fn document_has_missing_flags(document: &pm_model::Document) -> bool {
+    use pm_model::{Node, NodeKind};
+    let Some(root) = document.root() else {
+        return false;
+    };
+    let layers_have_missing = |layers: &[Node]| {
+        layers.iter().any(|layer| {
+            let fx_missing = matches!(layer.get("fx").map(Node::kind), Some(NodeKind::Array(fxs))
+                if fxs.iter().any(|fx| matches!(fx.get("missing").map(Node::kind), Some(NodeKind::Bool(true)))));
+            fx_missing
+                || ["transitionIn", "transitionOut"].iter().any(|field| {
+                    layer.get(*field).is_some_and(|tr| {
+                        matches!(tr.get("missing").map(Node::kind), Some(NodeKind::Bool(true)))
+                    })
+                })
+        })
+    };
+    if let Some(NodeKind::Array(layers)) = root.get("layers").map(Node::kind)
+        && layers_have_missing(layers)
+    {
+        return true;
+    }
+    if let Some(NodeKind::Object(comps)) = root.get("comps").map(Node::kind) {
+        for (_, comp) in comps.iter() {
+            if let Some(NodeKind::Array(layers)) = comp.get("layers").map(Node::kind)
+                && layers_have_missing(layers)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 /// Canvas text for an extension realm, from the fonts `broker` knows: a
 /// window's host and a pageless one measure and draw text alike.
@@ -1853,6 +1904,49 @@ impl Controller {
         self.extensions.awaiting.set(Some((key, awaiting)));
         awaiting
     }
+    /// Clears stale persisted `"missing": true` flags on effects and transitions
+    /// whose provider is currently registered (matching Electron's hydrate pass).
+    pub(crate) fn reconcile_missing_definitions(&mut self) {
+        let (Some(session), Some(published)) = (&self.session, &self.published) else {
+            return;
+        };
+        let key = (
+            published.snapshot.doc_id,
+            published.revision(),
+            self.extensions.resources.generation,
+        );
+        if self.extensions.reconciled == Some(key) {
+            return;
+        }
+        self.extensions.reconciled = Some(key);
+        if !document_has_missing_flags(&published.snapshot.document) {
+            return;
+        }
+        let mut effects = BTreeSet::new();
+        let mut transitions = builtin_transitions().clone();
+        for def in &self.extensions.resources.definitions {
+            match def.kind {
+                pm_protocol::definitions::DefinitionKind::Effect => {
+                    effects.insert(def.id.as_str().to_owned());
+                }
+                pm_protocol::definitions::DefinitionKind::Transition => {
+                    transitions.insert(def.id.as_str().to_owned());
+                }
+                _ => {}
+            }
+        }
+        let _ = self.kernel.call(
+            &session.project,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::Call::ReconcileMissingDefinitions {
+                    effects,
+                    builtin_effects: builtin_effects().clone(),
+                    transitions,
+                },
+            ),
+        );
+    }
     /// Every live viewer of this window (the editor's, the popout's) renders
     /// the same contributed definitions, now and after each change.
     pub fn apply_extension_resources(&mut self) {
@@ -1862,6 +1956,7 @@ impl Controller {
         {
             self.message = error.to_string();
         }
+        self.reconcile_missing_definitions();
     }
     pub fn extension_command(&mut self, cmd: &ShellCommand, cx: &mut Context<Self>) -> bool {
         if cmd.name == UNDO {

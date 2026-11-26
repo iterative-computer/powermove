@@ -3820,7 +3820,7 @@ impl TimelineSurface {
         let pd = point.as_ref().map_or(f64::INFINITY, |p| p.0);
         let hd = handle.as_ref().map_or(f64::INFINITY, |h| h.0);
         let prefer_point =
-            pd < graph_render::POINT_HIT && (hd >= graph_render::HANDLE_HIT || hd + 4. >= pd);
+            pd < graph_render::POINT_HIT && (hd >= graph_render::HANDLE_HIT || pd < hd);
         if hd < graph_render::HANDLE_HIT
             && !prefer_point
             && let Some((key, side)) = handle.and_then(|(_, h)| {
@@ -5487,7 +5487,8 @@ impl TimelineSurface {
                 .fold(f64::INFINITY, f64::min)
         };
         let (pd, hd) = (nearest("graph-key:"), nearest("graph-handle:"));
-        let prefer_point = pd < graph_render::POINT_HIT && (hd >= graph_render::HANDLE_HIT || hd + 4. >= pd);
+        let prefer_point =
+            pd < graph_render::POINT_HIT && (hd >= graph_render::HANDLE_HIT || pd < hd);
         Some(if hd < graph_render::HANDLE_HIT && !prefer_point {
             CursorStyle::Crosshair
         } else if pd < graph_render::POINT_HIT {
