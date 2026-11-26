@@ -688,6 +688,9 @@ impl Layout {
         geometry: &Geometry,
         natural: bool,
     ) {
+        if !self.placed_in(geometry, divider.dock) {
+            return;
+        }
         let height = |dock: usize, group: usize| {
             geometry
                 .panels
@@ -868,7 +871,7 @@ impl Layout {
         // Pinned headers sit above their bodies, including the inter-group
         // gap during push-off. Test them before the ordinary panel zones.
         if let Some(p) = geometry.panels.iter().find(|p| {
-            !self.docks[p.dock].groups[p.group].collapsed
+            self.placed(p).is_some_and(|g| !g.collapsed)
                 && geometry.header_rect(p, t).contains(x, y)
                 && geometry
                     .side_docks
@@ -882,7 +885,7 @@ impl Layout {
         if let Some(p) = geometry
             .panels
             .iter()
-            .find(|p| p.rect.contains(x, y) && !self.docks[p.dock].groups[p.group].collapsed)
+            .find(|p| p.rect.contains(x, y) && self.placed(p).is_some_and(|g| !g.collapsed))
         {
             return Some(self.panel_zone(geometry, p, x, y, t, true));
         }
@@ -1145,8 +1148,8 @@ impl Layout {
         groupable: bool,
     ) -> DropPreview {
         let r = p.rect;
-        let g = &self.docks[p.dock].groups[p.group];
-        let group = groupable && g.tabs.iter().all(|id| stacks(id));
+        let tabs = self.placed(p).map_or(&[][..], |g| g.tabs.as_slice());
+        let group = groupable && tabs.iter().all(|id| stacks(id));
         let header = geometry.header_rect(p, t);
         let header_end = (r.y + t.metrics.header).min(r.y + r.h);
         let tab = |index: usize| DropPreview {
@@ -1169,7 +1172,7 @@ impl Layout {
                 .get(&(p.dock, p.group))
                 .cloned()
                 .unwrap_or_else(|| {
-                    let n = g.tabs.len().max(1);
+                    let n = tabs.len().max(1);
                     let w = r.w / n as f32;
                     (0..n)
                         .map(|i| (i, r.x + w * i as f32, r.x + w * (i + 1) as f32))
@@ -1178,7 +1181,7 @@ impl Layout {
             let index = spans
                 .iter()
                 .find(|(_, left, right)| x < (left + right) / 2.)
-                .map_or(g.tabs.len(), |(i, ..)| *i);
+                .map_or(tabs.len(), |(i, ..)| *i);
             return tab(index);
         }
         let relative = if y < header_end {
@@ -1213,7 +1216,7 @@ impl Layout {
         } else if relative > 1. - BODY_EDGE {
             split(true)
         } else {
-            tab(g.tabs.len())
+            tab(tabs.len())
         }
     }
     /// Resolve a real drag: the target under the pointer and, as its preview,
@@ -1698,6 +1701,9 @@ impl Layout {
         let Some(i) = divider.group else {
             return false;
         };
+        if !self.placed_in(geometry, divider.dock) {
+            return false;
+        }
         let Some(j) = geometry.next_group(divider.dock, i) else {
             return false;
         };
@@ -1877,6 +1883,23 @@ impl Layout {
             .flat_map(|d| d.groups.iter())
             .flat_map(|g| g.tabs.iter().map(String::as_str))
             .collect()
+    }
+    /// The stack a placement from a layout pass names. Geometry is cached
+    /// from the last pass, so between a layout change (a panel closed from
+    /// its menu) and the next pass it can name a stack that is gone: event
+    /// handlers read it through here, never by index.
+    pub fn placed(&self, p: &Placement) -> Option<&Group> {
+        self.docks.get(p.dock)?.groups.get(p.group)
+    }
+    /// Every stack `geometry` places in `dock` still exists (see
+    /// [`Layout::placed`]); a resize from an older pass does nothing.
+    fn placed_in(&self, geometry: &Geometry, dock: usize) -> bool {
+        self.docks.get(dock).is_some_and(|d| {
+            geometry
+                .panels
+                .iter()
+                .all(|p| p.dock != dock || p.group < d.groups.len())
+        })
     }
     pub fn find(&self, id: &str) -> Option<(usize, usize, usize)> {
         self.docks.iter().enumerate().find_map(|(di, d)| {

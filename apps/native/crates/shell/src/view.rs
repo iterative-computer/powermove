@@ -1514,10 +1514,9 @@ impl Editor {
                 .panels
                 .iter()
                 .find(|p| {
-                    self.layout.docks[p.dock].groups[p.group]
-                        .tabs
-                        .iter()
-                        .any(|tab| tab == id)
+                    self.layout
+                        .placed(p)
+                        .is_some_and(|g| g.tabs.iter().any(|tab| tab == id))
                 })
                 .cloned()
                 && let Some(bounds) = self.geometry.side_docks.get(&p.dock).copied()
@@ -1548,7 +1547,7 @@ impl Editor {
                     .geometry
                     .panels
                     .iter()
-                    .find(|p| self.layout.docks[p.dock].groups[p.group].active() == *panel)
+                    .find(|p| self.layout.placed(p).is_some_and(|g| g.active() == *panel))
                 && let Some(divider) = self
                     .geometry
                     .dividers
@@ -1789,11 +1788,7 @@ impl Editor {
                         .panels
                         .iter()
                         .find(|p| p.rect.contains(at.x.into(), at.y.into()))
-                        .map(|p| {
-                            self.layout.docks[p.dock].groups[p.group]
-                                .active()
-                                .to_owned()
-                        })
+                        .and_then(|p| self.layout.placed(p).map(|g| g.active().to_owned()))
                         .or_else(|| {
                             self.panel_order
                                 .iter()
@@ -2541,7 +2536,9 @@ impl Editor {
             .panels
             .iter()
             .find(|p| {
-                let group = &self.layout.docks[p.dock].groups[p.group];
+                let Some(group) = self.layout.placed(p) else {
+                    return false;
+                };
                 group.tabs.get(group.active).is_some_and(|tab| tab == id)
                     && self
                         .maximized_panel
@@ -3578,16 +3575,14 @@ impl Editor {
                         .panels
                         .iter()
                         .find(|p| p.rect.contains(at.0, at.1))
-                        .map(|p| {
-                            let id = this.layout.docks[p.dock].groups[p.group]
-                                .active()
-                                .to_string();
-                            (
+                        .and_then(|p| {
+                            let id = this.layout.placed(p)?.active().to_string();
+                            Some((
                                 id,
                                 crate::area::Corner::ALL
                                     .into_iter()
                                     .find(|c| c.rect(p.rect).contains(at.0, at.1)),
-                            )
+                            ))
                         })).flatten();
                     if this.area_hover != hover {
                         this.area_hover = hover;
@@ -4085,7 +4080,15 @@ impl Editor {
                         .tab_index(0)
                         .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                             if event.is_keyboard() {
-                                this.layout.docks[p.dock].groups[p.group].active = ti;
+                                // `p` is from the last layout pass (see `Layout::placed`).
+                                if let Some(g) = this
+                                    .layout
+                                    .docks
+                                    .get_mut(p.dock)
+                                    .and_then(|d| d.groups.get_mut(p.group))
+                                {
+                                    g.active = ti;
+                                }
                                 this.save();
                                 cx.notify();
                             }
@@ -5114,6 +5117,62 @@ mod keyboard_tests {
             Arc::new(()),
             || None,
         )
+    }
+
+    /// The owner closed the Colour panel from its menu and the next pointer
+    /// move aborted the app: the move listener read the closed stack through
+    /// the last pass's geometry. Every panel closed from its menu, then the
+    /// pointer crosses every place the old layout drew, before a redraw.
+    #[gpui::test]
+    fn closing_any_panel_then_moving_the_pointer_never_panics(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            Editor::new(
+                Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                None,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let ids: Vec<String> = view.read_with(cx, |v, _| {
+            v.layout
+                .open_panels()
+                .into_iter()
+                .filter(|id| crate::layout::closable(id))
+                .map(str::to_owned)
+                .collect()
+        });
+        assert!(ids.len() >= 4, "{ids:?}");
+        let original = view.read_with(cx, |v, _| v.layout.clone());
+        for id in ids {
+            let rects: Vec<Rect> =
+                view.read_with(cx, |v, _| v.geometry.panels.iter().map(|p| p.rect).collect());
+            // As AppKit does after the menu closes: the moves arrive before
+            // the window draws the new layout.
+            cx.update(|window, cx| {
+                view.update(cx, |v, cx| {
+                    assert!(v.shell_command(&format!("panel:close:{id}"), cx), "{id}");
+                });
+                for r in &rects {
+                    for (x, y) in [(0.5, 0.5), (0.02, 0.02), (0.98, 0.98), (0.5, 0.05)] {
+                        let position = point(px(r.x + r.w * x), px(r.y + r.h * y));
+                        window.dispatch_event(
+                            PlatformInput::MouseMove(MouseMoveEvent {
+                                position,
+                                pressed_button: None,
+                                modifiers: Modifiers::none(),
+                            }),
+                            cx,
+                        );
+                    }
+                }
+            });
+            cx.run_until_parked();
+            view.update(cx, |v, cx| {
+                v.layout = original.clone();
+                cx.notify();
+            });
+            cx.run_until_parked();
+        }
     }
 
     #[gpui::test]
