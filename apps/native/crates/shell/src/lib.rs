@@ -39,6 +39,7 @@ pub mod menu;
 pub mod menu_input;
 #[cfg(target_os = "macos")]
 pub mod motion;
+pub mod pill;
 #[cfg(target_os = "macos")]
 pub mod slot_stage;
 #[cfg(target_os = "macos")]

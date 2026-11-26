@@ -2862,17 +2862,6 @@ impl SurfaceView {
     pub fn anchor_bounds(&self, id: Id) -> Option<Bounds<Pixels>> {
         self.anchors.borrow().get(&id).copied()
     }
-    /// The bounds of the menu anchor whose `id` prop is `element` (the
-    /// Agent composer, which its chooser stands clear of).
-    pub fn element_bounds(&self, element: &str) -> Option<Bounds<Pixels>> {
-        let (id, _) = self
-            .publication
-            .surface
-            .nodes()
-            .iter()
-            .find(|(_, node)| node.props.get("id").and_then(Value::as_str) == Some(element))?;
-        self.anchor_bounds(*id)
-    }
     /// The display-link readout follows its painted button. If the header
     /// clips that slot, hide the layer too so it cannot cover other controls.
     pub(crate) fn timeline_timecode_bounds(
@@ -4314,6 +4303,135 @@ impl SurfaceView {
         }
         self.element_close(id, element, children, window, cx)
     }
+    /// A split pill's row (`pm_shell::pill`): the hover wash that stands on
+    /// its lit part, fading in and out on the hover springs and gliding on
+    /// the layout spring when the pointer crosses to the other part. Drawn
+    /// behind the parts, from where they were laid out this frame.
+    fn pill(&self, node: &NodeView) -> AnyElement {
+        use pm_design::motion::Preset;
+        let t = self.table.tokens.clone();
+        let lit = self.pill_lit(node);
+        let spring = t.spring(if lit.is_some() {
+            Preset::HoverIn
+        } else {
+            Preset::HoverOut
+        });
+        let target = if lit.is_some() { 1. } else { 0. };
+        let amount =
+            pm_shell::motion::animate(&self.motion.values, node.id, target, spring).clamp(0., 1.);
+        let (group, anchors, glides) = (node.id, self.anchors.clone(), self.motion.glides.clone());
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let mut glides = glides.borrow_mut();
+                if let Some(part) = lit
+                    && let Some(at) = anchors.borrow().get(&part).copied()
+                {
+                    // Coming in from nothing, it starts where it lands.
+                    if amount < 0.05 {
+                        glides.remove(&group);
+                    }
+                    let place = Bounds::new(at.origin - bounds.origin, at.size);
+                    glides.entry(group).or_default().to(part, place, &t);
+                }
+                let Some(glide) = glides.get(&group) else {
+                    return;
+                };
+                if lit.is_some_and(|part| glide.travelling(part)) || (amount > 0. && amount < 1.) {
+                    window.request_animation_frame();
+                }
+                let Some(place) = glide.bounds().filter(|_| amount > 0.) else {
+                    return;
+                };
+                window.paint_quad(
+                    PaintQuad::new(Bounds::new(bounds.origin + place.origin, place.size))
+                        .corner_radii(px(t.metrics.inner_radius))
+                        .background(pm_shell::kit::ink(
+                            t.colors.text,
+                            t.translucency.hover * amount,
+                        )),
+                );
+            },
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
+    }
+    /// The part a split pill's row stands its pill on this frame: the one
+    /// whose menu is open, else the one under the pointer.
+    fn pill_lit(&self, group: &NodeView) -> Option<Id> {
+        use pm_shell::pill;
+        let parts: Vec<pill::Part<Id>> = group
+            .children
+            .iter()
+            .filter_map(|&child| {
+                let part = self.prepared.node(child)?;
+                (part.pill == Some(pill::Role::Part)).then(|| pill::Part {
+                    key: child,
+                    open: self
+                        .publication
+                        .surface
+                        .node(child)
+                        .and_then(|n| n.props.get("open"))
+                        == Some(&Value::Bool(true)),
+                    disabled: part.disabled,
+                })
+            })
+            .collect();
+        pill::lit(&parts, self.motion.hovers.current())
+    }
+    /// A pill's reveal (the model's chevron): it opens when its own part is
+    /// lit and holds while the pill shows (`pm_shell::pill::revealed`),
+    /// springing its width and leading margin open and fading in.
+    fn reveal(&self, element: Stateful<Div>, node: &NodeView) -> Stateful<Div> {
+        use pm_design::motion::Preset;
+        use pm_shell::pill::Role;
+        let (mut at, mut holder, mut group) = (node.parent, None, None);
+        while let Some(parent) = at.and_then(|p| self.prepared.node(p)) {
+            match parent.pill {
+                Some(Role::Part) if holder.is_none() => holder = Some(parent.id),
+                Some(Role::Group) => {
+                    group = Some(parent);
+                    break;
+                }
+                _ => {}
+            }
+            at = parent.parent;
+        }
+        let lit = group.and_then(|g| self.pill_lit(g));
+        let was = self
+            .motion
+            .values
+            .borrow()
+            .get(&node.id)
+            .is_some_and(|v| v.target[0] == 1.);
+        let shown = pm_shell::pill::revealed(lit, holder, was);
+        let t = &self.table.tokens;
+        let spring = t.spring(if shown { Preset::HoverIn } else { Preset::HoverOut });
+        let amount = pm_shell::motion::animate(
+            &self.motion.values,
+            node.id,
+            if shown { 1. } else { 0. },
+            spring,
+        );
+        let points = |l: Option<Length>| match l {
+            Some(Length::Definite(DefiniteLength::Absolute(AbsoluteLength::Pixels(p)))) => {
+                f32::from(p)
+            }
+            _ => 0.,
+        };
+        let (width, margin) = pm_shell::pill::reveal(
+            points(node.style.size.width),
+            points(node.style.margin.left),
+            amount,
+        );
+        element
+            .flex_none()
+            .overflow_hidden()
+            .w(px(width))
+            .ml(px(margin))
+            .opacity(amount.clamp(0., 1.))
+    }
     /// A hover group's hitbox, recorded as it paints for the next render to
     /// test against the pointer. A layout that moved the group under a still
     /// pointer (rows scrolled, a row added above) changes what it covers:
@@ -5084,6 +5202,9 @@ impl SurfaceView {
         }
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window, cx);
+        if node.pill == Some(pm_shell::pill::Role::Reveal) {
+            element = self.reveal(element, node);
+        }
         if let Some(drawing) = self.grade_canvas(id, &node.kit, node.disabled) {
             element = element.relative().child(drawing);
             if let Some(h) = self.grade_height(id, &node.kit) {
@@ -5118,6 +5239,9 @@ impl SurfaceView {
             };
         }
         let mut children: Vec<AnyElement> = offscreen_control.into_iter().collect();
+        if node.pill == Some(pm_shell::pill::Role::Group) {
+            children.push(self.pill(node));
+        }
         // `data-pm-variant="plate"`: the grading material under a group (the
         // Colour panel's sections stand on what its wheels are made of).
         if crate::v4_compile::variant_of(&self.publication.surface, id) == Some("plate") {
@@ -5150,8 +5274,10 @@ impl SurfaceView {
             .and_then(|m| m.get("selectionRingOnly")) == Some(&Value::Bool(true));
         // A cell can keep its id when list switches to grid. Its old hover
         // animation must not paint a wash behind a ring-only grid card.
-        let wash = if ring_only { 0. } else { self.motion.hovers.amount(id) };
-        let pressed = self.pressed == Some(id) && !ring_only;
+        // A split pill's part washes through the pill its row draws.
+        let own_wash = !ring_only && node.pill != Some(pm_shell::pill::Role::Part);
+        let wash = if own_wash { self.motion.hovers.amount(id) } else { 0. };
+        let pressed = self.pressed == Some(id) && own_wash;
         if (wash > 0. || pressed) && !node.disabled {
             let t = &self.table.tokens;
             let alpha = if pressed {
@@ -6337,11 +6463,29 @@ impl SurfaceView {
                     (byte(c.red) << 16) | (byte(c.green) << 8) | byte(c.blue)
                 })
             };
-            let glyph = pm_shell::symbol::symbol(
+            // A chevron whose menu is open turns to point up, on a spring
+            // a second press interrupts.
+            let degrees = node.turn.map_or(0., |up| {
+                // Its own key: the same chevron may also be a pill's reveal.
+                let key = node.id | TURN_KEY;
+                let spring = t.spring(pm_design::motion::Preset::Layout);
+                let amount = pm_shell::motion::animate(
+                    &self.motion.values,
+                    key,
+                    if up { 1. } else { 0. },
+                    spring,
+                );
+                if self.motion.values.borrow().get(&key).is_some_and(|v| v.moving()) {
+                    window.request_animation_frame();
+                }
+                pm_shell::pill::turn_degrees(amount)
+            });
+            let glyph = pm_shell::symbol::symbol_turned(
                 symbol,
                 node.symbol_size,
                 pm_shell::symbol::Weight::Regular,
                 ink,
+                degrees,
                 window,
             );
             element = if node.symbol_leads {
@@ -6609,6 +6753,10 @@ fn file_drop(paths: &[std::path::PathBuf], alt: bool) -> EventDetail {
         ..Default::default()
     }
 }
+
+/// Marks a node's chevron-turn value in the shared motion values, apart from
+/// any other value the same node animates (a pill's reveal).
+const TURN_KEY: Id = 1 << 62;
 
 impl Render for SurfaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

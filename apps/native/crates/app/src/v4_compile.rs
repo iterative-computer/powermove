@@ -282,6 +282,11 @@ pub struct NodeView {
     /// group holding it is hovered (a row's switch and the blank that keeps
     /// its column).
     pub hover_shows: Option<bool>,
+    /// `metadata.pill`: the composer pill's split hover (`pm_shell::pill`).
+    pub pill: Option<pm_shell::pill::Role>,
+    /// `metadata.turn`: a chevron that springs half a turn to point up
+    /// while `true` (its menu is open) and back when `false`.
+    pub turn: Option<bool>,
     /// `metadata.runs`: one wrapped paragraph whose words differ in style
     /// (prose with bold, italic, code and links), drawn as one text.
     pub rich: Option<Rich>,
@@ -999,6 +1004,11 @@ fn compile(
                     .sheet
                     .background
             }),
+        pill: meta
+            .and_then(|m| m.get("pill"))
+            .and_then(Value::as_str)
+            .and_then(pm_shell::pill::Role::named),
+        turn: meta.and_then(|m| m.get("turn")).and_then(Value::as_bool),
         hover_shows: if meta.and_then(|m| m.get("hoverOnly")) == Some(&Value::Bool(true)) {
             Some(true)
         } else if meta.and_then(|m| m.get("hoverHide")) == Some(&Value::Bool(true)) {

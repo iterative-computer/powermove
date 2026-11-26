@@ -212,6 +212,12 @@ pub const FILL: f32 = 14. / 16.;
 /// `glyph`'s coverage (0–255 per pixel) on a `side` × `side` canvas, centred,
 /// its longer side filling `FILL` × `glyph.size` of it.
 pub fn coverage(glyph: Glyph, side: u32) -> Option<Vec<u8>> {
+    turned(glyph, side, 0.)
+}
+
+/// `glyph`'s coverage turned `degrees` clockwise about its centre (a
+/// chevron springing round to point up while its menu is open).
+fn turned(glyph: Glyph, side: u32, degrees: f32) -> Option<Vec<u8>> {
     let tree = usvg::Tree::from_str(glyph.svg, &usvg::Options::default()).ok()?;
     let mut pixmap = tiny_skia::Pixmap::new(side, side)?;
     let (w, h) = (tree.size().width(), tree.size().height());
@@ -219,6 +225,7 @@ pub fn coverage(glyph: Glyph, side: u32) -> Option<Vec<u8>> {
     let (cx, cy) = (w / 2., h / 2.);
     let half = side as f32 / 2.;
     let mut transform = tiny_skia::Transform::from_translate(half, half)
+        .pre_rotate(degrees)
         .pre_scale(scale, scale)
         .pre_rotate(90. * glyph.turns as f32);
     if glyph.mirror {
@@ -229,13 +236,13 @@ pub fn coverage(glyph: Glyph, side: u32) -> Option<Vec<u8>> {
     Some(pixmap.pixels().iter().map(|p| p.alpha()).collect())
 }
 
-/// `glyph` tinted `color` (0xRRGGBB), or in its own colour, as straight BGRA,
-/// GPUI's sprite format.
-pub fn tinted_bgra(glyph: Glyph, side: u32, color: u32) -> Option<Vec<u8>> {
+/// `glyph` tinted `color` (0xRRGGBB), or in its own colour, turned
+/// `degrees` clockwise, as straight BGRA, GPUI's sprite format.
+pub fn tinted_bgra(glyph: Glyph, side: u32, color: u32, degrees: f32) -> Option<Vec<u8>> {
     let color = glyph.color.unwrap_or(color);
     let (r, g, b) = ((color >> 16) as u8, (color >> 8) as u8, color as u8);
     Some(
-        coverage(glyph, side)?
+        turned(glyph, side, degrees)?
             .into_iter()
             .flat_map(|a| [b, g, r, a])
             .collect(),
