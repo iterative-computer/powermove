@@ -1,5 +1,6 @@
 //! Settings › Providers against local fakes (tests/fakes): Codex's ChatGPT
-//! sign-in or API key fills Codex's own Keychain item, Codex alone refreshes
+//! sign-in or API key fills Codex's own Keychain item, which Powermove never
+//! opens (it asks Codex's App Server), Codex alone refreshes
 //! and two Codex processes never spend a refresh token twice; Claude Code's
 //! Anthropic key lists its models; Aero runs only on the Powermove account's
 //! session (Powermove inference), never on those keys or a custom endpoint.
@@ -331,18 +332,13 @@ fn chatgpt_sign_in_is_codexs_own_item_and_signed_out_from_it() {
     wait(&accounts, Provider::Chatgpt, State::Connected);
     let status = accounts.status(Provider::Chatgpt);
     assert_eq!(status.email.as_deref(), Some("owner@example.com"));
-    assert!(status.key.is_none());
+    assert!(!status.api_key);
     until("Codex's models", || {
         !accounts.models(Provider::Chatgpt).is_empty()
     });
-    // 2. One Keychain item: Codex wrote it, Settings reads the same one; no auth.json.
-    let auth = codex_auth::read(f.env.secrets.as_deref().unwrap(), env)
-        .unwrap()
-        .expect("the shared item");
-    assert_eq!(
-        auth.chatgpt.as_ref().unwrap().1.as_deref(),
-        Some("acct-fake-1")
-    );
+    // 2. One Keychain item, Codex's own; no auth.json.
+    let auth = codex_item(&f).expect("Codex's item");
+    assert_eq!(auth["tokens"]["account_id"], "acct-fake-1");
     assert!(!codex_auth::codex_home(env).join("auth.json").exists());
     let config = std::fs::read_to_string(codex_auth::codex_home(env).join("config.toml")).unwrap();
     assert!(
@@ -353,11 +349,7 @@ fn chatgpt_sign_in_is_codexs_own_item_and_signed_out_from_it() {
     // 3. Sign out: the item is gone.
     accounts.disconnect(Provider::Chatgpt);
     wait(&accounts, Provider::Chatgpt, State::Disconnected);
-    assert!(
-        codex_auth::read(f.env.secrets.as_deref().unwrap(), env)
-            .unwrap()
-            .is_none()
-    );
+    assert!(codex_item(&f).is_none());
     assert!(accounts.models(Provider::Chatgpt).is_empty());
     accounts.close();
 }
@@ -369,20 +361,14 @@ fn an_openai_key_is_codexs_and_an_anthropic_key_lists_claude_codes_models() {
     let env = &f.env;
     let accounts = Accounts::new(env.clone(), browser(), Arc::new(|| {}));
 
-    // OpenAI API key: Codex saves it in its item; Settings shows it masked.
+    // OpenAI API key: Codex saves it in its item and says it signed in with
+    // a key; the key itself never comes back to Powermove.
     accounts.connect_openai_key("sk-fake-openai-123456".into());
     wait(&accounts, Provider::Chatgpt, State::Connected);
+    assert!(accounts.status(Provider::Chatgpt).api_key);
     assert_eq!(
-        accounts.status(Provider::Chatgpt).key.as_deref(),
-        Some("sk-…3456")
-    );
-    assert_eq!(
-        codex_auth::read(f.env.secrets.as_deref().unwrap(), env)
-            .unwrap()
-            .unwrap()
-            .api_key
-            .as_deref(),
-        Some("sk-fake-openai-123456")
+        codex_item(&f).unwrap()["OPENAI_API_KEY"],
+        "sk-fake-openai-123456"
     );
     accounts.disconnect(Provider::Chatgpt);
     wait(&accounts, Provider::Chatgpt, State::Disconnected);
@@ -512,6 +498,17 @@ fn aero_runs_only_on_the_powermove_session_and_follows_its_plan() {
 fn read_store(f: &Fakes) -> String {
     std::fs::read_to_string(&f.keychain).unwrap_or_default()
 }
+/// The fake Codex's own login item, looked at by the test (Powermove never
+/// reads it): service `PM_CODEX_KEYRING_SERVICE`, any account.
+fn codex_item(f: &Fakes) -> Option<Value> {
+    let service = format!("{}\t", f.env.vars["PM_CODEX_KEYRING_SERVICE"]);
+    let store: Value = serde_json::from_str(&read_store(f)).ok()?;
+    let (_, item) = store
+        .as_object()?
+        .iter()
+        .find(|(key, _)| key.starts_with(&service))?;
+    serde_json::from_str(item.as_str()?).ok()
+}
 fn signed_in(f: &Fakes) -> Arc<Accounts> {
     let accounts = Accounts::new(f.env.clone(), browser(), Arc::new(|| {}));
     accounts.refresh(Provider::Chatgpt);
@@ -633,12 +630,7 @@ fn a_profile_file_login_is_parked_unchanged_and_back_when_the_switch_is_off() {
         !home.join("auth.json").exists(),
         "Codex's Keychain store would delete it"
     );
-    assert!(
-        codex_auth::read(f.env.secrets.as_deref().unwrap(), &f.env)
-            .unwrap()
-            .is_none(),
-        "nothing is migrated"
-    );
+    assert!(codex_item(&f).is_none(), "nothing is migrated");
     assert!(!read_store(&f).contains("file-r"));
     switched_off(&f.env).codex_vars().unwrap();
     assert_eq!(
@@ -661,9 +653,9 @@ fn an_existing_store_item_is_never_overwritten_and_the_file_login_still_comes_ba
     let home = codex_auth::codex_home(&f.env);
     std::fs::create_dir_all(&home).unwrap();
     let secrets = f.env.secrets.as_deref().unwrap();
-    let key = codex_auth::store_key(&home);
+    let service = &f.env.vars["PM_CODEX_KEYRING_SERVICE"];
     secrets
-        .write(&codex_auth::service(&f.env), &key, b"not a login")
+        .write(service, "cli|existing", b"not a login")
         .unwrap();
     std::fs::write(
         home.join("auth.json"),
@@ -672,10 +664,7 @@ fn an_existing_store_item_is_never_overwritten_and_the_file_login_still_comes_ba
     .unwrap();
     f.env.codex_vars().unwrap();
     assert_eq!(
-        secrets
-            .read(&codex_auth::service(&f.env), &key)
-            .unwrap()
-            .unwrap(),
+        secrets.read(service, "cli|existing").unwrap().unwrap(),
         b"not a login"
     );
     switched_off(&f.env).codex_vars().unwrap();
@@ -805,8 +794,8 @@ fn an_aero_turn_never_continues_on_another_powermove_session() {
     );
 }
 
-/// Item 5: Sign Out succeeds only once the shared item is gone (here Codex
-/// answers the logout but leaves the item).
+/// Item 5: Sign Out succeeds only once Codex says it is signed out (here
+/// Codex answers the logout but keeps the sign-in).
 #[test]
 fn sign_out_is_reported_only_once_the_shared_sign_in_is_gone() {
     let _serial = serial();
@@ -866,13 +855,6 @@ fn switch_off_reads_no_provider_credentials_and_keeps_todays_codex_store() {
             &keys::anthropic_service(&f.env),
             "api-key",
             b"sk-ant-fake-abcdef12",
-        )
-        .unwrap();
-    store
-        .write(
-            &codex_auth::service(&f.env),
-            &codex_auth::store_key(&codex_auth::codex_home(&f.env)),
-            br#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-fake-openai-123456"}"#,
         )
         .unwrap();
     let counting = Arc::new(Counting(
@@ -1087,5 +1069,51 @@ fn aeros_try_again_reads_its_plan_and_models_again() {
     until("the retry", || {
         matches!(accounts.aero(), Standing::Ready { .. })
     });
+    accounts.close();
+}
+
+/// Signed in to Codex (ChatGPT, then an API key) and signed out again, with
+/// Settings › Providers on: Powermove itself makes no Keychain call at all.
+/// Who is signed in, and how, comes from Codex's App Server (`account/read`);
+/// Codex alone opens its own item, so macOS never asks the person to let
+/// Powermove use "Codex Auth".
+#[test]
+fn codex_sign_in_state_comes_from_codex_never_from_the_keychain() {
+    let _serial = serial();
+    let f = fakes(3600);
+    let counting = Arc::new(Counting(
+        FakeKeychain(f.keychain.clone()),
+        Default::default(),
+    ));
+    let env = Environment {
+        secrets: Some(counting.clone()),
+        ..f.env.clone()
+    };
+    assert!(env.providers());
+    let calls = || counting.1.load(std::sync::atomic::Ordering::SeqCst);
+    // Launch: the first status check.
+    let accounts = Accounts::new(env.clone(), browser(), Arc::new(|| {}));
+    accounts.refresh(Provider::Chatgpt);
+    wait(&accounts, Provider::Chatgpt, State::Disconnected);
+    accounts.connect(Provider::Chatgpt);
+    wait(&accounts, Provider::Chatgpt, State::Connected);
+    assert_eq!(
+        accounts.status(Provider::Chatgpt).email.as_deref(),
+        Some("owner@example.com")
+    );
+    assert!(codex_item(&f).is_some(), "Codex keeps its own item");
+    // A later launch with Codex signed in.
+    accounts.close();
+    let accounts = Accounts::new(env.clone(), browser(), Arc::new(|| {}));
+    accounts.refresh(Provider::Chatgpt);
+    wait(&accounts, Provider::Chatgpt, State::Connected);
+    accounts.connect_openai_key("sk-fake-openai-123456".into());
+    until("Codex's API key sign-in", || {
+        accounts.status(Provider::Chatgpt).api_key
+    });
+    accounts.disconnect(Provider::Chatgpt);
+    wait(&accounts, Provider::Chatgpt, State::Disconnected);
+    assert!(codex_item(&f).is_none());
+    assert_eq!(calls(), 0, "Powermove opened a Keychain item for Codex");
     accounts.close();
 }

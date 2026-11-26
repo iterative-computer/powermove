@@ -22,7 +22,8 @@ HOME = os.path.realpath(os.environ["CODEX_HOME"])
 KEY = "cli|" + hashlib.sha256(HOME.encode()).hexdigest()[:16]
 out_lock = threading.Lock()
 # The Keychain is the lane's fake store (PM_AGENT_FAKE_KEYCHAIN, a JSON file
-# Powermove reads too; pm_agents::edge::FakeKeychain): never a real keychain.
+# in pm_agents::edge::FakeKeychain's format): never a real keychain. Like the
+# real Codex item, only this process opens it; Powermove asks `account/read`.
 STORE = os.environ.get("PM_AGENT_FAKE_KEYCHAIN", "")
 if not STORE.endswith(".json"):
     sys.exit("fake codex: set PM_AGENT_FAKE_KEYCHAIN to the lane's fake keychain file")

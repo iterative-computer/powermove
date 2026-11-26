@@ -15,11 +15,6 @@ pub trait Secrets: Send + Sync + std::fmt::Debug {
     fn read(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String>;
     fn write(&self, service: &str, account: &str, bytes: &[u8]) -> Result<(), String>;
     fn delete(&self, service: &str, account: &str) -> Result<(), String>;
-    /// Codex's item, read the way Codex 0.169 reads it (its macOS keyring
-    /// backend opens the default User-domain keychain, not the search list).
-    fn read_codex(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
-        self.read(service, account)
-    }
 }
 
 #[derive(Debug, Default)]

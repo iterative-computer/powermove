@@ -161,49 +161,48 @@ impl Backend {
                     }
                     r
                 };
-                match &status.key {
-                    Some(masked) => {
-                        rows.push(action(
-                            row("openai", OPENAI, "Sign in with ChatGPT"),
-                            "providers.openai.sign-in",
-                            "Sign In…",
-                            format!("Signed out. Signing in replaces the API key. {both}"),
-                        ));
-                        let mut r = action(
-                            row("openai-key", OPENAI, "API key"),
-                            "providers.openai.sign-out",
-                            "Remove",
-                            format!("{masked}. {both}"),
-                        );
-                        r["target"] = json!(masked);
-                        rows.push(with_detail(r));
-                    }
-                    None => {
-                        let name = [status.email.clone(), status.plan.clone()]
-                            .into_iter()
-                            .flatten()
-                            .collect::<Vec<_>>()
-                            .join(" · ");
-                        let detail = if name.is_empty() {
-                            format!("Signed in. {both}")
-                        } else {
-                            format!("Signed in as {name}. {both}")
-                        };
-                        let mut r = action(
-                            row("openai", OPENAI, "Sign in with ChatGPT"),
-                            "providers.openai.sign-out",
-                            "Sign Out",
-                            detail,
-                        );
-                        r["target"] = json!(name);
-                        rows.push(with_detail(r));
-                        rows.push(action(
-                            row("openai-key", OPENAI, "API key"),
-                            "providers.openai.key",
-                            "Add Key…",
-                            format!("Not added. Adding one replaces the ChatGPT sign-in. {both}"),
-                        ));
-                    }
+                if status.api_key {
+                    rows.push(action(
+                        row("openai", OPENAI, "Sign in with ChatGPT"),
+                        "providers.openai.sign-in",
+                        "Sign In…",
+                        format!("Signed out. Signing in replaces the API key. {both}"),
+                    ));
+                    let mut r = action(
+                        row("openai-key", OPENAI, "API key"),
+                        "providers.openai.sign-out",
+                        "Remove",
+                        format!("Added. {both}"),
+                    );
+                    // Codex never hands out the key: the sign-in it was
+                    // added under stands for it (a new key moves it on).
+                    r["target"] = json!(format!("api-key {}", pm_agents::codex_auth::generation()));
+                    rows.push(with_detail(r));
+                } else {
+                    let name = [status.email.clone(), status.plan.clone()]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    let detail = if name.is_empty() {
+                        format!("Signed in. {both}")
+                    } else {
+                        format!("Signed in as {name}. {both}")
+                    };
+                    let mut r = action(
+                        row("openai", OPENAI, "Sign in with ChatGPT"),
+                        "providers.openai.sign-out",
+                        "Sign Out",
+                        detail,
+                    );
+                    r["target"] = json!(name);
+                    rows.push(with_detail(r));
+                    rows.push(action(
+                        row("openai-key", OPENAI, "API key"),
+                        "providers.openai.key",
+                        "Add Key…",
+                        format!("Not added. Adding one replaces the ChatGPT sign-in. {both}"),
+                    ));
                 }
             }
             Some((State::Connecting, status)) => rows.push(action(

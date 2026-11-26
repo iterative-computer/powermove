@@ -276,8 +276,8 @@ impl Environment {
     /// and after that its absence means sign-out.
     ///
     /// Switch on (Settings › Providers): the Keychain
-    /// (`cli_auth_credentials_store = "keyring"`), the one OpenAI credential
-    /// Codex and Powermove both read (`codex_auth`). The person's own Codex
+    /// (`cli_auth_credentials_store = "keyring"`), read and written by Codex
+    /// alone (`codex_auth`; Powermove asks Codex). The person's own Codex
     /// home is never read: they sign in fresh, so Powermove's login is its
     /// own token family and never rotates theirs. Nothing is migrated: a file
     /// login this profile already had is parked beside it (renamed, never

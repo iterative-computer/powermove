@@ -40,8 +40,9 @@ pub struct Status {
     pub email: Option<String>,
     pub plan: Option<String>,
     pub detail: Option<String>,
-    /// Signed in with an API key: the key masked (`sk-…a1b2`).
-    pub key: Option<String>,
+    /// Codex signed in with an OpenAI API key (its `account/read` says
+    /// `apiKey`). Codex never hands out the key, so none is shown.
+    pub api_key: bool,
 }
 impl Status {
     fn of(state: State, detail: Option<String>) -> Self {
@@ -50,7 +51,7 @@ impl Status {
             email: None,
             plan: None,
             detail: detail.map(|d| d.chars().take(DETAIL_LIMIT).collect()),
-            key: None,
+            api_key: false,
         }
     }
 }
@@ -416,16 +417,15 @@ impl Accounts {
             Job::Refresh => {}
             Job::Disconnect => {
                 peer.request("account/logout", json!({}), REQUEST)?;
-                // Signed out only once the shared item is gone (P1-4): live
-                // runs on it stop when the identity generation moves.
-                if self.environment.providers()
-                    && let Some(secrets) = &self.environment.secrets
-                {
-                    if crate::codex_auth::read(secrets.as_ref(), &self.environment)?.is_some() {
-                        let mut status = chatgpt_status(&mut peer)?;
-                        status.detail = Some("Codex couldn’t remove the sign-in. Try Sign Out again.".into());
-                        return Ok(status);
-                    }
+                // Signed out only once Codex itself says so (P1-4): live runs
+                // on the old sign-in stop when the identity generation moves.
+                let mut status = chatgpt_status(&mut peer)?;
+                if status.state != State::Disconnected {
+                    status.detail =
+                        Some("Codex couldn’t remove the sign-in. Try Sign Out again.".into());
+                    return Ok(status);
+                }
+                if self.environment.providers() {
                     crate::codex_auth::identity_changed();
                 }
                 self.set_models(Provider::Chatgpt, vec![]);
@@ -485,7 +485,6 @@ impl Accounts {
         {
             crate::codex_auth::identity_changed();
         }
-        self.read_openai_key(&mut status);
         if status.state == State::Connected {
             self.slots.lock().unwrap().get_mut(Provider::Chatgpt.name()).unwrap().finding_models = true;
             self.bump();
@@ -501,21 +500,6 @@ impl Accounts {
             }
         }
         Ok(status)
-    }
-    /// With Codex on an API key: the key masked, as Settings › Providers
-    /// shows it (read from the shared Keychain item, never from Codex).
-    fn read_openai_key(&self, status: &mut Status) {
-        if !self.environment.providers() {
-            return;
-        }
-        let key = match (&self.environment.secrets, status.state) {
-            (Some(secrets), State::Connected) => crate::codex_auth::read(secrets.as_ref(), &self.environment)
-                .ok()
-                .flatten()
-                .and_then(|auth| auth.api_key),
-            _ => None,
-        };
-        status.key = key.as_deref().map(crate::keys::mask);
     }
     fn claude(
         &self,
@@ -614,7 +598,10 @@ fn chatgpt_status(peer: &mut Peer) -> Result<Status, String> {
     let account = &read["account"];
     if account["type"] == "apiKey" {
         // Codex signed in with an OpenAI API key (the second way in under Settings › Providers).
-        return Ok(Status::of(State::Connected, None));
+        return Ok(Status {
+            api_key: true,
+            ..Status::of(State::Connected, None)
+        });
     }
     if account["type"] != "chatgpt" {
         return Ok(Status::of(State::Disconnected, None));
@@ -624,7 +611,7 @@ fn chatgpt_status(peer: &mut Peer) -> Result<Status, String> {
         email: text(&account["email"], 320),
         plan: text(&account["planType"], 80).map(|p| plan_name(&p)),
         detail: None,
-        key: None,
+        api_key: false,
     })
 }
 fn chatgpt_models(peer: &mut Peer) -> Result<Vec<Model>, String> {
@@ -777,7 +764,7 @@ fn claude_status(
         // no plan and never shown.
         plan: text(&value["subscriptionType"], 80).map(|p| plan_name(&p)),
         detail: None,
-        key: None,
+        api_key: false,
     })
 }
 /// Claude Code answers an initialize control request without a user prompt.

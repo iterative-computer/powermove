@@ -1,6 +1,6 @@
 //! Settings › Providers, the app's part: the Keychain and the system HTTP
-//! stack for `pm-agents` (Codex's shared OpenAI item, the Anthropic key,
-//! Powermove's model requests), and the native sheet that takes an OpenAI
+//! stack for `pm-agents` (the Anthropic key, Powermove's model requests;
+//! never Codex's or Claude Code's own sign-in items), and the native sheet that takes an OpenAI
 //! or Anthropic API key in a secure field. The key goes from the field to
 //! the Keychain (Anthropic) or to Codex, which saves it in the shared item
 //! (OpenAI); it is never published, logged or written to the profile.
@@ -25,9 +25,6 @@ impl Secrets for Keychain {
     }
     fn delete(&self, service: &str, account: &str) -> Result<(), String> {
         crate::cloud::keychain::Mac.delete(service, account)
-    }
-    fn read_codex(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
-        crate::cloud::keychain::read_user_default(service, account)
     }
 }
 

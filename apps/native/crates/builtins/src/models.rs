@@ -833,7 +833,7 @@ impl Backend {
             .native
             .agent_link
             .accounts()
-            .filter(|a| a.status(pm_agents::Provider::Chatgpt).key.is_some())
+            .filter(|a| a.status(pm_agents::Provider::Chatgpt).api_key)
             .map(|_| (pm_agents::Provider::Chatgpt.name(), "OpenAI API key"))
             .into_iter()
             .collect();

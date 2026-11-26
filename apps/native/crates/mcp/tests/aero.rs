@@ -2632,7 +2632,7 @@ mod routes {
     use pm_agents::edge::{Chunk, Loopback, MemorySecrets, Net, NetRequest};
     use pm_agents::inference::{PowermoveAccount, Session};
     use pm_agents::launch::Environment;
-    use pm_agents::{codex_auth, compatible, keys};
+    use pm_agents::{compatible, keys};
     use std::process::{Child, Command, Stdio};
     use std::sync::atomic::AtomicBool;
 
@@ -2820,15 +2820,8 @@ mod routes {
             net: Some(wire.clone()),
             powermove: Some(Arc::new(Signed)),
             compatible: Some(Arc::new(Custom(format!("{}/custom/v1", emulate.base)))),
-            vars: [(
-                "PM_CODEX_KEYRING_SERVICE".to_owned(),
-                "pm-effort-routes Codex Auth".to_owned(),
-            )]
-            .into(),
             ..Environment::default()
         };
-        // Codex's login item is keyed by its home's canonical path.
-        std::fs::create_dir_all(codex_auth::codex_home(&env)).unwrap();
         Some(Routes {
             fixture,
             env,
@@ -2903,7 +2896,7 @@ mod routes {
         }
     }
 
-    /// With an OpenAI key in Codex's item, an Anthropic key, a ChatGPT
+    /// With an Anthropic key, a ChatGPT
     /// sign-in's old model ids and a saved custom endpoint, every Aero
     /// request still goes to Powermove inference on the Powermove session:
     /// no key or other origin is ever reached.
@@ -2914,14 +2907,6 @@ mod routes {
             &keys::anthropic_service(&r.env),
             "api-key",
             b"sk-ant-fake-abcdef12",
-        );
-        let account = codex_auth::store_key(&codex_auth::codex_home(&r.env));
-        r.secret(
-            &codex_auth::service(&r.env),
-            &account,
-            json!({"auth_mode":"apikey","OPENAI_API_KEY":"sk-fake-openai-1234"})
-                .to_string()
-                .as_bytes(),
         );
         // Ids saved on the old routes never run on Aero at all.
         for saved in [
