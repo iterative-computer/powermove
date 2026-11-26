@@ -1474,8 +1474,16 @@ mod tests {
             files: vec![],
             project: None,
         };
-        for saved in ["openai/gpt-6-sol", "anthropic/claude-opus-5-5", "custom/llama-4", "chatgpt/gpt-6-sol"] {
-            assert!(!aero_queued_ok(&link, &settings(saved)), "{saved} was queued to send");
+        for saved in [
+            "openai/gpt-6-sol",
+            "anthropic/claude-opus-5-5",
+            "custom/llama-4",
+            "chatgpt/gpt-6-sol",
+        ] {
+            assert!(
+                !aero_queued_ok(&link, &settings(saved)),
+                "{saved} was queued to send"
+            );
             assert!(
                 aero_checked(&link, (Environment::default(), request(saved))).is_err(),
                 "{saved} was sent"

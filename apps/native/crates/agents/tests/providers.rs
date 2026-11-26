@@ -1024,8 +1024,14 @@ fn the_test_endpoint_is_sent_a_development_credential_never_the_session() {
     ));
     powermove_says(&f.env, "pm/anthropic/claude-opus-5.5", "high").unwrap();
     let raw = stats(&f.base)["raw"].to_string();
-    assert!(raw.contains(&format!("Bearer {DEV}")), "the fakes saw no credential");
-    assert!(!raw.contains(AERO_SESSION), "the session reached the test endpoint");
+    assert!(
+        raw.contains(&format!("Bearer {DEV}")),
+        "the fakes saw no credential"
+    );
+    assert!(
+        !raw.contains(AERO_SESSION),
+        "the session reached the test endpoint"
+    );
 }
 
 /// P1 (Sol, PM-750): signing out while Aero's reply streams stops that
@@ -1053,7 +1059,10 @@ fn signing_out_mid_turn_stops_the_held_stream_and_runs_none_of_its_reply() {
     account.set(None);
     let result = turn.join().unwrap();
     control(&f.base, serde_json::json!({"hold_seconds": 0}));
-    assert!(result.is_err(), "the turn carried on after sign-out: {result:?}");
+    assert!(
+        result.is_err(),
+        "the turn carried on after sign-out: {result:?}"
+    );
     assert!(
         started.elapsed() < Duration::from_secs(8),
         "it waited for the held reply"
@@ -1075,6 +1084,8 @@ fn aeros_try_again_reads_its_plan_and_models_again() {
     control(&f.base, serde_json::json!({"aero": "plan"}));
     // What the panel's Try Again asks for.
     accounts.refresh(Provider::Aero);
-    until("the retry", || matches!(accounts.aero(), Standing::Ready { .. }));
+    until("the retry", || {
+        matches!(accounts.aero(), Standing::Ready { .. })
+    });
     accounts.close();
 }

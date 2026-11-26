@@ -2931,7 +2931,9 @@ mod routes {
             "chatgpt/gpt-6-sol",
         ] {
             assert_eq!(
-                pm_agents::inference::live(&r.env, saved, "high").err().as_deref(),
+                pm_agents::inference::live(&r.env, saved, "high")
+                    .err()
+                    .as_deref(),
                 Some(pm_agents::inference::CHOOSE),
                 "{saved}"
             );

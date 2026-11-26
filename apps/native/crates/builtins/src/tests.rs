@@ -4716,11 +4716,17 @@ fn a_rejected_powermove_session_offers_sign_in_in_providers() {
     let accounts = backend.native.agent_link.accounts().unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while accounts.aero() != pm_agents::inference::Standing::SignedOut {
-        assert!(std::time::Instant::now() < deadline, "Aero never read the session");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Aero never read the session"
+        );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let rows = backend.account_rows();
-    let row = rows.iter().find(|r| r["id"] == "providers.powermove").unwrap();
+    let row = rows
+        .iter()
+        .find(|r| r["id"] == "providers.powermove")
+        .unwrap();
     assert_eq!(row["action"], "account.sign-in", "{row}");
     assert_eq!(row["actionLabel"], "Sign In…");
     assert!(row["detail"].as_str().unwrap().contains("ended"), "{row}");
@@ -4764,23 +4770,48 @@ fn providers_are_the_powermove_account_for_aero_openai_for_codex_and_anthropic_f
         std::sync::Arc::new(|_| Ok(())),
     );
     let rows = backend.account_rows();
-    let providers: Vec<_> = rows.iter().filter(|r| r["section"] == "providers").collect();
-    let groups: Vec<&str> = providers.iter().filter_map(|r| r["group"].as_str()).collect();
+    let providers: Vec<_> = rows
+        .iter()
+        .filter(|r| r["section"] == "providers")
+        .collect();
+    let groups: Vec<&str> = providers
+        .iter()
+        .filter_map(|r| r["group"].as_str())
+        .collect();
     let mut seen = groups.clone();
     seen.dedup();
     assert_eq!(
         seen,
-        ["Powermove Account (Aero)", "OpenAI (Codex)", "Anthropic (Claude Code)"]
+        [
+            "Powermove Account (Aero)",
+            "OpenAI (Codex)",
+            "Anthropic (Claude Code)"
+        ]
     );
-    let aero = providers.iter().find(|r| r["id"] == "providers.powermove").unwrap();
+    let aero = providers
+        .iter()
+        .find(|r| r["id"] == "providers.powermove")
+        .unwrap();
     assert_eq!(aero["action"], "account.sign-out");
-    assert!(aero["detail"].as_str().unwrap().starts_with("Signed in as @maker."));
-    for gone in ["providers.custom", "providers.custom-remove", "providers.aerolite"] {
+    assert!(
+        aero["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("Signed in as @maker.")
+    );
+    for gone in [
+        "providers.custom",
+        "providers.custom-remove",
+        "providers.aerolite",
+    ] {
         assert!(providers.iter().all(|r| r["id"] != gone), "{gone}");
     }
     for row in &providers {
         let detail = row["detail"].as_str().unwrap_or_default();
-        assert!(!detail.contains("Powermove only") && !detail.contains("and Powermove"), "{row}");
+        assert!(
+            !detail.contains("Powermove only") && !detail.contains("and Powermove"),
+            "{row}"
+        );
     }
     backend.native.agent_link.close();
 }

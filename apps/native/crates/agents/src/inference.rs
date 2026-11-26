@@ -224,9 +224,9 @@ pub fn standing(env: &Environment) -> Standing {
     match parse_usage(status, &body) {
         Ok(UsageAnswer::SignedOut) => Standing::SignedOut,
         // An offer that repeats the credential is never shown or opened.
-        Ok(UsageAnswer::NoPlan(offer)) => {
-            Standing::NoPlan(offer.filter(|o| !o.url.contains(&bearer) && !o.label.contains(&bearer)))
-        }
+        Ok(UsageAnswer::NoPlan(offer)) => Standing::NoPlan(
+            offer.filter(|o| !o.url.contains(&bearer) && !o.label.contains(&bearer)),
+        ),
         Ok(UsageAnswer::Plan(usage)) => match get("/models") {
             Ok((200, body)) => match parse_models(&body) {
                 Ok(models) => Standing::Ready { usage, models },
@@ -292,7 +292,11 @@ fn offer(value: &Value) -> Option<Offer> {
     let parsed = url::Url::parse(value["url"].as_str()?).ok()?;
     let host = parsed.host_str()?;
     let ours = host == "trypowermove.com" || host.ends_with(".trypowermove.com");
-    let plain = |s: &str| !s.chars().any(|c| c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'));
+    let plain = |s: &str| {
+        !s.chars().any(|c| {
+            c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+    };
     (parsed.scheme() == "https"
         && ours
         && parsed.username().is_empty()
@@ -344,7 +348,9 @@ pub fn parse_models(body: &[u8]) -> Result<Vec<Model>, String> {
             let name = m["name"]
                 .as_str()
                 .map(str::trim)
-                .filter(|n| !n.is_empty() && n.chars().count() <= 64 && !n.chars().any(char::is_control))
+                .filter(|n| {
+                    !n.is_empty() && n.chars().count() <= 64 && !n.chars().any(char::is_control)
+                })
                 .unwrap_or(id);
             // The context window, when the catalogue gives it, as the
             // picker reads it from a label ("(200K context)").
@@ -584,7 +590,10 @@ mod tests {
         ] {
             assert_eq!(offer(url, "Get Aerolite"), None, "{url}");
         }
-        assert_eq!(offer("https://trypowermove.com/aero", "Get\u{202e}Aerolite"), None);
+        assert_eq!(
+            offer("https://trypowermove.com/aero", "Get\u{202e}Aerolite"),
+            None
+        );
         // Exact host and subdomains, kept canonical.
         assert_eq!(
             offer("https://TryPowermove.com/aero", "Get Aerolite").map(|o| o.url),
@@ -637,7 +646,11 @@ mod tests {
             "custom/llama-4",
             "pm/",
         ] {
-            assert_eq!(live(&env, saved, "high").err().as_deref(), Some(CHOOSE), "{saved}");
+            assert_eq!(
+                live(&env, saved, "high").err().as_deref(),
+                Some(CHOOSE),
+                "{saved}"
+            );
         }
         let live = live(&env, "pm/openai/gpt-6-sol", "high").unwrap();
         assert_eq!(live.model, "openai/gpt-6-sol");
@@ -665,7 +678,10 @@ mod tests {
         )]);
         let env = Environment {
             powermove: Some(Arc::new(Signed)),
-            net: Some(crate::edge::Reroute::from_env(&vars, Arc::new(crate::edge::Loopback))),
+            net: Some(crate::edge::Reroute::from_env(
+                &vars,
+                Arc::new(crate::edge::Loopback),
+            )),
             ..Environment::default()
         };
         assert!(live(&env, "pm/openai/gpt-6-sol", "").is_err());
