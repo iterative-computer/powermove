@@ -484,6 +484,13 @@ pub fn dismisses(event: Outside) -> bool {
         }
     )
 }
+/// The chooser is the topmost layer: it keeps its own window's keys, and
+/// takes Escape from whichever window has the keyboard (the Agent popover
+/// or the editor, which would close the whole panel on it): Escape closes
+/// the chooser first; the next one reaches the panel (w127).
+pub fn takes_key(key: &str, in_chooser: bool) -> bool {
+    in_chooser || key == "escape"
+}
 /// The part toggles its menu: a press on the part a menu hangs from closes
 /// it and goes no further, so the part's own click can't open it again. A
 /// press on the other part closes it and goes on (that part opens its menu).
@@ -1394,8 +1401,13 @@ impl Chooser {
     pub(super) fn is_open(&self) -> bool {
         self.state.borrow().open
     }
-    pub(super) fn owns_event(&self, event: &NSEvent) -> bool {
-        self.is_open() && self.state.borrow().window.windowNumber() == event.windowNumber()
+    /// A key down `key` (`event`) goes to the chooser ([`takes_key`]).
+    pub(super) fn takes(&self, event: &NSEvent, key: &str) -> bool {
+        self.is_open()
+            && takes_key(
+                key,
+                self.state.borrow().window.windowNumber() == event.windowNumber(),
+            )
     }
     pub(super) fn key(&self, chord: &str) -> bool {
         key(&self.state, chord)
@@ -1731,6 +1743,16 @@ mod tests {
         let t = Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default());
         let shape = Shape::new(&t);
         assert!(shape.search + 20. * shape.row > shape.most);
+    }
+    #[test]
+    fn escape_from_any_window_closes_the_chooser_first() {
+        // The popover or the editor has the keyboard: Escape is the
+        // chooser's, other keys are not.
+        assert!(takes_key("escape", false));
+        assert!(!takes_key("up", false));
+        assert!(!takes_key("a", false));
+        // In its own window every key is its (typing reaches its search).
+        assert!(takes_key("up", true) && takes_key("a", true));
     }
     #[test]
     fn everything_outside_dismisses_it_but_a_press_inside() {
