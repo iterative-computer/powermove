@@ -28,14 +28,17 @@ test('the catalogue: v1 shape, provider ids, efforts, one default', async () =>
 test('credits are ceil(cost_usd * 200), cached input at the cached rate', () => {
   const sol = modelById('openai/gpt-6.2-sol')!;
   expect(CREDIT_MICRO_USD).toBe(5_000);
-  // 1M fresh input at $1.75 = $1.75 = 350 credits.
-  expect(cost(sol, { input: 1_000_000, cacheRead: 0, cacheWrite: 0, output: 0 })).toEqual({ microUsd: 1_750_000, credits: 350 });
-  // The same input fully cached costs a tenth.
-  expect(cost(sol, { input: 1_000_000, cacheRead: 1_000_000, cacheWrite: 0, output: 0 }).credits).toBe(35);
+  // 200k fresh input at $2/M = $0.40 = 80 credits.
+  expect(cost(sol, { input: 200_000, cacheRead: 0, cacheWrite: 0, output: 0 })).toEqual({ microUsd: 400_000, credits: 80 });
+  // The same input fully cached costs a twentieth ($0.10/M).
+  expect(cost(sol, { input: 200_000, cacheRead: 200_000, cacheWrite: 0, output: 0 }).credits).toBe(4);
+  // Above 272k input the whole request is at the long-context tier ($4/M): 300k = $1.20 = 240 credits.
+  expect(cost(sol, { input: 300_000, cacheRead: 0, cacheWrite: 0, output: 0 }).credits).toBe(240);
   // Anything above zero is at least one credit.
   expect(cost(sol, { input: 1, cacheRead: 0, cacheWrite: 0, output: 0 }).credits).toBe(1);
   const opus = modelById('anthropic/claude-opus-5-5')!;
-  expect(cost(opus, { input: 1_000_000, cacheRead: 0, cacheWrite: 1_000_000, output: 0 }).credits).toBe(1250);
+  // 1M cache write at $5/M = $5 = 1,000 credits.
+  expect(cost(opus, { input: 1_000_000, cacheRead: 0, cacheWrite: 1_000_000, output: 0 }).credits).toBe(1000);
   for (const model of MODELS) expect(model.price.cachedInput).toBeLessThan(model.price.input);
 });
 
