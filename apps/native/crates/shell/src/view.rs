@@ -182,6 +182,8 @@ pub struct Editor {
     resize_live: bool,
     resize_geometry: Option<Geometry>,
     tab_scrolls: HashMap<String, TabScroll>,
+    /// Hover washes of the panel tabs.
+    motion: crate::motion::Motion<u64>,
     header_tools_widths: Rc<RefCell<HashMap<String, f32>>>,
     #[cfg(test)]
     rendered_tab_labels: HashMap<(usize, usize), Vec<RenderedTabLabel>>,
@@ -338,6 +340,7 @@ impl Editor {
             resize_live: false,
             resize_geometry: None,
             tab_scrolls: HashMap::new(),
+            motion: Default::default(),
             header_tools_widths: Rc::default(),
             #[cfg(test)]
             rendered_tab_labels: HashMap::new(),
@@ -591,10 +594,10 @@ impl Editor {
         let offset = self.dock_scroll.get(id).copied().unwrap_or(0.);
         let maximum = self.dock_scroll_max.get(id).copied().unwrap_or(0.);
         let depth = pm_design::DOCK_SCROLL_FADE;
-        (
-            if offset > 0. { depth } else { 0. },
-            if offset < maximum { depth } else { 0. },
-        )
+        // The fade grows with what has gone past the edge: a column a point
+        // from its end fades a point, never the whole ramp at once (the top
+        // header blinked between crisp and faded as a scroll crossed 0).
+        (offset.clamp(0., depth), (maximum - offset).clamp(0., depth))
     }
 
     fn dock_body_fade(&self, dock: usize, clip: Rect) -> [f64; 2] {
@@ -608,8 +611,12 @@ impl Editor {
         ]
     }
 
-    fn dock_fade_edges(&self, dock: usize) -> Edges<AbsoluteLength> {
+    /// The column's fade on a panel in it. A panel whose header is pinned
+    /// at the column's top (`pinned`) takes none there: the header is the
+    /// edge, drawn whole, and the body scrolls under it.
+    fn dock_fade_edges(&self, dock: usize, pinned: bool) -> Edges<AbsoluteLength> {
         let (top, bottom) = self.dock_fade(dock);
+        let top = if pinned { 0. } else { top };
         Edges {
             top: px(top).into(),
             bottom: px(bottom).into(),
@@ -2789,10 +2796,10 @@ impl Editor {
 }
 /// A token colour at an alpha (`translucency.*`, `Tokens::edge`, `Tokens::line`).
 /// Space between neighbouring tab pills.
-const TAB_SPACING: f32 = 2.;
+const TAB_SPACING: f32 = pm_design::tab::GAP;
 const TAB_STEP: f32 = layout::MIN_TAB_WIDTH + TAB_SPACING;
 const TAB_EDGE_FADE: f32 = 16.;
-const TAB_PADDING: f32 = 12.;
+const TAB_PADDING: f32 = pm_design::tab::PAD;
 
 fn whole_tabs(viewport: f32, widths: impl IntoIterator<Item = f32>) -> (usize, f32) {
     let mut count = 0;
@@ -2837,10 +2844,13 @@ fn agent_header_width(label: f32, m: &pm_design::Metrics) -> f32 {
     label.ceil() + m.symbol_inline + 4. * m.pill_inset + m.hit
 }
 
-fn tab_viewport_width(width: f32, tools: f32, restore: bool, t: &Tokens) -> f32 {
+/// Room for a header's tabs: its width less the tools, the ⌄ menu when the
+/// tabs overflow, and the restore button of a maximised panel.
+fn tab_viewport_width(width: f32, tools: f32, menu: bool, restore: bool, t: &Tokens) -> f32 {
     let m = &t.metrics;
-    let gaps = 1 + usize::from(tools > 0.) + usize::from(restore);
-    let reserved = tools + m.hit + if restore { m.symbol_inline } else { 0. };
+    let gaps = usize::from(menu) + usize::from(tools > 0.) + usize::from(restore);
+    let reserved =
+        tools + if menu { m.hit } else { 0. } + if restore { m.symbol_inline } else { 0. };
     (width - reserved - t.space.xs * gaps as f32 - t.space.hair).max(0.)
 }
 
@@ -2871,53 +2881,6 @@ fn tab_label(title: &str, natural: f32, room: f32, measure: impl Fn(&str) -> f32
         .rev()
         .find_map(|(index, _)| fits(&title[..index]))
         .unwrap_or_else(|| ("…".to_owned(), ellipsis))
-}
-
-/// Keep hit targets fixed. Distribute the space left by truncation between
-/// the labels, with each label still inside the tab that owns it.
-fn tab_label_insets(widths: &[f32], labels: &[(String, f32)]) -> Vec<f32> {
-    let mut tab_left = 0.;
-    let mut packed = 0.;
-    // Subtract the preceding label widths. Each remaining interval constrains
-    // the first label position plus one copy of the gap per preceding tab.
-    let starts: Vec<_> = widths
-        .iter()
-        .zip(labels)
-        .map(|(&width, (_, label))| {
-            let left = tab_left - packed;
-            tab_left += width + TAB_SPACING;
-            packed += label;
-            (left, left + (width - label).max(0.))
-        })
-        .collect();
-    let mut minimum = 0f32;
-    let mut maximum = f32::INFINITY;
-    for (i, &(left, right)) in starts.iter().enumerate() {
-        for (j, &(next_left, next_right)) in starts.iter().enumerate().skip(i + 1) {
-            let steps = (j - i) as f32;
-            minimum = minimum.max((next_left - right) / steps);
-            maximum = maximum.min((next_right - left) / steps);
-        }
-    }
-    if minimum > maximum {
-        return widths
-            .iter()
-            .zip(labels)
-            .map(|(&width, (_, label))| (width - label) / 2.)
-            .collect();
-    }
-    let gap = (2. * TAB_PADDING + TAB_SPACING).clamp(minimum, maximum);
-    let mut first = (0f32, f32::INFINITY);
-    for (index, &(left, right)) in starts.iter().enumerate() {
-        first.0 = first.0.max(left - index as f32 * gap);
-        first.1 = first.1.min(right - index as f32 * gap);
-    }
-    let first = TAB_PADDING.clamp(first.0, first.1.max(first.0));
-    starts
-        .iter()
-        .enumerate()
-        .map(|(i, (left, _))| first + i as f32 * gap - left)
-        .collect()
 }
 
 fn panel_switcher_entries(group: &layout::Group, panels: &layout::Panels) -> Vec<MenuEntry> {
@@ -3800,6 +3763,8 @@ impl Editor {
             integration.open_panels(&self.open_panels(), cx);
         }
         let mut native_panels = NativePanelGeometry::default();
+        self.motion.frame(w);
+        let kit = crate::kit::Kit::new(&t, &self.motion, |v: &mut Editor| &mut v.motion, w, cx);
         let above_status = Rect {
             x: 0.,
             y: 0.,
@@ -3827,8 +3792,15 @@ impl Editor {
             let active = group.active.min(tabs.len() - 1);
             // Folded to its header (a double-click on the header).
             let collapsed = group.collapsed && !is_viewer;
+            let multi = tabs.len() > 1;
+            // A stack's tabs are the window's tabs (`pm_design::tab`): a
+            // regular title. A lone panel's title is its header's.
             let label_size = t.typography.title;
-            let label_weight = FontWeight(t.typography.medium_weight);
+            let label_weight = if multi {
+                FontWeight::NORMAL
+            } else {
+                FontWeight(t.typography.medium_weight)
+            };
             let widths: Vec<f32> = tabs
                 .iter()
                 .map(|tab| {
@@ -3983,12 +3955,19 @@ impl Editor {
                         this.tab_menu(&menu_header, e.position, cx);
                     }),
                 );
-            let multi = tabs.len() > 1;
             if custom.is_some() && !multi {
                 header = header.px(px(0.));
             }
+            // The strip stands as far in from the panel's edge as its tabs
+            // stand from the header's top: the first pill is concentric with
+            // the panel's corner.
+            let tab_inset = ((m.header - m.control) / 2.).max(0.);
+            let tab_radius = t.radius.nested(m.panel_radius, tab_inset);
             if multi {
-                header = header.pl(px(0.)).pr(px(t.space.hair)).gap(px(t.space.xs));
+                header = header
+                    .pl(px(tab_inset))
+                    .pr(px(t.space.hair))
+                    .gap(px(t.space.xs));
             }
             if multi || custom.is_none() {
                 // Quiet text tabs (language §9): the active title in `text`, the
@@ -4020,9 +3999,18 @@ impl Editor {
                 } else {
                     m.hit
                 };
-                let viewport =
-                    tab_viewport_width(p.rect.w, tools, self.maximized_panel.is_some(), &t);
+                // The ⌄ menu shows only when the tabs, shrunk evenly to
+                // their floors, still do not fit.
+                let restore = self.maximized_panel.is_some();
                 let gaps = TAB_SPACING * tabs.len().saturating_sub(1) as f32;
+                let fits_without =
+                    tab_viewport_width(p.rect.w - tab_inset, tools, false, restore, &t);
+                let overflow = multi && group.tab_track(fits_without - gaps, &widths).scroll > 0.;
+                let viewport = if overflow {
+                    tab_viewport_width(p.rect.w - tab_inset, tools, true, restore, &t)
+                } else {
+                    fits_without
+                };
                 let track = group.tab_track(viewport - gaps, &widths);
                 let scrolling = multi && track.scroll > 0.;
                 let limit = tabs.len().saturating_sub(
@@ -4065,25 +4053,36 @@ impl Editor {
                         )
                     })
                     .collect();
-                let mut insets = vec![0.; tabs.len()];
+                #[cfg(test)]
                 let window = first..first + visible;
-                if multi {
-                    insets[window.clone()].copy_from_slice(&tab_label_insets(
-                        &track.widths[window.clone()],
-                        &labels[window.clone()],
-                    ));
-                }
                 let mut row = div().flex().items_center().gap(px(TAB_SPACING));
                 let mut span_x = p.rect.x + if multi { -offset } else { m.inset };
                 let mut spans = vec![];
+                // Room the strip has past its tabs: a hovered tab grows into it
+                // to show its close button beside its title, never over it.
+                let spare = if scrolling {
+                    0.
+                } else {
+                    viewport - track.widths.iter().sum::<f32>() - gaps
+                };
+                let close_room =
+                    pm_design::tab::CLOSE_PAD + pm_design::tab::CLOSE + pm_design::tab::GAP
+                        - TAB_PADDING;
                 for (ti, tab) in tabs.iter().enumerate() {
+                    let closable = layout::closable(tab) && multi;
+                    let hover_key = crate::kit::key(&format!("tab-{tab}"));
+                    // 0 at rest, 1 under the pointer, on the wash springs.
+                    let hovered = if dragging { 0. } else { kit.hovered(hover_key) };
+                    let reveal = if closable && !dragging { hovered } else { 0. };
+                    let grows = spare >= close_room;
                     let drawn = if multi {
-                        track.widths[ti]
+                        track.widths[ti] + if grows { close_room * reveal } else { 0. }
                     } else {
                         single_width
                     };
                     let (label, label_width) = &labels[ti];
-                    let inset = insets[ti];
+                    // Every title starts the tab's padding in: a title never moves.
+                    let inset = if multi { TAB_PADDING } else { 0. };
                     let truncated = label.as_str() != panels.title(tab);
                     let tab_left = span_x;
                     let span_width = if multi { drawn } else { *label_width };
@@ -4118,12 +4117,18 @@ impl Editor {
                     let selected = ti == active;
                     let ghost = lifted.is_some_and(|d| d.id == *tab || (d.stack && d.id == id));
                     let close_id = tab.clone();
-                    let closable = layout::closable(tab) && multi;
-                    let tab_group: SharedString = format!("tab-{tab}").into();
                     let title = panels.title(tab).to_string();
+                    // Under the pointer a fainter pill than the showing tab's,
+                    // so only one tab ever reads as selected.
+                    let fill = if !multi {
+                        0.
+                    } else if selected {
+                        pm_design::tab::FILL
+                    } else {
+                        pm_design::tab::FILL_HOVER * hovered
+                    };
                     let mut cell = div()
                         .id(format!("tab-{tab}"))
-                        .group(tab_group.clone())
                         .role(Role::Tab)
                         .accessibility_id(format!("shell.tab.{tab}"))
                         .aria_selected(selected)
@@ -4148,10 +4153,11 @@ impl Editor {
                         .flex_none()
                         .flex()
                         .items_center()
-                        .h(px(m.hit))
+                        .h(px(if multi { m.control } else { m.hit }))
                         .when(multi, |s| {
-                            let s = s.rounded(px(m.control_radius));
-                            s.when(!dragging, |s| s.hover_style(|s| s.bg(rgb(c.hover))))
+                            s.rounded(px(tab_radius)).when(fill > 0.004, |s| {
+                                s.bg(tint(pm_design::tab::ink(t.scheme), fill))
+                            })
                         })
                         .when(slide != 0., |s| s.left(px(slide)))
                         .text_color(if ghost {
@@ -4159,47 +4165,87 @@ impl Editor {
                         } else if selected || !multi {
                             tint(c.text, 1.)
                         } else {
-                            tint(c.muted, 1.)
-                        })
-                        .when(multi && !selected && !dragging, |s| {
-                            s.group_hover_style(tab_group.clone(), |s| {
-                                s.text_color(rgb(c.secondary))
-                            })
+                            tint(c.secondary, 1.)
                         })
                         .text_size(px(label_size))
                         .font_family(pm_design::TEXT_FONT)
                         .font_weight(label_weight)
                         .whitespace_nowrap();
+                    if multi {
+                        cell = kit.track_hover(cell, hover_key);
+                    }
+                    // A closable tab's close button slides in at its trailing
+                    // end with the hover while the title's end fades out under
+                    // it (the window's tabs); the title itself never moves.
+                    // Grown, the title keeps its whole room. Only in a full
+                    // strip does the button stand over the title's end, which
+                    // fades out under it (the window's tabs); the title itself
+                    // is never cut again.
+                    let close_lead = pm_design::tab::CLOSE_PAD + pm_design::tab::CLOSE;
+                    let label_right = if grows {
+                        TAB_PADDING
+                    } else {
+                        TAB_PADDING + (close_lead - TAB_PADDING) * reveal
+                    };
                     cell = cell
                         .when(multi, |s| s.w(px(drawn)))
                         .when(!multi, |s| s.max_w(px(drawn)))
                         .when(truncated && !dragging, |s| s.tooltip(tooltip(&t, &title)))
-                        .child(div().ml(px(inset)).flex_none().child(label.clone()));
+                        .child(if multi {
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(px(inset))
+                                .right(px(label_right))
+                                .flex()
+                                .items_center()
+                                .overflow_hidden()
+                                .when(
+                                    reveal > 0.004 && *label_width > drawn - inset - label_right,
+                                    |d| {
+                                        d.overflow_fade(Edges::<AbsoluteLength> {
+                                            left: px(0.).into(),
+                                            right: px(pm_design::tab::FADE * reveal).into(),
+                                            top: px(0.).into(),
+                                            bottom: px(0.).into(),
+                                        })
+                                    },
+                                )
+                                .child(div().flex_none().child(label.clone()))
+                        } else {
+                            div().flex_none().child(label.clone())
+                        });
+                    // Always there for the keyboard (Tab reaches it, and it
+                    // shows while focused); seen only with the hover.
                     if closable && !dragging {
-                        let leading = inset >= TAB_PADDING;
+                        let slide = pm_design::tab::CLOSE_SLIDE * (1. - reveal);
                         cell = cell.child(
                             div()
                                 .id(format!("close-{tab}"))
                                 .aria_label(format!("Close {title}"))
                                 .role(Role::Button)
                                 .tab_index(0)
-                                .focus_style(|s| s.opacity(1.))
                                 .absolute()
-                                .when(leading, |button| button.left_0())
-                                .when(!leading, |button| button.right_0().bg(rgb(c.hover)))
-                                .top_0()
-                                .bottom_0()
-                                .w(px(TAB_PADDING))
+                                .top(px((m.control - pm_design::tab::CLOSE) / 2.))
+                                .right(px(pm_design::tab::CLOSE_PAD - slide))
+                                .size(px(pm_design::tab::CLOSE))
+                                .rounded(px(t
+                                    .radius
+                                    .nested(tab_radius, (m.control - pm_design::tab::CLOSE) / 2.)))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .opacity(0.)
-                                .group_hover_style(tab_group.clone(), |s| s.opacity(1.))
+                                .opacity(reveal)
+                                .focus_style(|s| s.opacity(1.))
+                                .hover_style(|s| {
+                                    s.bg(tint(pm_design::tab::ink(t.scheme), pm_design::tab::FILL))
+                                })
                                 .child(crate::symbol::symbol(
                                     "xmark",
                                     m.symbol_inline - 3.,
                                     crate::symbol::Weight::Semibold,
-                                    c.muted,
+                                    c.secondary,
                                     w,
                                 ))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -4221,7 +4267,7 @@ impl Editor {
                             div()
                                 .absolute()
                                 .inset_0()
-                                .rounded(px(m.control_radius))
+                                .rounded(px(tab_radius))
                                 .border(px(1.))
                                 .border_dashed()
                                 .border_dashed_length(2.5)
@@ -4258,12 +4304,12 @@ impl Editor {
                         .min_w(px(0.))
                         .flex_shrink(1.)
                         .overflow_hidden()
-                        .h(px(m.hit))
+                        .h(px(m.control))
                         .child(
                             div()
                                 .relative()
                                 .w(px(clip_width))
-                                .h(px(m.hit))
+                                .h(px(m.control))
                                 .overflow_hidden()
                                 .overflow_fade(Edges::<AbsoluteLength> {
                                     left: px(if first > 0 { TAB_EDGE_FADE } else { 0. }).into(),
@@ -4311,7 +4357,7 @@ impl Editor {
                 } else {
                     header = header.child(row);
                 }
-                if multi {
+                if overflow {
                     let entries = panel_switcher_entries(group, &panels);
                     header = header.child(
                         div()
@@ -4472,7 +4518,7 @@ impl Editor {
                     local.x -= bounds.x;
                     local.y -= bounds.y;
                     panel = panel.left(px(local.x)).top(px(local.y));
-                    root = root.child(positioned(*bounds).overflow_hidden().overflow_fade(self.dock_fade_edges(p.dock)).child(panel));
+                    root = root.child(positioned(*bounds).overflow_hidden().overflow_fade(self.dock_fade_edges(p.dock, header_offset > 0.)).child(panel));
                 } else {
                     root = root.child(panel);
                 }
@@ -4595,7 +4641,7 @@ impl Editor {
                 local.x -= bounds.x;
                 local.y -= bounds.y;
                 panel = panel.left(px(local.x)).top(px(local.y));
-                root = root.child(positioned(*bounds).overflow_hidden().overflow_fade(self.dock_fade_edges(p.dock)).child(panel));
+                root = root.child(positioned(*bounds).overflow_hidden().overflow_fade(self.dock_fade_edges(p.dock, header_offset > 0.)).child(panel));
             } else {
                 root = root.child(panel);
             }
@@ -5802,7 +5848,8 @@ mod keyboard_tests {
             v.geometry.side_docks.insert(dock, viewport);
             v.dock_scroll_max.insert("right".into(), 80.);
             let clip = Rect { y: 15., h: 90., ..viewport };
-            for (offset, expected) in [(0., [0., 23.]), (0.25, [23., 23.]), (80., [23., 0.])] {
+            // The ramp grows with the offset: a quarter point in fades nothing yet.
+            for (offset, expected) in [(0., [0., 23.]), (0.25, [0., 23.]), (40., [23., 23.]), (79.5, [23., 0.]), (80., [23., 0.])] {
                 v.dock_scroll.insert("right".into(), offset);
                 assert_eq!(v.dock_body_fade(dock, clip), expected);
                 let middle = Rect { y: 40., h: 20., ..viewport };

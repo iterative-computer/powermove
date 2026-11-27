@@ -1904,10 +1904,10 @@ impl TabView {
             }
             let ink = if dark { 1. } else { 0. };
             let alpha = match (lifted.get(), active) {
-                (true, _) => TAB_FILL * 1.75,
-                (false, true) => TAB_FILL,
-                (false, false) => TAB_FILL * 0.6,
-            };
+                (true, _) => pm_design::tab::FILL_LIFTED,
+                (false, true) => pm_design::tab::FILL,
+                (false, false) => pm_design::tab::FILL_INACTIVE,
+            } as f64;
             NSColor::colorWithSRGBRed_green_blue_alpha(ink, ink, ink, alpha).setFill();
             shape().fill();
         }
@@ -2758,32 +2758,31 @@ fn move_tab(window: &NSWindow, by: isize) {
         route(tab.windowNumber(), "persistSession".into());
     }
 }
+/// The tab spec shared with panel stacks (`pm_design::tab`), in AppKit's units.
 /// Widest a project tab grows; its title truncates in the middle.
-const TAB_MAX: f64 = 180.;
+const TAB_MAX: f64 = pm_design::tab::MAX as f64;
 /// How far above or below the strip a dragged tab tears off into a window.
 const TAB_TEAR: f64 = 36.;
 /// How far down from a window's top edge its tab strip takes a dropped tab:
 /// the toolbar's height.
 const STRIP_REACH: f64 = 52.;
 /// Narrowest a long title's tab gets: enough of a name to tell projects apart.
-const TAB_MIN: f64 = 96.;
+const TAB_MIN: f64 = pm_design::tab::MIN as f64;
 /// Between the strip's cells.
-const TAB_GAP: f64 = 4.;
-/// A cell's corner, and the alpha of the one neutral ink that fills the
-/// showing project's cell and the cell under the pointer.
+const TAB_GAP: f64 = pm_design::tab::GAP as f64;
+/// A cell's corner, concentric with the toolbar's glass.
 const TAB_RADIUS: f64 = 8.;
-const TAB_FILL: f64 = 0.08;
 /// A title stands this far inside each end of its tab.
-const TAB_PAD: f64 = 14.;
+const TAB_PAD: f64 = pm_design::tab::PAD as f64;
 /// An edited project's dot before its title, and the space after the dot.
 const TAB_DOT: f64 = 6.;
 const TAB_DOT_GAP: f64 = 6.;
 /// The close button: its side, how far it stands from the tab's trailing
 /// end, how far it slides in, and how much of the title fades out before it.
-const TAB_CLOSE: f64 = 16.;
-const TAB_CLOSE_PAD: f64 = 8.;
-const TAB_CLOSE_SLIDE: f64 = 6.;
-const TAB_FADE: f64 = 14.;
+const TAB_CLOSE: f64 = pm_design::tab::CLOSE as f64;
+const TAB_CLOSE_PAD: f64 = pm_design::tab::CLOSE_PAD as f64;
+const TAB_CLOSE_SLIDE: f64 = pm_design::tab::CLOSE_SLIDE as f64;
+const TAB_FADE: f64 = pm_design::tab::FADE as f64;
 /// Where the strip starts before the toolbar has laid it out (after the
 /// window buttons), the tools' width before they exist, and the clear space
 /// kept between the strip and the tools.

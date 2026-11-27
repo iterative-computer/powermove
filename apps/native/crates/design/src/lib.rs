@@ -1357,6 +1357,48 @@ pub mod workspace {
     pub const DEFAULT_EFFECTS: f32 = 268.;
 }
 
+/// One tab, wherever a strip of them shows: the window's project tabs
+/// (AppKit, in the toolbar) and a panel stack's tabs (GPUI, in its header)
+/// are the same tab. A quiet title; the showing tab a soft neutral pill;
+/// the tab under the pointer a wash of that pill; a closable tab's close
+/// button slides in at its trailing end on hover while the title's end
+/// fades out under it, so the title never moves. Height `metrics.control`.
+pub mod tab {
+    use super::Scheme;
+    /// A title stands this far inside each end of its tab.
+    pub const PAD: f32 = 14.;
+    /// Between neighbouring tabs.
+    pub const GAP: f32 = 4.;
+    /// The pill's alpha of [`ink`]: the showing tab, and the one under the
+    /// pointer at the end of its wash.
+    pub const FILL: f32 = 0.08;
+    /// The wash under the pointer on a tab that is not showing: about half
+    /// the showing tab's pill, so a hovered tab never reads as selected.
+    pub const FILL_HOVER: f32 = FILL * 0.5;
+    /// The pill in a window that is not the main one.
+    pub const FILL_INACTIVE: f32 = FILL * 0.6;
+    /// A tab carried along its strip by the pointer.
+    pub const FILL_LIFTED: f32 = FILL * 1.75;
+    /// The close button's side, its gap to the tab's trailing end, and how
+    /// far it slides in from.
+    pub const CLOSE: f32 = 16.;
+    pub const CLOSE_PAD: f32 = 8.;
+    pub const CLOSE_SLIDE: f32 = 6.;
+    /// How much of the title fades out before the close button.
+    pub const FADE: f32 = 14.;
+    /// Narrowest a long title's tab gets: enough of a name to tell tabs apart.
+    pub const MIN: f32 = 96.;
+    /// Widest a tab grows; a longer title truncates.
+    pub const MAX: f32 = 180.;
+    /// The pill's one neutral ink: black on light, white on dark.
+    pub fn ink(scheme: Scheme) -> u32 {
+        match scheme {
+            Scheme::Light => 0x000000,
+            Scheme::Dark => 0xffffff,
+        }
+    }
+}
+
 /// The desktop dock's CSS mask uses a 28 point linear ramp.
 pub const DOCK_SCROLL_FADE: f32 = 28.;
 
