@@ -1,5 +1,5 @@
-//! Section 2's third linear-blending line, measured for the Phase 3a gate
-//! (docs/engine/phase3a-gate.md): "A Gaussian blur of a white line conserves
+//! Section 2's third linear-blending line, measured for the Phase 3a gate:
+//! "A Gaussian blur of a white line conserves
 //! energy within 0.5%" (computed at 32-bit, sRGB output).
 //!
 //! A one-pixel white line on black, blurred by the built-in `blur` effect
@@ -129,7 +129,7 @@ fn render(r: &mut Renderer, doc: &pm_model::Document) -> Vec<f32> {
 }
 
 #[test]
-#[ignore = "gate measurement (docs/engine/phase3a-gate.md); run with --ignored"]
+#[ignore = "gate measurement; run with --ignored"]
 fn gaussian_blur_of_a_white_line_conserves_energy() {
     let mut r = Renderer::headless().expect("a Metal device");
     r.set_definitions(&all_builtin_definitions())

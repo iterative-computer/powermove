@@ -5,7 +5,7 @@
 //! and every dumped value is compared (`items`): natively (`native`), and
 //! with `--wasm` through the built pm-wasm module in Node plus the same
 //! engine compiled natively, which must reply byte for byte the same
-//! (`wasm`). See docs/engine/phase1-gate.md.
+//! (`wasm`).
 
 pub mod compare;
 pub mod corpus;

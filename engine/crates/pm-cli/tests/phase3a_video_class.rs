@@ -1,5 +1,5 @@
 //! Section 25's video class against its FFmpeg reference, measured for the
-//! Phase 3a gate (docs/engine/phase3a-gate.md): "the engine within 1 CV of an
+//! Phase 3a gate: "the engine within 1 CV of an
 //! FFmpeg plus zimg reference using the same chroma filter".
 //!
 //! Two sets of sources. The e2e fixture videos (`engine/fixtures`)
@@ -1205,7 +1205,7 @@ fn measure(
 }
 
 #[test]
-#[ignore = "gate measurement (docs/engine/phase3a-gate.md); run with --ignored"]
+#[ignore = "gate measurement; run with --ignored"]
 fn video_class_against_ffmpeg_and_zimg() {
     let fixtures = repo().join("engine/fixtures");
     let mut r = Renderer::headless().expect("a Metal device");

@@ -645,7 +645,7 @@ Chromium (hidden-host.md). This is the shader runner only; composition frames
 remain native.
 The hidden tabs present CPU snapshots from `pm-node`.
 
-See [hidden-host.md](hidden-host.md) for runtime wiring, reproducible gates and
+See hidden-host.md for runtime wiring, reproducible gates and
 remaining compatibility dependencies. Both macOS architectures build through
 `pm-node-addon`, `pm-bridge-addon` and the shipping release profile; no LTO
 profile override is required after the release-build repair. Assembly requires

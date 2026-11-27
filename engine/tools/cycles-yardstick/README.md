@@ -2,7 +2,7 @@
 
 This directory is an optional, test-only harness. Blender and Mitsuba are never
 app, build, packaging, or download dependencies. See
-[`docs/studio/cycles-yardstick.md`](../../../docs/studio/cycles-yardstick.md) for
+`docs/studio/cycles-yardstick.md` for
 the original corpus and scoring contract. Generated images, scene exports and
 reports must stay outside the repository.
 

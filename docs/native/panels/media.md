@@ -5,10 +5,10 @@ GPUI, AppKit, WebKit, V8, Node, pixels, styling or product copy. Reference:
 `v1.2.0` (`07ed5fa17ee640659cb075f9cad1af2095011d60`).
 
 Read with [kernel](../kernel.md), [W1 workflows](../w1-workflows.md) W018–021,
-[keymap](../w1-keymap.md), [C-MATRIX](../c-matrix.md),
-[D-STATE](../d-state.md), [MCP](../mcp.md), [traces](../traces.md),
+[keymap](../w1-keymap.md), C-MATRIX,
+D-STATE, [MCP](../mcp.md), [traces](../traces.md),
 [engine service](../engine-service.md), [first launch](../first-launch.md),
-[V8](../s1-v8.md), [compat](../s5-compat.md), [pro media](../pro-media.md),
+V8, compat, [pro media](../pro-media.md),
 and the existing [design language](../design/language.md).
 
 ## Authority and integration

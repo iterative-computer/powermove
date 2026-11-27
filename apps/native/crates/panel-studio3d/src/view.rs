@@ -1570,7 +1570,7 @@ pub fn scene_summary(p: &Published) -> Result<Option<Value>> {
     ))
 }
 /// A rough per-frame export time for a quality policy at a pixel size, from
-/// the measured M5 worker timings (docs/native/studio3d-port.md): tracing
+/// the measured M5 worker timings: tracing
 /// scales with samples and pixels, OIDN adds a fixed cost per frame.
 pub fn estimate_seconds_per_frame(quality: &Value, width: f64, height: f64) -> f64 {
     let max = quality["maxSamples"].as_f64().unwrap_or(256.);

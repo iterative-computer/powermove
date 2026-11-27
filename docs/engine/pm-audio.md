@@ -1339,7 +1339,7 @@ under Gaps.
 
 The round-9 review found three blockers: unbounded resident sequential decodes,
 embedded video trims reread at each run, and understated A8 results. The previous
-campaign is preserved in [pm-audio-history.md](pm-audio-history.md): five scenarios
+campaign is preserved in pm-audio-history.md: five scenarios
 missed, including the keyed cold seek (43.40 vs 33.41 ms max); the keyed edit reached
 44.90 vs 32.70 ms p95 (+12.2 ms).
 

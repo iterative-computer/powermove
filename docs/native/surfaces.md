@@ -62,13 +62,13 @@ Design references below are relative to `docs/native/design/`:
 | Agent | [panels/agent-panel.md](design/panels/agent-panel.md) | Popover/pinned presentation, composer, conversation, inline questions, pickers and results. |
 | Settings | [panels/settings.md](design/panels/settings.md) | Project, General, Accounts, Transcription, Extensions; sections may delegate detailed workflows. |
 | Export | [panels/export-sheet.md](design/panels/export-sheet.md) | Export settings, destination and progress. Web-animation export is explicitly removed by owner decision. |
-| Shell review | [reviews/na-shell2.md](design/reviews/na-shell2.md), [reviews/na-shell3.md](design/reviews/na-shell3.md) | Shell, palette, workspace sheet, docking and tab/menu fixes; not every project dialog. |
-| Viewer review | [reviews/na-viewer2.md](design/reviews/na-viewer2.md) | Viewer and shell review findings; open items remain evidence gaps. |
-| Services review | [reviews/na-cloud-services.md](design/reviews/na-cloud-services.md) | Library row data/vocabulary, error copy, update sheet, font family/face menus and recovered-document notice. Library layout is not fully specified. |
-| Store-host review | [reviews/na-cloud-storehost.md](design/reviews/na-cloud-storehost.md) | Batched isolated-permission sheet, Full Access alert, stored decisions, stale prompts and missing display-data fallbacks. Not a Store-screen specification. |
-| Pro-media review | [reviews/na-cloud-promedia.md](design/reviews/na-cloud-promedia.md) | Render bar and Background Tasks popover/window, labels/errors and render-queue replacement; ETA/terminal rows and AX summary are deferred. |
-| Kit review | [reviews/na-cloud-uikit.md](design/reviews/na-cloud-uikit.md) | Native control recipes, semantics and accessibility; renderer integration/review still required. |
-| Theme reviews | [reviews/themes.md](design/reviews/themes.md), [reviews/na-cloud-editions.md](design/reviews/na-cloud-editions.md) | Theme translation and compat DOM appearances; not a theme-browser or arbitrary extension-content redesign. |
+| Shell review | reviews/na-shell2.md, reviews/na-shell3.md | Shell, palette, workspace sheet, docking and tab/menu fixes; not every project dialog. |
+| Viewer review | reviews/na-viewer2.md | Viewer and shell review findings; open items remain evidence gaps. |
+| Services review | reviews/na-cloud-services.md | Library row data/vocabulary, error copy, update sheet, font family/face menus and recovered-document notice. Library layout is not fully specified. |
+| Store-host review | reviews/na-cloud-storehost.md | Batched isolated-permission sheet, Full Access alert, stored decisions, stale prompts and missing display-data fallbacks. Not a Store-screen specification. |
+| Pro-media review | reviews/na-cloud-promedia.md | Render bar and Background Tasks popover/window, labels/errors and render-queue replacement; ETA/terminal rows and AX summary are deferred. |
+| Kit review | reviews/na-cloud-uikit.md | Native control recipes, semantics and accessibility; renderer integration/review still required. |
+| Theme reviews | reviews/themes.md, reviews/na-cloud-editions.md | Theme translation and compat DOM appearances; not a theme-browser or arbitrary extension-content redesign. |
 
 ## Attachment status, 2026-11-05
 
@@ -313,11 +313,11 @@ Entry points were followed rather than counting filenames as independent UIs:
    [MCP](mcp.md). A proposed model name in a design spec is not proof it exists.
 
 Behavioral cross-checks: [W1](w1-workflows.md) W001–078 (and the post-tag
-appendix), [keymap](w1-keymap.md), [C-MATRIX](c-matrix.md) / [CSV](c-matrix.csv),
-[D-STATE](d-state.md), [traces](traces.md), [V8](s1-v8.md),
-[compat](s5-compat.md), [engine service](engine-service.md) and
+appendix), [keymap](w1-keymap.md), C-MATRIX / CSV,
+D-STATE, [traces](traces.md), V8,
+compat, [engine service](engine-service.md) and
 [first launch](first-launch.md). Historical WebKit-logic spike text is superseded
-by the adopted V8-logic/remote-DOM decision in [P0 decisions](p0-decisions.md).
+by the adopted V8-logic/remote-DOM decision in P0 decisions.
 
 Small presentation components are included with their owning surface rather than
 counted as separate windows. The remaining component files below complete the
@@ -421,7 +421,7 @@ already existed: 23 rows **model only → spec+model**; S011 and S040 stay
 26 model only, 22 nothing**; **54** rows (all P2/P3) and the N001–N007
 native-only rows still need an Opus specification. A spec is not a visual
 approval: each lane's built surface still goes through
-[review-checklist.md](design/review-checklist.md).
+review-checklist.md.
 
 ## Authority surface implementation — 2026-11-01
 

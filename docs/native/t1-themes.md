@@ -3900,7 +3900,7 @@ contributions and then workspace contributions. Stylesheet `!important` still
 beats normal inline values. A later normal `:root` theme rule does not beat an
 earlier `:root[data-theme="dark"]` rule. Radius and colour aliases remain live
 expressions; derived accent hover moves toward white, as in both shipped palettes.
-Per [design review](design/reviews/na-cloud-editions.md), floating surfaces
+Per design review, floating surfaces
 always use `colors.floating`, including the tagged app root rule that formerly
 aliased them to the panel. Compat documents occupy solid panels/sheets, so
 `--bg-window` uses opaque `colors.window` in all eight editions; AppKit owns

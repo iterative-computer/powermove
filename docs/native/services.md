@@ -170,7 +170,7 @@ release, publication, or production updater was changed.
 
 ## Design review follow-up
 
-The governing review is [na-cloud-services](design/reviews/na-cloud-services.md).
+The governing review is na-cloud-services.
 This lane supplies data contracts only; shell rendering remains with its owner.
 
 | Review item | Implementation / selecting rule |

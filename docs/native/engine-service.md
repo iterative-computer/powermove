@@ -445,7 +445,7 @@ protection, mixed-display alignment and calibrated HDR output.
 
 ### Performance fix pass (2026-11-01)
 
-See [the P1 fix-pass report](perf-gate-p1.md#fix-pass--2026-11-01) for conditions,
+See the P1 fix-pass report for conditions,
 before/after observations and remaining failures. **P1 is not passed.**
 
 The native viewer now uses three bounded drawables, forward-only display targets,
@@ -477,7 +477,7 @@ The only kernel edit adds actor/publication timing in `actor.rs`.
 
 ### Latency pass (2026-11-01)
 
-See [the P1 latency pass](perf-gate-p1.md#latency-pass--2026-11-01). **P1 is not passed**; the
+See the P1 latency pass. **P1 is not passed**; the
 session was locked, so there are no on-screen rows.
 
 - **Held frames:** during playback a tick whose stamp and media time match the last
@@ -506,7 +506,7 @@ session was locked, so there are no on-screen rows.
   target, so each sample contained the previous estimate plus that refresh. With the
   upper-decile estimator it climbed one refresh at a time to 333–375 ms at 120 Hz
   and frames stopped reaching glass (see
-  [P1 fix pass](perf-gate-p1.md#p1-fix-pass--2026-11-01)). Traces record `requested`.
+  P1 fix pass). Traces record `requested`.
 - `PM_ENGINE_PRESENT=legacy` restores the previous schedule for same-build A/B only.
 
 Layer configuration is unchanged (3 drawables, display sync, no transaction present):

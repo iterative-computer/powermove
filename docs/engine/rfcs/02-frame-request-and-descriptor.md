@@ -120,7 +120,7 @@ measures that cost under main-process load.
 
 Draft changes made while building the production frame bridge (plan
 section 18 with amendments 4 and 5; design notes in
-[`../bridge.md`](../bridge.md)).
+`../bridge.md`).
 
 **Needs the contract owner's sign-off.** These are not additive: the four
 new fields are required (`FrameDescriptor.view_seq` and `duration`,
@@ -161,10 +161,10 @@ after the merge; draft contracts interoperate only between equal builds.
 Open question 1 (overlay geometry as a separate event) stays open: the test
 source sends one overlay layer per frame, and frames without selection
 changes still carry it. The descriptor's size with one layer is in
-[`../bridge.md`](../bridge.md).
+`../bridge.md`.
 
 Later production findings (details and measurements in
-[`../bridge.md`](../bridge.md)):
+`../bridge.md`):
 
 - **A page that goes away never reports its imports released.** Electron
   drops the renderer's release notice once a page unloads, so main reclaims

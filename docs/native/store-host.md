@@ -7,9 +7,9 @@ engine dependency. **This is not a macOS WebKit adapter, Store distribution
 service, sandboxed helper launcher, or proof of v1–3 corpus compatibility.**
 
 Read with [compat-host.md](compat-host.md), [runtime-v8.md](runtime-v8.md),
-[s5-compat.md](s5-compat.md), [kernel.md](kernel.md), [first-launch.md](first-launch.md),
-[D-STATE](d-state.md) and [C-MATRIX](c-matrix.md). Orchestrator decision 5 in
-[p0-decisions.md](p0-decisions.md) wins over the original WebKit-owned runtime.
+s5-compat.md, [kernel.md](kernel.md), [first-launch.md](first-launch.md),
+D-STATE and C-MATRIX. Orchestrator decision 5 in
+p0-decisions.md wins over the original WebKit-owned runtime.
 
 ## Placement and identities
 

@@ -9,7 +9,7 @@ random seek to draw p50 125.4, p95 347.5, max 736.3 ms against p95 ≤ 300
 ms, and a playhead drag that showed 242 of 360 asked frames.
 
 Builds on: [media.md](media.md) (sessions, the decode service, the frame
-cache), [tracer.md](tracer.md) (the presenter, transport, the measurement
+cache), tracer.md (the presenter, transport, the measurement
 spec), [pm-render.md](pm-render.md) (media into working textures).
 
 ## Where the time went

@@ -12,7 +12,7 @@ publish.workspace = true
 # own crate because Cargo never passes `-C lto` to a crate whose types are
 # ["cdylib", "rlib"]: this cdylib-only crate gets the release profile's thin
 # LTO, and pm-wasm stays a plain rlib for its native tests, pm-cli and the
-# native side of the bit-identity check (docs/engine/release-build.md).
+# native side of the bit-identity check.
 [lib]
 crate-type = ["cdylib"]
 test = false

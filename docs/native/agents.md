@@ -480,7 +480,7 @@ unfinished runs interrupted without automatic restart, preserves their old
 status, and cannot restore Computer authority. The real-actor/real-pipe test
 reopens and compares the entire durable archive.
 
-See [agents-cloud4.md](agents-cloud4.md) for the integration APIs, decisions and
+See agents-cloud4.md for the integration APIs, decisions and
 rules, exact outside-owned changes and A01–A10 remaining acceptance. This closes
 portable service boundaries, not the missing application registration/renderer,
 provider credentials, project-memory metadata admission or all of HANDOFF 9.

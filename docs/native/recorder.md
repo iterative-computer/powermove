@@ -204,7 +204,7 @@ these gates or claim a GPUI/WebKit/Metal presentation result.
 
 References: [HTML Canvas](https://html.spec.whatwg.org/multipage/canvas.html),
 [Compositing and Blending Level 1](https://www.w3.org/TR/compositing-1/),
-[c-matrix](c-matrix.md), [S5](s5-compat.md), [architecture](p0-decisions.md),
+c-matrix, S5, architecture,
 [engine service](engine-service.md).
 
 ### Linux verification, initial implementation

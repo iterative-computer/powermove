@@ -116,7 +116,7 @@ provided diagnostic callback with no lane-authored user copy.
 ## DESIGN-TODO(opus)
 
 **Answered 2026-11-01** in
-[reviews/na-cloud-p-viewer.md](../../../../../docs/native/design/reviews/na-cloud-p-viewer.md)
+reviews/na-cloud-p-viewer.md
 (design lead); D2, D3 and D5 are implemented on `feat/na-design-fix-p-viewer`.
 The list below is kept for history.
 

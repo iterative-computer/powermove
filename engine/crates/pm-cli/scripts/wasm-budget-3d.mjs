@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /* The memory row's `pm-wasm` part (plan section 25: "`pm-wasm` budget with the
-   3D corpus"; docs/engine/phase3a-gate.md). Loads every 3D project of the
+   3D corpus"). Loads every 3D project of the
    newest v1 corpus capture (and the real project for scale) into its own
    instance of the built module, as a window's mirror holds it, asks every
    layer query at every captured sample time plus a pick grid, and reports

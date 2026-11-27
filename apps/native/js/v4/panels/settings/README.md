@@ -72,7 +72,7 @@ and the full-height scroller still need the owning host implementation.
 ## DESIGN-TODO(opus)
 
 **Answered 2026-11-01** in
-[reviews/na-cloud-p-settings.md](../../../../../docs/native/design/reviews/na-cloud-p-settings.md)
+reviews/na-cloud-p-settings.md
 (design lead). The list below is kept for history; follow the review.
 
 1. Confirm the missing Settings-only Switch, secure field, minimal NSColorWell,

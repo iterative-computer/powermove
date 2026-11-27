@@ -1,6 +1,6 @@
 fn main() {
-    // The commit telemetry reports as `build`: the release build sets it
-    // (docs/native/distribution.md); development builds read "dev".
+    // The commit telemetry reports as `build`: the release build sets it;
+    // development builds read "dev".
     println!("cargo:rerun-if-env-changed=PM_BUILD_COMMIT");
     let commit = std::env::var("PM_BUILD_COMMIT").unwrap_or_else(|_| "dev".into());
     println!("cargo:rustc-env=PM_BUILD_COMMIT={commit}");

@@ -3,7 +3,7 @@
 Status: **component/wire/native-description implementation tested on Linux;
 AppKit/GPUI rendering, host integration and Opus visual approval pending**.
 Governing design: [language.md](design/language.md), [tokens.md](design/tokens.md),
-[review-checklist.md](design/review-checklist.md) and
+review-checklist.md and
 [editor-mockup-v3.html](design/editor-mockup-v3.html). Protocol: [v4-api.md](v4-api.md).
 The component entries are implementation contracts, not screenshots or a claim
 that native controls already render in the editor.
@@ -104,7 +104,7 @@ intersecting incompatible types; boolean list selection stays boolean.
 
 Plain `bun test` now builds the standalone native examples and runs native
 conformance instead of failing for a missing environment variable. Current
-combined counts and freeze gates are in [v4-eval.md](v4-eval.md). The older kit-only
+combined counts and freeze gates are in v4-eval.md. The older kit-only
 counts below remain historical evidence. New design TODOs: **none**; the existing
 Opus F1–F7 follow-ups and rendering-review gate remain unchanged.
 
@@ -174,7 +174,7 @@ unchanged. These counts do not establish native rendering or visual acceptance.
 
 ## DESIGN-TODO(opus) resolutions (design review 2026-11-01)
 
-Review: [design/reviews/na-cloud-uikit.md](design/reviews/na-cloud-uikit.md).
+Review: design/reviews/na-cloud-uikit.md.
 Rules: [design/panels/README.md §5](design/panels/README.md#5-resolutions-of-the-ui-kit-design-todos).
 
 1. **Segmented-track padding** = `control_radius − inner_radius` (concentric

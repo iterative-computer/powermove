@@ -2,7 +2,7 @@
 
 Status: **build specs** for the Powermove Native panels. Owner: design lead.
 Governing documents: [language.md](../language.md) (look),
-[tokens.md](../tokens.md) (values), [review-checklist.md](../review-checklist.md)
+[tokens.md](../tokens.md) (values), review-checklist.md
 (gate), [w1-keymap.md](../../w1-keymap.md) and
 [w1-workflows.md](../../w1-workflows.md) (behaviour), and
 [panels-mockup.html](../panels-mockup.html) (pictures of the key states).
