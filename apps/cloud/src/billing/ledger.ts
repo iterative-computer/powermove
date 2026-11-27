@@ -69,7 +69,8 @@ export interface BillingState {
 
 const day = (date: Date) => date.toISOString().slice(0, 10);
 
-export async function billingState(db: Db, userId: string, unit: number, now = new Date()): Promise<BillingState> {
+/** `unit` is one credit in nano-USD; null (no usable pricing) shows every credit figure as zero. */
+export async function billingState(db: Db, userId: string, unit: number | null, now = new Date()): Promise<BillingState> {
   const plans = PLANS.filter(plan => plan.forSale).map(({ id, name, priceCents, credits }) => ({ id, name, priceCents, credits }));
   const sub = await currentSubscription(db, userId);
   const status = sub ? publicStatus(sub.status) : null;
@@ -78,7 +79,7 @@ export async function billingState(db: Db, userId: string, unit: number, now = n
   }
   const plan = planById(sub.plan);
   const period = { start: sub.currentPeriodStart, end: sub.currentPeriodEnd };
-  const balance = await periodBalance(db, userId, period, unit);
+  const balance = unit === null ? null : await periodBalance(db, userId, period, unit);
   const rows = await db.select({
     date: sql<string>`to_char(${creditLedger.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`,
     nano: sql<string>`sum(${spent})`,
@@ -92,7 +93,7 @@ export async function billingState(db: Db, userId: string, unit: number, now = n
   let total = 0, shown = 0;
   for (let cursor = new Date(`${day(period.start)}T00:00:00Z`); day(cursor) <= last; cursor = new Date(cursor.getTime() + 86_400_000)) {
     total += byDay.get(day(cursor)) ?? 0;
-    const upTo = Math.ceil(total / unit);
+    const upTo = unit === null ? 0 : Math.ceil(total / unit);
     daily.push({ date: day(cursor), credits: upTo - shown });
     shown = upTo;
   }
@@ -100,7 +101,7 @@ export async function billingState(db: Db, userId: string, unit: number, now = n
     plan: { id: plan.id, name: plan.name, priceCents: plan.priceCents, interval: 'month' },
     status,
     cancelAtPeriodEnd: sub.cancelAtPeriodEnd,
-    credits: displayCredits(balance, unit),
+    credits: balance && unit !== null ? displayCredits(balance, unit) : { included: 0, used: 0, remaining: 0 },
     period: { start: period.start.toISOString(), end: period.end.toISOString() },
     daily,
     plans,

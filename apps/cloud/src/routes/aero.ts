@@ -27,6 +27,8 @@ async function cacheKey(c: Context<Env>, userId: string, request: ChatRequest): 
 const REQUEST_ID = /^[A-Za-z0-9._:-]{8,128}$/;
 
 export const aero = new Hono<Env>()
+  // Aero (and only Aero) needs the pricing secret: without a usable one every Aero route answers 503 `misconfigured`.
+  .use('*', async (c, next) => { pricingOf(c.env); await next(); })
   .get('/models', (c) => {
     if (!c.var.session) throw new V2Error(401, 'unauthorized');
     return c.json({

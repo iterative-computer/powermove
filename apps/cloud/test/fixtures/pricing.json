@@ -1,6 +1,6 @@
 {
-  "version": "models.dev 2026-11-26",
-  "creditNanoUsd": 5000000,
+  "version": "test fixture (fake credit unit) models.dev 2026-11-26",
+  "creditNanoUsd": 1000000,
   "models": {
     "openai/gpt-6.2-sol": {
       "input": 2,

@@ -6,7 +6,7 @@ import type { AeroOverview } from '@powermove/registry/wire';
 import type { Db } from '../db/client';
 import { user } from '../db/auth-schema';
 import { aeroBlocks, billingReversals, creditLedger, subscriptions } from '../db/schema';
-import { pricingOf } from '../aero/pricing';
+import { creditUnit } from '../aero/pricing';
 import { displayCredits, periodBalance, spendingPeriod } from './ledger';
 import { planById } from './plans';
 
@@ -26,10 +26,10 @@ const usageColumns = {
   output: sql<string>`coalesce(sum(${creditLedger.outputTokens}), 0)`,
 };
 type UsageRow = { nano: string; calls: number; estimatedCalls: number; estimatedNano: string; input: string; cached: string; cacheWrite: string; output: string };
-function usage(row: UsageRow | undefined, unit: number): AeroOverview['today'] {
+function usage(row: UsageRow | undefined, unit: number | null): AeroOverview['today'] {
   const input = Number(row?.input ?? 0), cached = Number(row?.cached ?? 0), nano = Number(row?.nano ?? 0);
   return {
-    costUsd: usd(nano), credits: nano / unit, calls: row?.calls ?? 0, estimatedCalls: row?.estimatedCalls ?? 0, estimatedUsd: usd(Number(row?.estimatedNano ?? 0)),
+    costUsd: usd(nano), credits: unit === null ? 0 : nano / unit, calls: row?.calls ?? 0, estimatedCalls: row?.estimatedCalls ?? 0, estimatedUsd: usd(Number(row?.estimatedNano ?? 0)),
     inputTokens: input, cachedTokens: cached, cacheWriteTokens: Number(row?.cacheWrite ?? 0), outputTokens: Number(row?.output ?? 0),
     cacheHitRatio: input > 0 ? cached / input : 0,
   };
@@ -37,8 +37,9 @@ function usage(row: UsageRow | undefined, unit: number): AeroOverview['today'] {
 
 export async function aeroOverview(db: Db, env: CloudflareBindings, now = new Date()): Promise<AeroOverview> {
   // Costs are the ledger's nano-USD; credits use the pricing's unit.
-  const unit = pricingOf(env).creditNanoUsd;
-  const credits = (nano: number) => nano / unit;
+  // Without a usable pricing the credit figures read zero; USD comes from the ledger regardless.
+  const unit = creditUnit(env);
+  const credits = (nano: number) => (unit === null ? 0 : nano / unit);
   const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const since = new Date(today.getTime() - 29 * DAY);
   const [todayRow] = await db.select(usageColumns).from(creditLedger).where(and(requests, gte(creditLedger.createdAt, today)));
@@ -67,7 +68,7 @@ export async function aeroOverview(db: Db, env: CloudflareBindings, now = new Da
     .groupBy(creditLedger.userId, user.email).orderBy(desc(sql`sum(${spent})`)).limit(10);
   const topAccounts = await Promise.all(top.map(async (row) => {
     const current = await spendingPeriod(db, row.id);
-    const left = current ? displayCredits(await periodBalance(db, row.id, current.period, unit), unit).remaining : null;
+    const left = current && unit !== null ? displayCredits(await periodBalance(db, row.id, current.period, unit), unit).remaining : null;
     return { user: { id: row.id, email: row.email }, costUsd: usd(Number(row.nano)), calls: row.calls, creditsLeft: left };
   }));
 

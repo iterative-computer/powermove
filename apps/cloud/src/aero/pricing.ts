@@ -7,7 +7,8 @@
      (priced in case a provider reports one; Aero never asks for it).
    - long: a tier for requests whose input (cache reads and writes included) is over `above` tokens, priced at it
      in full.
-   Every catalogue model must be priced; anything else makes the pricing unusable (and production refuses to serve). */
+   Every catalogue model must be priced; anything else makes the pricing unusable: Aero (/v2/aero) then answers 503
+   `misconfigured`, and the rest of the Worker shows credit figures as zero. */
 import { z } from 'zod';
 import { type AeroModel, MODELS, type Metered } from './catalogue';
 import { V2Error } from '../v2-error';
@@ -37,7 +38,14 @@ export function parsePricing(raw: string | undefined): Pricing | null {
   return parsed.get(raw)!;
 }
 
-/** This environment's pricing; 503 `misconfigured` (logged by name only) without a usable one. */
+/** One credit in nano-USD, or null without a usable pricing (logged by name only). */
+export function creditUnit(env: CloudflareBindings): number | null {
+  const pricing = parsePricing(env.AERO_PRICING);
+  if (!pricing) console.error('AERO_PRICING missing or malformed');
+  return pricing?.creditNanoUsd ?? null;
+}
+
+/** This environment's pricing; 503 `misconfigured` (logged by name only) without a usable one. Aero only. */
 export function pricingOf(env: CloudflareBindings): Pricing {
   const pricing = parsePricing(env.AERO_PRICING);
   if (!pricing) {

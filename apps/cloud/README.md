@@ -243,7 +243,7 @@ while any development setting is present or a required one is missing
 (`src/production.ts`). Check, in order:
 
 1. **Secrets set** (`wrangler secret put`): `AERO_PRICING` (JSON, shape in
-   `src/aero/pricing.ts`; without it production serves nothing), `BETTER_AUTH_SECRET`,
+   `src/aero/pricing.ts`; without it Aero answers 503 `misconfigured`), `BETTER_AUTH_SECRET`,
    `TURNSTILE_SECRET_KEY` (live, not Cloudflare's `1x0000…` test key),
    `STRIPE_SECRET_KEY` (`sk_live_` or a live restricted `rk_live_` key),
    `STRIPE_WEBHOOK_SECRET`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,

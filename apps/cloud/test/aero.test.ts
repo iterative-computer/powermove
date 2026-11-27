@@ -31,7 +31,8 @@ test('the catalogue: v1 shape, provider ids, efforts, one default', async () =>
 test('costs are exact nano-USD at list price: no rounding, cached input at the cached rate, the long tier above 272k', () => {
   const sol = modelById('openai/gpt-6.2-sol')!;
   const usage = (input: number, more: Partial<Parameters<typeof cost>[1]> = {}) => ({ input, cacheRead: 0, cacheWrite: 0, cacheWriteLong: 0, output: 0, ...more });
-  expect(CREDIT_NANO_USD).toBe(5_000_000);
+  // The fixture's credit unit is fake (production's is the secret): 1 credit = $0.001.
+  expect(CREDIT_NANO_USD).toBe(1_000_000);
   // 200k fresh input at $2/M = $0.40.
   expect(cost(sol, usage(200_000)).nanoUsd).toBe(400_000_000);
   // The same input fully cached costs a twentieth ($0.10/M).
@@ -44,8 +45,8 @@ test('costs are exact nano-USD at list price: no rounding, cached input at the c
   // Cached tokens count toward the threshold.
   expect(cost(sol, usage(300_000, { cacheRead: 290_000 })).nanoUsd).toBe(10_000 * 4_000 + 290_000 * 200);
   const opus = modelById('anthropic/claude-opus-5-5')!;
-  // 1M cache write at $5/M = $5 = 1,000 credits; at the 1-hour TTL $8/M.
-  expect(cost(opus, usage(1_000_000, { cacheWrite: 1_000_000 })).nanoUsd).toBe(1000 * CREDIT_NANO_USD);
+  // 1M cache write at $5/M = $5 (5,000 fixture credits); at the 1-hour TTL $8/M.
+  expect(cost(opus, usage(1_000_000, { cacheWrite: 1_000_000 })).nanoUsd).toBe(5000 * CREDIT_NANO_USD);
   expect(cost(opus, usage(1_000_000, { cacheWrite: 1_000_000, cacheWriteLong: 1_000_000 })).nanoUsd).toBe(8_000_000_000);
   // The AI SDK's usage reaches cost() whole: reasoning is inside output, the long-TTL writes come from the raw usage.
   expect(meteredOf({ inputTokens: 10, inputTokenDetails: { noCacheTokens: 4, cacheReadTokens: 2, cacheWriteTokens: 4 }, outputTokens: 7, outputTokenDetails: { textTokens: 2, reasoningTokens: 5 }, totalTokens: 17, raw: { cache_creation: { ephemeral_1h_input_tokens: 3 } } }))
@@ -125,7 +126,7 @@ for (const model of ['openai/gpt-6.2-sol', 'anthropic/claude-opus-5-5']) {
         expect(row.costNanoUsd).toBe(cost(modelById(model)!, { input: row.inputTokens, cacheRead: row.cachedInputTokens, cacheWrite: row.cacheWriteTokens, cacheWriteLong: 0, output: row.outputTokens }).nanoUsd);
         expect(row.costNanoUsd).toBeGreaterThan(0);
         expect(row.costNanoUsd).toBeLessThanOrEqual(row.holdNanoUsd);
-        expect(row.priceVersion).toMatch(/^models\.dev \d{4}-\d{2}-\d{2}$/);
+        expect(row.priceVersion).toBe(PRICING.version);
         const used = Math.ceil(row.costNanoUsd / CREDIT_NANO_USD);
         expect((await billing(s)).credits).toEqual({ included: 1000, used, remaining: 1000 - used });
 

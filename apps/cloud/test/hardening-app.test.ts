@@ -24,7 +24,7 @@ test('6. production refuses to serve with any development setting, or without it
       expect([name, r.status]).toEqual([name, 503]);
       expect(await r.json() as unknown).toEqual({ error: { code: 'misconfigured' } });
     }
-    for (const [name, value] of [['AERO_PRICING', undefined], ['AERO_PRICING', '{"version":"x"}'], ['STRIPE_PRICE_AEROLITE', undefined], ['STRIPE_WEBHOOK_SECRET', undefined], ['TURNSTILE_SECRET_KEY', undefined], ['TURNSTILE_SITE_KEY', '1x00000000000000000000AA'], ['STRIPE_SECRET_KEY', 'sk_test_x'], ['TURNSTILE_ENABLED', '0']] as const) {
+    for (const [name, value] of [['STRIPE_PRICE_AEROLITE', undefined], ['STRIPE_WEBHOOK_SECRET', undefined], ['TURNSTILE_SECRET_KEY', undefined], ['TURNSTILE_SITE_KEY', '1x00000000000000000000AA'], ['STRIPE_SECRET_KEY', 'sk_test_x'], ['TURNSTILE_ENABLED', '0']] as const) {
       const r = await app.request('/v1/store/featured', {}, { ...good, [name]: value } as CloudflareBindings);
       expect([name, r.status]).toEqual([name, 503]);
     }
@@ -79,4 +79,26 @@ test('8. the direct OAuth routes share the auth routes’ per-IP edge limit', as
     const app = createApp({ data: () => data });
     expect((await app.request('/v1/auth/sign-in/oauth2', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ providerId: 'google' }) }, env)).status).toBe(429);
     expect((await app.request('/v1/auth/oauth2/callback/google?code=x&state=y', {}, env)).status).toBe(429);
+  }));
+
+test('without a usable AERO_PRICING only Aero refuses (503 misconfigured); health, the Store, /v1 and billing keep working', async () =>
+  withData(async (data) => {
+    const app = createApp({ data: () => data });
+    for (const pricing of [undefined, '{"version":"x"}']) {
+      for (const env of [{ ...production(data), AERO_PRICING: pricing }, { ...makeEnv(data), AERO_PRICING: pricing }] as CloudflareBindings[]) {
+        expect(productionProblems(env)).toEqual([]);
+        const user = await seedSession(data, env, `p${crypto.randomUUID().slice(0, 8)}@example.com`);
+        expect((await app.request('/health', {}, env)).status).toBe(200);
+        expect((await app.request('/v1/store/browse', {}, env)).status).toBe(200);
+        expect((await app.request('/v1/me', { headers: user.headers }, env)).status).toBe(200);
+        const bill = await app.request('/v2/billing', { headers: user.headers }, env);
+        expect(bill.status).toBe(200);
+        expect((await bill.json() as any).credits).toEqual({ included: 0, used: 0, remaining: 0 });
+        for (const [path, init] of [['/v2/aero/models', {}], ['/v2/aero/chat/completions', { method: 'POST', body: '{}' }]] as const) {
+          const r = await app.request(path, { ...init, headers: user.headers }, env);
+          expect([path, r.status]).toEqual([path, 503]);
+          expect(await r.json() as unknown).toEqual({ error: { code: 'misconfigured' } });
+        }
+      }
+    }
   }));

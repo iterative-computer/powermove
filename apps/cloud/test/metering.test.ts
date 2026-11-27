@@ -48,8 +48,8 @@ const CASES: Case[] = [
     script: { start: { input_tokens: 20_000, cache_creation_input_tokens: 0, cache_read_input_tokens: 30_000, output_tokens: 1 }, delta: { output_tokens: 120 } },
     bill: 20_000 * 2_000 + 30_000 * 100 + 120 * 10_000, tokens: { input: 50_000, fresh: 20_000, cacheRead: 30_000, cacheWrite: 0, output: 120 } },
   { name: 'Anthropic reasoning-heavy: thinking is inside output, priced once', model: 'anthropic/claude-opus-5-5',
-    script: { start: { input_tokens: 3_000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 }, delta: { output_tokens: 60_000, output_tokens_details: { thinking_tokens: 58_000 } } },
-    bill: 3_000 * 4_000 + 60_000 * 20_000, tokens: { input: 3_000, fresh: 3_000, cacheRead: 0, cacheWrite: 0, output: 60_000, reasoning: 58_000 } },
+    script: { start: { input_tokens: 3_000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 }, delta: { output_tokens: 30_000, output_tokens_details: { thinking_tokens: 28_000 } } },
+    bill: 3_000 * 4_000 + 30_000 * 20_000, tokens: { input: 3_000, fresh: 3_000, cacheRead: 0, cacheWrite: 0, output: 30_000, reasoning: 28_000 } },
   { name: 'Anthropic 1-hour cache writes are priced at 2x input', model: 'anthropic/claude-opus-5-5',
     script: { start: { input_tokens: 10, cache_creation_input_tokens: 2_000, cache_read_input_tokens: 0, cache_creation: { ephemeral_5m_input_tokens: 1_000, ephemeral_1h_input_tokens: 1_000 }, output_tokens: 1 }, delta: { output_tokens: 10 } },
     bill: 10 * 4_000 + 1_000 * 5_000 + 1_000 * 8_000 + 10 * 20_000, tokens: { input: 2_010, fresh: 10, cacheRead: 0, cacheWrite: 2_000, cacheWriteLong: 1_000, output: 10 } },
@@ -176,9 +176,12 @@ test('the output cap: at most what the balance allows (and the model max), never
     try {
       await subscribe(s);
       const opus = modelById('anthropic/claude-opus-5-5')!;
-      // Plenty: the model's max.
+      // Plenty (a top-up grant on the period): the model's max.
+      const topUp = { userId: s.user.id, kind: 'grant' as const, idempotencyKey: 'invoice:test-topup', credits: 100_000, ...await periodOf(data, s.user.id) };
+      await data.db.insert(creditLedger).values(topUp);
       fxReduce(await frames(await chat(s, { model: opus.id, messages: [{ role: 'user', content: 'x' }] }, 'req-cap-0001')));
       expect(s.ai.requests.at(-1)!.body.max_tokens).toBe(opus.maxOutput);
+      await data.db.delete(creditLedger).where(eq(creditLedger.idempotencyKey, topUp.idempotencyKey));
       expect(s.ai.counts).toHaveLength(0);
       // The client's own limit stands when it is lower.
       fxReduce(await frames(await chat(s, { model: 'openai/gpt-6.2-sol', max_completion_tokens: 900, messages: [{ role: 'user', content: 'x' }] }, 'req-cap-0002')));
@@ -255,8 +258,8 @@ test('a period reset: last period’s spends and holds count for nothing in the 
       const { subscriptionId } = await subscribe(s);
       s.ai.queue.push({ usage: { input_tokens: 200_000, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, total_tokens: 200_000 } });
       fxReduce(await frames(await chat(s, { model: 'openai/gpt-6.2-sol', messages: [{ role: 'user', content: 'x' }] }, 'req-period-0001')));
-      // 200k input at $2/M: $0.40 = 80 credits.
-      expect((await billing(s)).credits).toEqual({ included: 1000, used: 80, remaining: 920 });
+      // 200k input at $2/M: $0.40 = 400 credits at the fixture's fake unit.
+      expect((await billing(s)).credits).toEqual({ included: 1000, used: 400, remaining: 600 });
       await new Promise(resolve => setTimeout(resolve, 1100));
       await s.stripe.renew(subscriptionId);
       expect((await billing(s)).credits).toEqual({ included: 1000, used: 0, remaining: 1000 });
@@ -274,7 +277,7 @@ test('display credits: derived from exact nano-USD, used rounds up, remaining do
       expect(displayCredits({ includedNano: 1000 * CREDIT_NANO_USD, usedNano: 0, heldNano: 0, remainingNano: 1000 * CREDIT_NANO_USD }, CREDIT_NANO_USD)).toEqual({ included: 1000, used: 0, remaining: 1000 });
       await subscribe(s);
       // Three requests of 0.4 credits each: 1.2 credits spent, shown as 2 used, never 3.
-      for (const id of ['a', 'b', 'c']) await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: `request:${s.user.id}:${id}`, credits: 0, costNanoUsd: 2_000_000, model: 'openai/gpt-6-luna', ...await periodOf(data, s.user.id) });
+      for (const id of ['a', 'b', 'c']) await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: `request:${s.user.id}:${id}`, credits: 0, costNanoUsd: 0.4 * CREDIT_NANO_USD, model: 'openai/gpt-6-luna', ...await periodOf(data, s.user.id) });
       const state = await billing(s);
       expect(state.credits).toEqual({ included: 1000, used: 2, remaining: 998 });
       expect(state.daily.reduce((sum: number, d: { credits: number }) => sum + d.credits, 0)).toBe(2);
