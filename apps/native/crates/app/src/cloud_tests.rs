@@ -1190,3 +1190,127 @@ fn a_click_starts_exactly_one_checkout(cx: &mut gpui::TestAppContext) {
     cx.run_until_parked();
     assert_eq!(checkouts(), 1);
 }
+
+/// A registry whose session can be ended mid-test: while `dead`, every
+/// authenticated route answers 401.
+fn ending_registry() -> (
+    &'static str,
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<Mutex<Vec<Seen>>>,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dead = Arc::new(AtomicBool::new(false));
+    let flag = dead.clone();
+    let (origin, seen) = scripted(Arc::new(move |path, _, _| {
+        if flag.load(Ordering::Relaxed) && path != "/v1/auth/email/send" {
+            return (401, r#"{"error":"unauthorized"}"#.into());
+        }
+        match path {
+            "/v1/me" => (200, r#"{"user":{"id":"u","email":"test@test.com"},"publisher":{"handle":"person"},"settings":{"rememberInstalls":true}}"#.into()),
+            "/v2/billing" => (200, r#"{"plan":null,"status":null,"cancelAtPeriodEnd":false,"credits":{"included":0,"used":0,"remaining":0},"period":null,"daily":[],"plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]}"#.into()),
+            "/v1/auth/sign-out" => (200, "{}".into()),
+            _ => (404, "{}".into()),
+        }
+    }));
+    (origin, dead, seen)
+}
+fn start(cx: &mut gpui::TestAppContext, origin: &'static str, items: &Items) -> tempfile::TempDir {
+    let sealed = serde_json::json!({"origin":origin.trim_end_matches('/'),"token":"session","expiresAt":"2099-01-01T00:00:00.000Z"});
+    let key = ("app Powermove Cloud".to_owned(), "session".to_owned());
+    items
+        .map
+        .lock()
+        .unwrap()
+        .insert(key.clone(), sealed.to_string().into_bytes());
+    let profile = tempfile::tempdir().unwrap();
+    let path = profile.path().to_owned();
+    let items = items.clone();
+    cx.update(|cx| {
+        crate::cloud::init_with(
+            path.clone(),
+            origin,
+            move || {
+                let vault = crate::cloud::Keychain::with_items(key.0, key.1, None, Box::new(items));
+                Http::new(origin, Box::new(vault), path)
+            },
+            cx,
+        )
+    });
+    profile
+}
+fn signed_out_with_notice(cx: &gpui::App) -> bool {
+    let fact = crate::cloud::fact(cx);
+    fact["signedIn"] == false && fact["identity"].is_null() && fact["sessionEnded"] == true
+}
+
+/// The session ended on the server (its database reset): the launch's
+/// account read gets 401, and the app is signed out everywhere with the one
+/// notice, the stored session forgotten, never the cached account.
+#[gpui::test]
+fn a_session_refused_at_launch_signs_out_everywhere(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, dead, _) = ending_registry();
+    dead.store(true, std::sync::atomic::Ordering::Relaxed);
+    let items = Items::default();
+    let _profile = start(cx, origin, &items);
+    settle(cx, signed_out_with_notice);
+    assert!(
+        items.map.lock().unwrap().is_empty(),
+        "the session stayed stored"
+    );
+    assert!(!aero_session(cx));
+}
+
+/// Signed in, then the server refuses the session on any later call
+/// (billing here, or Aero): signed out everywhere with the notice; signing
+/// in again would clear it. Sign Out when the server answers 401 to the
+/// sign-out itself still signs out, with no notice.
+#[gpui::test]
+fn a_session_refused_later_signs_out_everywhere(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, dead, _) = ending_registry();
+    let items = Items::default();
+    let _profile = start(cx, origin, &items);
+    settle(cx, |cx| {
+        crate::cloud::fact(cx)["billing"]["state"] == "ready"
+    });
+    assert_eq!(cx.update(|cx| crate::cloud::fact(cx))["signedIn"], true);
+    dead.store(true, std::sync::atomic::Ordering::Relaxed);
+    cx.update(crate::cloud::refresh_billing);
+    settle(cx, signed_out_with_notice);
+    assert!(items.map.lock().unwrap().is_empty());
+}
+
+/// Aero hears 401 for its bearer: the account forgets the session too.
+#[gpui::test]
+fn aero_refused_ends_the_session_for_the_whole_app(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, _, _) = ending_registry();
+    let items = Items::default();
+    let _profile = start(cx, origin, &items);
+    settle(cx, |cx| crate::cloud::fact(cx)["signedIn"] == true);
+    let account = cx.update(|cx| crate::cloud::aero_account(cx)).unwrap();
+    account.ended();
+    settle(cx, signed_out_with_notice);
+}
+
+/// Sign Out while the server answers 401 to everything (the sign-out call
+/// too): signed out, the session forgotten, and no "session ended" notice.
+#[gpui::test]
+fn sign_out_against_a_refusing_server_still_signs_out(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, dead, _) = ending_registry();
+    let items = Items::default();
+    let _profile = start(cx, origin, &items);
+    settle(cx, |cx| crate::cloud::fact(cx)["signedIn"] == true);
+    dead.store(true, std::sync::atomic::Ordering::Relaxed);
+    cx.update(crate::cloud::sign_out);
+    settle(cx, |cx| {
+        crate::cloud::fact(cx)["signedIn"] == false && crate::cloud::fact(cx)["busy"] == false
+    });
+    assert_eq!(
+        cx.update(|cx| crate::cloud::fact(cx))["sessionEnded"],
+        false
+    );
+    assert!(items.map.lock().unwrap().is_empty());
+}

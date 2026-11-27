@@ -320,6 +320,8 @@ pub struct Http {
     /// How often the check's result is asked for, and for how long.
     poll: std::time::Duration,
     patience: std::time::Duration,
+    /// Told when Powermove refuses the stored session (`session_ended`).
+    ended: Option<async_channel::Sender<()>>,
 }
 impl Http {
     pub fn new(origin: &'static str, vault: Box<dyn Vault>, profile: PathBuf) -> Self {
@@ -331,6 +333,24 @@ impl Http {
             opener: std::sync::Arc::new(crate::platform::open_url),
             poll: std::time::Duration::from_millis(1500),
             patience: std::time::Duration::from_secs(180),
+            ended: None,
+        }
+    }
+    /// Where the app hears that the session ended.
+    pub(crate) fn with_ended(mut self, ended: async_channel::Sender<()>) -> Self {
+        self.ended = Some(ended);
+        self
+    }
+    /// Powermove refused the stored session (401): forgotten, as Sign Out
+    /// does, and the app is told, so every surface shows signed out. Never a
+    /// dead account left on screen.
+    pub(crate) fn session_ended(&mut self) {
+        if !self.signed_in() {
+            return;
+        }
+        let _ = self.forget();
+        if let Some(ended) = &self.ended {
+            let _ = ended.try_send(());
         }
     }
     /// The gate the sign-in sheet watches and cancels.
@@ -381,7 +401,17 @@ impl Http {
         } else {
             None
         };
-        self.send_as(method, path, body, kind, bearer, REQUEST_DEADLINE)
+        let sent = self.send_as(method, path, body, kind, bearer, REQUEST_DEADLINE);
+        // The stored session refused (Sign Out's own revoke never comes
+        // through here: it sends the token it already forgot).
+        if auth
+            && let Err(error) = &sent
+            && error.code == ServiceErrorCode::PermissionDenied
+            && error.to_string() == "api:unauthorized"
+        {
+            self.session_ended();
+        }
+        sent
     }
     /// One request with `bearer` (or none), given up after `deadline`.
     fn send_as(
@@ -786,6 +816,9 @@ struct Cloud {
     billing: Billed,
     /// The browser check the worker may be waiting on.
     human: std::sync::Arc<HumanGate>,
+    /// Powermove refused the session this launch: the quiet "Your session
+    /// ended" until the person signs in again.
+    ended: bool,
 }
 impl Global for Cloud {}
 /// The account's billing, as Settings › Account shows it.
@@ -847,7 +880,9 @@ pub(crate) fn init_with(
     }
     let human = std::sync::Arc::new(HumanGate::default());
     let gate = human.clone();
-    let Ok(worker) = ServiceWorker::start(move || Ok(host().with_gate(gate))) else {
+    let (ended_tx, ended_rx) = async_channel::unbounded::<()>();
+    let Ok(worker) = ServiceWorker::start(move || Ok(host().with_gate(gate).with_ended(ended_tx)))
+    else {
         return;
     };
     cx.set_global(Cloud {
@@ -862,19 +897,26 @@ pub(crate) fn init_with(
         busy: false,
         billing: Billed::default(),
         human,
+        ended: false,
     });
     follow_activation(cx);
+    // Any account call that finds the session refused (the account, billing,
+    // Aero, the Store) lands here: one place says signed out, everywhere.
+    cx.spawn(async move |cx| {
+        while ended_rx.recv().await.is_ok() {
+            cx.update(session_ended);
+        }
+    })
+    .detach();
     // Whether a session is stored, and who it is, off the main thread.
     if let Ok(pending) = cx.global::<Cloud>().worker.submit(|host| {
-        let signed = host.signed_in();
-        Ok((
-            signed,
-            if signed {
-                host.refresh_account()
-            } else {
-                Ok(None)
-            },
-        ))
+        let account = if host.signed_in() {
+            host.refresh_account()
+        } else {
+            Ok(None)
+        };
+        // Read after the refresh: a session the registry refused is gone.
+        Ok((host.signed_in(), account))
     }) {
         cx.spawn(async move |cx| {
             let Some((signed, account)) = wait(pending, cx).await else {
@@ -898,6 +940,20 @@ pub(crate) fn init_with(
         })
         .detach();
     }
+}
+/// Powermove refused the stored session (already forgotten on the worker):
+/// signed out on every surface, with the quiet notice in Settings ›
+/// Account.
+fn session_ended(cx: &mut App) {
+    let cloud = cx.global_mut::<Cloud>();
+    if !cloud.signed_in && cloud.account.is_none() && cloud.ended {
+        return;
+    }
+    cloud.signed_in = false;
+    cloud.account = None;
+    cloud.billing = Billed::default();
+    cloud.ended = true;
+    changed(cx);
 }
 /// A session held in memory only (a local stack's, a review's).
 #[derive(Default)]
@@ -957,6 +1013,12 @@ impl std::fmt::Debug for AeroAccount {
     }
 }
 impl pm_agents::inference::PowermoveAccount for AeroAccount {
+    fn ended(&self) {
+        let _ = self.0.submit(|host| {
+            host.session_ended();
+            Ok(())
+        });
+    }
     fn session(&self) -> Option<pm_agents::inference::Session> {
         let pending = self.0.submit(|host| Ok(host.session())).ok()?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -987,6 +1049,7 @@ pub fn fact(cx: &App) -> Value {
     json!({"revision":cloud.revision,"signedIn":account.is_some(),
         "identity":account.map(Account::identity),"email":account.map(|a| a.email.clone()),
         "rememberInstalls":account.map(|a| a.remember_installs),"busy":cloud.busy,
+        "sessionEnded":account.is_none() && cloud.ended,
         "billing":account.map(|_| billing_fact(&cloud.billing))})
 }
 /// Settings › Account's plan card and credits (`pm_builtins` builds the rows).
@@ -1089,6 +1152,9 @@ fn run_code(
                 let cloud = cx.global_mut::<Cloud>();
                 cloud.signed_in = account.is_some();
                 cloud.account = account.clone();
+                if account.is_some() {
+                    cloud.ended = false;
+                }
                 changed(cx);
                 refresh_billing(cx);
             }
@@ -1438,10 +1504,14 @@ fn complete(done: pm_services::surfaces::agent_auth::CloudCompletion, cx: &mut A
         Ok(CloudReply::Account(account)) => {
             cloud.signed_in = account.is_some();
             cloud.account = account.clone();
+            if account.is_some() {
+                cloud.ended = false;
+            }
         }
         Ok(CloudReply::SignedOut) => {
             cloud.signed_in = false;
             cloud.account = None;
+            cloud.ended = false;
         }
         _ => {}
     }
