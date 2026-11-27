@@ -4783,8 +4783,9 @@ impl Host {
                         let mut h = host.borrow_mut();
                         // The chooser keeps its keys (⌘1…⌘9, the arrows,
                         // Return, Escape) from the editor's keymap; typing
-                        // goes on to its search field.
-                        if let Some(chooser) = h.chooser.as_ref().filter(|c| c.owns_event(e)) {
+                        // goes on to its search field. Escape is its from
+                        // any window: it closes the chooser, not the panel.
+                        if let Some(chooser) = h.chooser.as_ref().filter(|c| c.takes(e, &key)) {
                             let chooser_key = key.starts_with("cmd+")
                                 || matches!(key.as_str(), "escape" | "up" | "down" | "enter");
                             if chooser_key && chooser.key(&key) {
