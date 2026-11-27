@@ -1,6 +1,6 @@
-import { and, desc, eq, gte, lt, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, isNull, lt, notInArray, sql } from 'drizzle-orm';
 import type { Db } from '../db/client';
-import { creditLedger, subscriptions } from '../db/schema';
+import { billingReversals, creditLedger, subscriptions } from '../db/schema';
 import { PLANS, isPlanId, planById } from './plans';
 import { CREDIT_NANO_USD } from '../aero/catalogue';
 
@@ -41,7 +41,7 @@ const reserved = sql`case when ${live} then ${creditLedger.holdNanoUsd} else 0 e
 /** The period's balance: its grants minus the requests made inside it. Nothing carries over. */
 export async function periodBalance(db: Db, userId: string, period: Period): Promise<Balance> {
   const [row] = await db.select({
-    included: sql<string>`coalesce(sum(${creditLedger.credits}) filter (where ${creditLedger.kind} = 'grant' and ${creditLedger.periodStart} = ${period.start.toISOString()}::timestamptz), 0)`,
+    included: sql<string>`coalesce(sum(${creditLedger.credits}) filter (where ${creditLedger.kind} = 'grant' and ${creditLedger.revokedAt} is null and ${creditLedger.periodStart} = ${period.start.toISOString()}::timestamptz), 0)`,
     used: sql<string>`coalesce(sum(${spent}) filter (where ${inPeriod(period)}), 0)`,
     held: sql<string>`coalesce(sum(${reserved}) filter (where ${inPeriod(period)}), 0)`,
   }).from(creditLedger).where(eq(creditLedger.userId, userId));
@@ -114,7 +114,7 @@ export async function lockBalance(tx: Db, userId: string) {
 }
 
 /** The subscription and period an Aero request spends against now, by the database's clock (sampled with the
-    subscription, after any lock the caller holds): a live plan whose period hasn't ended. Past the period's end,
+    subscription, after any lock the caller holds): a paid plan whose period hasn't ended. Past the period's end,
     before the renewal arrives, there is nothing to spend against. */
 export async function spendingPeriod(db: Db, userId: string): Promise<{ subscriptionId: string; period: Period } | null> {
   const [sub] = await db.select({
@@ -123,8 +123,9 @@ export async function spendingPeriod(db: Db, userId: string): Promise<{ subscrip
   }).from(subscriptions)
     .where(and(eq(subscriptions.userId, userId), notInArray(subscriptions.status, ['canceled', 'incomplete_expired', 'incomplete'])))
     .orderBy(desc(subscriptions.currentPeriodStart)).limit(1);
-  const status = sub ? publicStatus(sub.status) : null;
-  if (!sub || (status !== 'active' && status !== 'past_due') || !sub.live) return null;
+  // A currently paid entitlement only: active (or trialing). past_due, unpaid, paused, incomplete and canceled
+  // cannot spend.
+  if (!sub || (sub.status !== 'active' && sub.status !== 'trialing') || !sub.live) return null;
   return { subscriptionId: sub.id, period: { start: sub.start, end: sub.end } };
 }
 
@@ -144,8 +145,10 @@ export async function sweepHolds(db: Db): Promise<number> {
   return swept.length;
 }
 
-/** Grants a period's credits, once per key (the invoice id). */
-export async function recordGrant(db: Db, grant: { userId: string; key: string; credits: number; subscriptionId: string; period: Period }): Promise<boolean> {
+/** Grants a period's credits, once per key (the invoice id), unless that invoice was already reversed. */
+export async function recordGrant(db: Db, grant: { userId: string; key: string; invoiceId: string; credits: number; subscriptionId: string; period: Period }): Promise<boolean> {
+  const [reversed] = await db.select({ id: billingReversals.invoiceId }).from(billingReversals).where(eq(billingReversals.invoiceId, grant.invoiceId)).limit(1);
+  if (reversed) return false;
   const rows = await db.insert(creditLedger).values({
     userId: grant.userId, kind: 'grant', idempotencyKey: grant.key, credits: grant.credits, subscriptionId: grant.subscriptionId,
     periodStart: grant.period.start, periodEnd: grant.period.end,
@@ -153,7 +156,21 @@ export async function recordGrant(db: Db, grant: { userId: string; key: string; 
   return rows.length === 1;
 }
 
-/** Credits already granted for the period that starts at `start`. */
+/** Reverses an invoice (refunded, disputed, voided, uncollectible), once: records it, and revokes every grant of
+    its period, so the period's remaining credits are zero. Returns whether this call recorded it. */
+export async function reverseInvoice(db: Db, reversal: { invoiceId: string; userId: string; reason: string; eventId: string }): Promise<boolean> {
+  const [grant] = await db.select({ periodStart: creditLedger.periodStart }).from(creditLedger)
+    .where(and(eq(creditLedger.idempotencyKey, `invoice:${reversal.invoiceId}`), eq(creditLedger.userId, reversal.userId))).limit(1);
+  const recorded = await db.insert(billingReversals).values({ ...reversal, periodStart: grant?.periodStart ?? null }).onConflictDoNothing().returning({ id: billingReversals.invoiceId });
+  if (grant) {
+    await db.update(creditLedger).set({ revokedAt: sql`now()` })
+      .where(and(eq(creditLedger.userId, reversal.userId), eq(creditLedger.kind, 'grant'), eq(creditLedger.periodStart, grant.periodStart), isNull(creditLedger.revokedAt)));
+  }
+  return recorded.length === 1;
+}
+
+/** Credits already granted for the period that starts at `start`, revoked ones included (a reversed period gets no
+    fresh grant). */
 export async function grantedFor(db: Db, userId: string, start: Date): Promise<number> {
   const [row] = await db.select({ total: sql<string>`coalesce(sum(${creditLedger.credits}), 0)` }).from(creditLedger)
     .where(and(eq(creditLedger.userId, userId), eq(creditLedger.kind, 'grant'), eq(creditLedger.periodStart, start)));

@@ -130,7 +130,9 @@ test('the hard cap: under parallel requests, failures, evictions and lost settle
       const ids = Array.from({ length: 10 }, (_, i) => `req-cap-${String(i).padStart(4, '0')}`);
       const models = ['openai/gpt-6.2-sol', 'anthropic/claude-sonnet-5-5', 'openai/gpt-6-luna'];
       const answers = await Promise.all(ids.map((id, i) => chat(s, { model: models[i % 3], max_completion_tokens: 4_000, messages: [{ role: 'user', content: `Request ${i}` }] }, id)));
-      expect(answers.some(r => r.status === 402)).toBe(true);
+      // Refused: by the balance (402), or by the account's three-calls-in-flight cap (429).
+      expect(answers.some(r => r.status === 402 || r.status === 429)).toBe(true);
+      expect(answers.every(r => [200, 402, 429].includes(r.status))).toBe(true);
       for (const r of answers) await r.text();
       await new Promise(resolve => setTimeout(resolve, 2000));
       const deferred = s.calls.alarms.size;

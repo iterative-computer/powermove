@@ -1,7 +1,8 @@
 import { Hono, type Context } from 'hono';
 import type { Env } from '../env';
 import { spendable } from '../billing/ledger';
-import { consume } from '../abuse';
+import { clientIp, consume } from '../abuse';
+import { AERO_BODY_BYTES, readJsonLimited } from '../body';
 import { MODELS, modelById } from '../aero/catalogue';
 import type { CallStart } from '../aero/call';
 import { endpointFor } from '../aero/providers';
@@ -35,15 +36,18 @@ export const aero = new Hono<Env>()
     const session = c.var.session;
     if (!session) throw new V2Error(401, 'unauthorized');
     const userId = session.userId;
-    const parsed = ChatRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) throw new V2Error(400, 'invalid_request');
-    const request = parsed.data;
-    const model = modelById(request.model);
-    if (!model) throw new V2Error(400, 'unknown_model');
+    // Who, how often and whether the plan can pay come first; only then is the body read (capped) and parsed.
+    const edge = await c.env.RL_AERO?.limit({ key: clientIp(c) });
+    if (edge && !edge.success) throw new V2Error(429, 'rate_limited', 60);
     const rate = await consume(c.var.data.db, 'aero_user', userId);
     if (!rate.ok) throw new V2Error(429, 'rate_limited', rate.retryAfterSeconds);
     const { remainingNano, subscriptionId, period } = await spendable(c.var.data.db, userId);
     if (remainingNano <= 0 || !subscriptionId || !period) throw new V2Error(402, 'credits_exhausted');
+    const parsed = ChatRequest.safeParse(await readJsonLimited(c, AERO_BODY_BYTES));
+    if (!parsed.success) throw new V2Error(400, 'invalid_request');
+    const request = parsed.data;
+    const model = modelById(request.model);
+    if (!model) throw new V2Error(400, 'unknown_model');
     const thread = await cacheKey(c, userId, request);
     // Validated here so a bad request is a 400 before any call starts (the call's object prepares it again).
     try { prepare(request, model, thread); } catch (error) {

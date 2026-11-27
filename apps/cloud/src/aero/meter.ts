@@ -19,13 +19,14 @@
    - Anything else (a 5xx, no final usage event, a stream that failed or was cut, a settle that never happened,
      an object that died mid-call): the whole hold, marked estimated. A hold that never settles counts in full,
      and the scheduled sweep turns it into that spend. */
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { LanguageModelUsage, TextStreamPart, ToolSet } from 'ai';
 import type { Data } from '../db/client';
-import { creditLedger } from '../db/schema';
+import { aeroBlocks, creditLedger } from '../db/schema';
 import { lockBalance, periodBalance, spendingPeriod } from '../billing/ledger';
 import { type AeroModel, type Metered, PRICE_VERSION, ceilingRates, cost, modelById } from './catalogue';
 import type { Fetch } from './providers';
+import { imageTokens } from './images';
 import { V2Error } from '../v2-error';
 
 /** A hold this old is shown as spent (in full) rather than reserved; its call's object settles it in the end. */
@@ -57,7 +58,7 @@ export function inputBound(provider: 'openai' | 'anthropic', body: Record<string
     if (provider === 'anthropic' && part?.type === 'image' && part.source?.type === 'base64' && typeof part.source.data === 'string') data = part.source.data;
     if (provider === 'openai' && part?.type === 'input_image' && typeof part.image_url === 'string' && part.image_url.startsWith('data:')) data = part.image_url.slice(part.image_url.indexOf(',') + 1);
     // Base64 is plain ASCII that JSON doesn't escape: its bytes in the request are its length.
-    if (data !== null) bound += imageBound(data) - data.length;
+    if (data !== null) { const tokens = imageTokens(provider, data); bound += (tokens ?? data.length) - data.length; }
   };
   const messages: any[] = provider === 'anthropic' ? (Array.isArray(body.messages) ? body.messages : []) : (Array.isArray(body.input) ? body.input : []);
   for (const message of messages) {
@@ -69,44 +70,6 @@ export function inputBound(provider: 'openai' | 'anthropic', body: Record<string
     }
   }
   return bound;
-}
-
-/** An image's most input tokens (never more than its base64 counts byte for byte): a token per 16x16 pixels plus a constant (Anthropic bills about one per 750 pixels;
-    OpenAI at most ~1.6 per 32x32 patch, or 170 per 512x512 tile plus 85). Without readable dimensions, its base64
-    length (a provider can't take more tokens from an image than it has bytes, and refuses one it can't decode). */
-export function imageBound(base64: string): number {
-  const size = imageSize(base64);
-  return size ? Math.min(base64.length, Math.ceil(size.width / 16) * Math.ceil(size.height / 16) + 1024) : base64.length;
-}
-
-function imageSize(base64: string): { width: number; height: number } | null {
-  let bytes: Uint8Array;
-  // The headers are near the start: decode the first 256 KiB (a whole number of base64 quads).
-  try { bytes = Uint8Array.from(atob(base64.slice(0, 349_524)), c => c.charCodeAt(0)); } catch { return null; }
-  const u16 = (i: number) => (bytes[i]! << 8) | bytes[i + 1]!;
-  const u32 = (i: number) => ((bytes[i]! << 24) >>> 0) + (bytes[i + 1]! << 16) + (bytes[i + 2]! << 8) + bytes[i + 3]!;
-  const le16 = (i: number) => bytes[i]! | (bytes[i + 1]! << 8);
-  const le24 = (i: number) => bytes[i]! | (bytes[i + 1]! << 8) | (bytes[i + 2]! << 16);
-  if (bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return { width: u32(16), height: u32(20) };
-  if (bytes.length >= 10 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return { width: le16(6), height: le16(8) };
-  if (bytes.length >= 30 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[8] === 0x57 && bytes[9] === 0x45) {
-    const chunk = String.fromCharCode(bytes[12]!, bytes[13]!, bytes[14]!, bytes[15]!);
-    if (chunk === 'VP8X') return { width: le24(24) + 1, height: le24(27) + 1 };
-    if (chunk === 'VP8 ') return { width: le16(26) & 0x3fff, height: le16(28) & 0x3fff };
-    if (chunk === 'VP8L') { const b = bytes; return { width: 1 + (((b[22]! & 0x3f) << 8) | b[21]!), height: 1 + (((b[24]! & 0x0f) << 10) | (b[23]! << 2) | ((b[22]! & 0xc0) >> 6)) }; }
-    return null;
-  }
-  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
-    for (let i = 2; i + 9 < bytes.length;) {
-      if (bytes[i] !== 0xff) { i++; continue; }
-      const marker = bytes[i + 1]!;
-      if (marker === 0xff) { i++; continue; }
-      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
-      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) return { width: u16(i + 7), height: u16(i + 5) };
-      i += 2 + u16(i + 2);
-    }
-  }
-  return null;
 }
 
 /** Usage as the AI SDK's provider converters reported it, with the long-TTL cache writes from the raw usage. */
@@ -151,16 +114,22 @@ interface Call { userId: string; key: string; model: string; holdNano: number; o
 /** Recorded before the hold is reserved, so an object that dies between the two still finds and bills its hold. */
 interface Intent { userId: string; key: string; model: string }
 /** Where the call got to: sent; answered with a stream; refused definitively; finished with its final usage. */
-type Stage = 'dispatched' | 'opened' | 'refused' | 'complete';
+type Stage = 'dispatched' | 'opened' | 'refused' | 'complete' | 'cancelled';
 /** A provider answer that is a definitive refusal: a 4xx (the request was rejected before any generation), except
     a timeout, which says nothing about what the provider did. */
 export const definitiveRefusal = (status: number) => status >= 400 && status < 500 && status !== 408;
 interface Settlement { source: Source; usage: Usage; nanoUsd: number; fresh: number; estimated: boolean }
 /** When the object's alarm checks on a call: soon after dispatch, then while it runs, then with backoff. */
 export const ALARM_AFTER_MS = 30_000;
-/** The longest a call may stream (128k output tokens at a slow 30 a second is about 70 minutes). Past it the
-    object's watchdog stops the drain and the call settles at its hold. */
-export const MAX_DRAIN_MS = 90 * 60_000;
+/** The longest a call may run, from dispatch. Past it the object stops the drain (and its watchdog alarm makes
+    sure), and the call settles at its whole hold. */
+export const MAX_DRAIN_MS = 15 * 60_000;
+/** A call's deadlines: admission (the hold reserved and the call sent), upstream silence, and the whole call. Past
+    any of them the call stops; a call already sent settles at its whole hold (its cost is uncertain). Mutable for
+    tests only. */
+export const DEADLINES = { admissionMs: 10_000, idleMs: 60_000, totalMs: MAX_DRAIN_MS };
+/** Calls one account may have in flight. */
+export const MAX_IN_FLIGHT = 3;
 export const retryDelay = (attempt: number) => Math.min(60_000 * 2 ** attempt, 60 * 60_000);
 
 export interface MeterOptions {
@@ -171,6 +140,8 @@ export interface MeterOptions {
   model: AeroModel;
   /** The client's own output limit, if it set one. */
   requestedMax: number | undefined;
+  /** The most Aero may spend across all accounts in a UTC day, in nano-USD. */
+  globalDailyNano: number;
   fetch?: Fetch;
 }
 
@@ -208,12 +179,17 @@ export class Meter {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const path = new URL(url).pathname;
     const generate = this.options.model.provider === 'anthropic' ? /\/messages$/.test(path) : /\/responses$/.test(path);
-    if (!generate || typeof init?.body !== 'string') return this.upstream(input, init);
+    const { store, model, userId, key } = this.options;
+    // Fails closed: nothing leaves for the provider unless it is the one metered generation call, as metered.
+    if (!generate || (init?.method ?? 'GET').toUpperCase() !== 'POST' || typeof init?.body !== 'string') throw new Error('aero: unmetered provider request refused');
     if (this.dispatched) throw new Error('aero: a call is dispatched once');
     this.dispatched = true;
-    const body = JSON.parse(init.body) as Record<string, any>;
-    const { store, model, userId, key } = this.options;
-    let sent: string;
+    let body: Record<string, any>;
+    try { body = JSON.parse(init.body) as Record<string, any>; } catch { throw new Error('aero: unmetered provider request refused'); }
+    if (body.model !== model.providerModel || body.stream !== true) throw new Error('aero: unmetered provider request refused');
+    let sent!: string;
+    let done!: () => void;
+    this.reserving = new Promise<void>(resolve => { done = resolve; });
     try {
       // The recovery intent and the alarm come first: whatever happens after the hold commits, the alarm finds it.
       await this.save({ intent: { userId, key, model: model.id } satisfies Intent });
@@ -226,15 +202,23 @@ export class Meter {
       const field = model.provider === 'anthropic' ? 'max_tokens' : 'max_output_tokens';
       body[field] = Math.min(typeof body[field] === 'number' ? body[field] : Infinity, this.call!.outputCap);
       sent = JSON.stringify(body);
+      // Past the admission deadline the call is never sent: nothing was billed, so the hold settles at nothing.
+      if (this.cancelled) { this.stage = 'cancelled'; await this.save({ call: this.call, stage: this.stage }); throw new V2Error(503, 'upstream_timeout'); }
       this.stage = 'dispatched';
       await this.save({ call: this.call, stage: this.stage });
-    } catch (error) { this.admit.reject(error); throw error; }
+    } catch (error) { this.admit.reject(error); throw error; } finally { done(); }
     this.admit.resolve();
     const response = await this.upstream(input, { ...init, body: sent });
     this.stage = response.ok ? 'opened' : definitiveRefusal(response.status) ? 'refused' : 'dispatched';
     await this.save({ stage: this.stage });
     return response;
   };
+
+  private cancelled = false;
+  /** The reservation in flight (a settle waits for it: a hold may commit after the stream already ended). */
+  private reserving: Promise<void> | null = null;
+  /** The admission deadline passed: the call must not be sent (a hold still being reserved settles at nothing). */
+  cancel() { this.cancelled = true; this.admit.reject(new V2Error(503, 'upstream_timeout')); }
 
   /** Ends a pending admission when the call failed before it reached the provider. */
   abandon() { this.admit.reject(new V2Error(502, 'upstream_error')); }
@@ -250,10 +234,25 @@ export class Meter {
       await lockBalance(tx, userId);
       const now = await spendingPeriod(tx, userId);
       if (!now) throw new V2Error(402, 'credits_exhausted');
+      // An account under review (a settled cost once passed its hold) gets nothing until someone clears it.
+      const [blocked] = await tx.select({ userId: aeroBlocks.userId }).from(aeroBlocks).where(eq(aeroBlocks.userId, userId)).limit(1);
+      if (blocked) throw new V2Error(403, 'account_review');
+      // At most MAX_IN_FLIGHT calls of one account at a time.
+      const [{ running }] = await tx.select({ running: sql<number>`count(*)::int` }).from(creditLedger)
+        .where(and(eq(creditLedger.userId, userId), eq(creditLedger.kind, 'hold'), sql`${creditLedger.holdExpiresAt} > clock_timestamp()`)) as [{ running: number }];
+      if (running >= MAX_IN_FLIGHT) throw new V2Error(429, 'too_many_calls', 5);
       const available = (await periodBalance(tx, userId, now.period)).remainingNano;
       const cap = Math.min(desired, Math.floor((available - bound * rates.input) / rates.output));
       if (cap < floor) throw new V2Error(402, 'credits_exhausted');
       const hold = bound * rates.input + cap * rates.output;
+      // Across every account, a day's spend (and holds) stays under the global ceiling, taken under one lock.
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext('aero-global-daily'))`);
+      const [{ today }] = await tx.select({ today: sql<string>`coalesce(sum(case when ${creditLedger.kind} = 'spend' then ${creditLedger.costNanoUsd} else ${creditLedger.holdNanoUsd} end), 0)` }).from(creditLedger)
+        .where(and(inArray(creditLedger.kind, ['spend', 'hold']), sql`${creditLedger.createdAt} >= date_trunc('day', clock_timestamp() at time zone 'UTC') at time zone 'UTC'`)) as [{ today: string }];
+      if (Number(today) + hold > this.options.globalDailyNano) {
+        console.error('aero global daily ceiling reached', Number(today), hold, this.options.globalDailyNano);
+        throw new V2Error(503, 'capacity_exhausted', 3600);
+      }
       const claimed = await tx.insert(creditLedger).values({
         userId, kind: 'hold', idempotencyKey: this.options.key, credits: 0, subscriptionId: now.subscriptionId,
         periodStart: now.period.start, periodEnd: now.period.end, model: model.id, holdNanoUsd: hold,
@@ -307,6 +306,7 @@ export class Meter {
 
   /** Settles the call: the hold becomes its spend. Throws if it can't yet (the object's alarm retries). */
   async settle(): Promise<void> {
+    await this.reserving;
     if (!this.held) return;
     await this.saving;
     await settleStored(this.options.store, this.options.data);
@@ -337,9 +337,13 @@ export async function settleStored(store: CallStore, data: Data): Promise<'settl
     // would is still held to it (a period never passes its grant) and logged.
     const usage = sdk ?? final;
     const price = cost(model, usage);
-    if (price.nanoUsd > call.holdNano) console.error('aero spend over its hold', call.key, price.nanoUsd, call.holdNano);
+    if (price.nanoUsd > call.holdNano) {
+      // The circuit breaker: a bound that didn't hold stops the account until someone reviews it.
+      console.error('aero spend over its hold: account blocked for review', call.key, price.nanoUsd, call.holdNano);
+      await data.db.insert(aeroBlocks).values({ userId: call.userId, reason: `spend ${price.nanoUsd} over hold ${call.holdNano}`, key: call.key }).onConflictDoNothing();
+    }
     settlement = { source: 'reported', usage, nanoUsd: Math.min(price.nanoUsd, call.holdNano), fresh: price.fresh, estimated: false };
-  } else if (stage === 'refused') {
+  } else if (stage === 'refused' || stage === 'cancelled') {
     settlement = { source: 'none', usage: ZERO, nanoUsd: 0, fresh: 0, estimated: false };
   } else {
     settlement = { source: 'hold', usage: ZERO, nanoUsd: call.holdNano, fresh: 0, estimated: true };

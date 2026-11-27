@@ -9,7 +9,8 @@ import { withData } from './db';
 import { billing, frames, fxReduce, periodOf, stack, subscribe, type Stack } from './billing-helpers';
 import { creditLedger } from '../src/db/schema';
 import { CREDIT_NANO_USD, modelById } from '../src/aero/catalogue';
-import { HOLD_TTL_MS, anthropicRaw, imageBound, inputBound, openaiRaw } from '../src/aero/meter';
+import { HOLD_TTL_MS, anthropicRaw, inputBound, openaiRaw } from '../src/aero/meter';
+import { imageTokens } from '../src/aero/images';
 import { displayCredits } from '../src/billing/ledger';
 import type { Data } from '../src/db/client';
 import type { Script } from '../scripts/ai-simulator';
@@ -306,20 +307,24 @@ test('the input bound counts the whole request as bytes; only real image parts c
   const body = { model: 'm', system: [{ type: 'text', text: 'é'.repeat(1000) }], messages: [{ role: 'user', content: [{ type: 'text', text: 'hello world '.repeat(500) }] }] };
   // A byte-level tokenizer can't take more tokens than bytes: 2,000 bytes of é and 6,000 of ASCII.
   expect(inputBound('anthropic', body)).toBeGreaterThanOrEqual(8_000);
-  // A 1x1 PNG's bound is its pixel bound, and a big base64 payload doesn't count byte for byte.
+  // A real image part counts by its decoded pixels at the provider's own rate, never by its base64: a 1x1 PNG is
+  // 1/750 of a token (Anthropic) or 85 + 170 for one tile (OpenAI), plus 64, however big its payload.
   const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-  // Pixel bound or base64 length, whichever is smaller: a 1x1 PNG's base64 is shorter than 1 + 1,024.
-  expect(imageBound(png)).toBe(png.length);
+  expect(imageTokens('anthropic', png)).toBe(1 + 64);
+  expect(imageTokens('openai', png)).toBe(85 + 170 + 64);
+  // A 4000x3000 image: Anthropic scales it to 2576x1932 first; OpenAI fits 2048x1536, then 1024x768: 2x2 tiles.
+  const big = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]), Buffer.from([0, 0, 0x0f, 0xa0, 0, 0, 0x0b, 0xb8]), Buffer.alloc(8)]).toString('base64');
+  expect(imageTokens('anthropic', big)).toBe(Math.ceil((2576 * 1932) / 750) + 64);
+  expect(imageTokens('openai', big)).toBe(Math.max(85 + 170 * 4, 64 * 48) + 64);
   const withImage = (data: string) => inputBound('anthropic', { messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data } }] }] });
   const padded = Buffer.concat([Buffer.from(png, 'base64'), Buffer.alloc(300_000)]).toString('base64');
-  expect(imageBound(padded)).toBe(1 + 1024);
-  // 400 KB of base64 in a message's image part adds only its pixel bound.
-  expect(withImage(padded) - withImage(png)).toBe(1 + 1024 - png.length);
+  // 400 KB of base64 in a message's image part adds nothing over the same image without it.
+  expect(withImage(padded)).toBe(withImage(png));
   // Image-shaped data anywhere else (a tool's schema, which goes upstream whole) is text, counted byte for byte.
   for (const provider of ['anthropic', 'openai'] as const) {
     const schema = (data: string) => inputBound(provider, { tools: [{ name: 't', input_schema: { type: 'object', default: { type: 'image', source: { type: 'base64', data } }, examples: [{ type: 'input_image', image_url: `data:image/png;base64,${data}` }] } }], messages: [{ role: 'user', content: 'x' }], input: [{ role: 'user', content: 'x' }] });
     expect(schema(padded) - schema(png)).toBe(2 * (padded.length - png.length));
   }
-  // Unreadable: its base64 length.
-  expect(imageBound('notanimage')).toBe(10);
+  // Unreadable: no bound (the request is refused before it gets here).
+  expect(imageTokens('anthropic', 'notanimage')).toBeNull();
 });

@@ -1,4 +1,6 @@
 interface CloudflareBindings {
+  /** 'production' on the deployed Worker (wrangler.jsonc); 'development' locally (.dev.vars). See production.ts. */
+  ENVIRONMENT?: string;
   DATABASE_URL: string;
   LOCAL_POSTGRES?: string;
   BETTER_AUTH_SECRET: string;
@@ -26,4 +28,10 @@ interface CloudflareBindings {
   AERO_ANTHROPIC_BASE_URL?: string;
   /** One Durable Object per Aero call (src/aero/call.ts): it owns the provider stream and settles the call. */
   AERO_CALLS?: DurableObjectNamespace;
+  /** Per-IP edge limit for Aero and billing (Workers Rate Limiting). */
+  RL_AERO?: RateLimit;
+  /** The most Aero may spend across all accounts in a UTC day, in USD (default 50). */
+  AERO_GLOBAL_DAILY_USD?: string;
+  /** Sign-in codes sent across all addresses in a UTC day (default 150, below the mail quota). */
+  EMAIL_DAILY_LIMIT?: string;
 }
