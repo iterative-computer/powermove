@@ -161,6 +161,22 @@ impl AgentLink {
     pub fn typed(&self, thread: &str, text: &str) {
         *self.typed.shared() = Some((thread.into(), text.into()));
     }
+    /// Signed in to `provider` (its run can start), `None` while that is
+    /// still being checked.
+    pub fn signed_in(&self, provider: Provider) -> Option<bool> {
+        match self.connection(provider).0 {
+            "connected" => Some(true),
+            "checking" | "waiting" => None,
+            _ => Some(false),
+        }
+    }
+    /// Aero (Powermove's harness) is offered in this build.
+    pub fn offers_aero(&self) -> bool {
+        self.environment
+            .shared()
+            .as_ref()
+            .is_some_and(|env| env.aero.is_some())
+    }
     /// A run needs its runtime and a signed-in account.
     pub fn available(&self, provider: Provider) -> bool {
         self.connection(provider).0 == "connected"
@@ -469,6 +485,32 @@ fn now() -> u64 {
 }
 pub fn now_ms() -> u64 {
     now()
+}
+/// The provider a thread with none recorded starts on: the one chosen in
+/// onboarding (the `agentProvider` setting, as v1 kept it); with none
+/// recorded, Codex or Claude Code when a sign-in to it exists, else Aero
+/// (w117). `codex`/`claude`: signed in, `None` while that is still being
+/// checked (no answer yet: `None`, the thread stays as it is). `aero`: Aero
+/// is offered in this build.
+pub fn default_provider(
+    chosen: Option<&str>,
+    aero: bool,
+    codex: Option<bool>,
+    claude: Option<bool>,
+) -> Option<Provider> {
+    let named = match chosen {
+        Some("aero") if aero => Some(Provider::Aero),
+        Some("chatgpt") => Some(Provider::Chatgpt),
+        Some("claude") => Some(Provider::Claude),
+        Some("compatible") => Some(Provider::Compatible),
+        _ => None,
+    };
+    named.or(match (codex, claude) {
+        (Some(true), _) => Some(Provider::Chatgpt),
+        (Some(false), Some(true)) => Some(Provider::Claude),
+        (Some(false), Some(false)) if aero => Some(Provider::Aero),
+        _ => None,
+    })
 }
 const UNAVAILABLE: &str = "Agent provider or native action service is unavailable";
 /// `live`: the thread has a run, which outlives its account's status.
@@ -1466,6 +1508,78 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
 mod tests {
     use super::*;
     use serde_json::json;
+    /// w127: the composer starts on the agent chosen in onboarding; with
+    /// none chosen, on Codex or Claude Code when signed in to it, else Aero;
+    /// nothing is decided while a sign-in is still being checked.
+    #[test]
+    fn a_new_thread_starts_on_the_onboarding_choice_else_the_sign_ins_else_aero() {
+        use Provider::*;
+        let no = Some(false);
+        let yes = Some(true);
+        assert_eq!(default_provider(Some("aero"), true, yes, yes), Some(Aero));
+        assert_eq!(default_provider(Some("claude"), true, no, no), Some(Claude));
+        assert_eq!(default_provider(Some("chatgpt"), true, no, no), Some(Chatgpt));
+        assert_eq!(default_provider(None, true, no, no), Some(Aero));
+        assert_eq!(default_provider(None, true, yes, no), Some(Chatgpt));
+        assert_eq!(default_provider(None, true, no, yes), Some(Claude));
+        assert_eq!(default_provider(None, true, yes, yes), Some(Chatgpt));
+        assert_eq!(default_provider(None, true, None, no), None);
+        assert_eq!(default_provider(None, true, no, None), None);
+        // Aero not offered in this build: the choice falls to the sign-ins.
+        assert_eq!(default_provider(Some("aero"), false, no, yes), Some(Claude));
+        assert_eq!(default_provider(Some("aero"), false, no, no), None);
+        assert_eq!(default_provider(Some("unknown"), true, no, no), Some(Aero));
+    }
+    /// A thread with no provider recorded takes the default; one the person
+    /// set (or a thread already sending) keeps its own.
+    #[test]
+    fn only_a_thread_with_no_provider_recorded_takes_the_default() {
+        #[derive(Default)]
+        struct Memory(std::collections::BTreeMap<String, Value>);
+        impl pm_agents::persistence::Store for Memory {
+            fn get(&mut self, key: &str) -> std::io::Result<Option<Value>> {
+                Ok(self.0.get(key).cloned())
+            }
+            fn set(&mut self, key: &str, value: &Value) -> std::io::Result<()> {
+                self.0.insert(key.into(), value.clone());
+                Ok(())
+            }
+        }
+        let mut store = Memory::default();
+        let mut panel = Panel::load(&mut store, "project", "thread", 0).unwrap();
+        let mut catalog = Catalog::default();
+        catalog.providers = vec![
+            ("aero".into(), "Aero".into()),
+            ("claude".into(), "Claude Code".into()),
+            ("chatgpt".into(), "Codex".into()),
+        ];
+        assert_eq!(
+            panel.session("thread").unwrap().settings.provider,
+            Provider::Chatgpt
+        );
+        assert!(
+            panel
+                .adopt_default_provider("thread", Provider::Aero, catalog.clone())
+                .unwrap()
+        );
+        assert_eq!(
+            panel.session("thread").unwrap().settings.provider,
+            Provider::Aero
+        );
+        // The person picks Codex: the default no longer applies.
+        panel
+            .set_provider("thread", Provider::Chatgpt, String::new(), catalog.clone())
+            .unwrap();
+        assert!(
+            !panel
+                .adopt_default_provider("thread", Provider::Aero, catalog)
+                .unwrap()
+        );
+        assert_eq!(
+            panel.session("thread").unwrap().settings.provider,
+            Provider::Chatgpt
+        );
+    }
     /// P1 (Sol, PM-750): a thread saved on an old Aero route (an OpenAI or
     /// Anthropic key's model, a Custom endpoint's) sends nothing, queued or
     /// directly, until a model from Powermove's catalogue is chosen.
