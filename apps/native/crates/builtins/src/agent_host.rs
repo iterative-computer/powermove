@@ -1096,12 +1096,32 @@ fn aero_queued_ok(link: &AgentLink, settings: &pm_panel_agentpanel::model::Setti
 /// or Custom model), resumed or queued, sends nothing until one is chosen.
 fn aero_checked(
     link: &AgentLink,
-    (environment, request): (Environment, Request),
+    (environment, mut request): (Environment, Request),
 ) -> Result<(Environment, Request), Error> {
-    if request.provider == Provider::Aero && !link.aero_choice_ok(request.model.as_deref()) {
+    if request.provider != Provider::Aero {
+        return Ok((environment, request));
+    }
+    // No choice (a new thread, a fresh install, a thread whose picker had not
+    // seen the catalogue yet): the catalogue's default runs. A choice is kept.
+    if request
+        .model
+        .as_deref()
+        .is_none_or(|m| m.is_empty() || m == "default")
+    {
+        request.model = default_model(&link.powermove_models());
+    }
+    if !link.aero_choice_ok(request.model.as_deref()) {
         return Err(Error::Host(pm_agents::inference::CHOOSE.into()));
     }
     Ok((environment, request))
+}
+/// The model a catalogue marks as its default, else its first.
+fn default_model(models: &[pm_agents::account::Model]) -> Option<String> {
+    models
+        .iter()
+        .find(|m| m.default)
+        .or(models.first())
+        .map(|m| m.id.clone())
 }
 fn launch_request(
     state: &AgentState,
@@ -1514,7 +1534,38 @@ mod tests {
             link.available(Provider::Aero)
         );
         assert!(aero_checked(&link, (Environment::default(), request(listed))).is_ok());
+        // No choice runs the catalogue's default; a choice is kept.
+        for unchosen in ["", "default"] {
+            let (_, sent) =
+                aero_checked(&link, (Environment::default(), request(unchosen))).unwrap();
+            assert_eq!(sent.model.as_deref(), Some(listed));
+        }
+        let mut none = request(listed);
+        none.model = None;
+        let (_, sent) = aero_checked(&link, (Environment::default(), none)).unwrap();
+        assert_eq!(sent.model.as_deref(), Some(listed));
         link.close();
+    }
+    /// The catalogue's `default: true` model runs when nobody chose one
+    /// (`/v2/aero/models` marks GPT-6.2 Sol), wherever it is listed.
+    #[test]
+    fn no_choice_runs_the_model_the_catalogue_marks_default() {
+        let models = pm_agents::inference::parse_models(
+            br#"{"data":[{"id":"anthropic/claude-opus-5-5"},{"id":"openai/gpt-6.2-sol","default":true},{"id":"openai/gpt-6-luna"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            default_model(&models).as_deref(),
+            Some("pm/openai/gpt-6.2-sol")
+        );
+        let unmarked =
+            pm_agents::inference::parse_models(br#"{"data":[{"id":"openai/gpt-6-luna"}]}"#)
+                .unwrap();
+        assert_eq!(
+            default_model(&unmarked).as_deref(),
+            Some("pm/openai/gpt-6-luna")
+        );
+        assert_eq!(default_model(&[]), None);
     }
     #[test]
     fn binary_attachments_and_pick_notes_reach_the_run_without_losing_bytes() {
