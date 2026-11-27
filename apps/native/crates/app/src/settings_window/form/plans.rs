@@ -134,12 +134,14 @@ struct Type {
 impl Type {
     fn new() -> Self {
         let (t, s) = (text_size(), st());
+        // Settings' own scale: a row's title (base) and its secondary line
+        // (xs); the name at a group heading's weight; only the price large.
         Self {
             name: font(t.base, s.heading_weight),
             price: font(t.x4l, s.heading_weight),
-            period: font(t.sm, regular()),
-            note: font(t.sm, regular()),
-            feature: font(t.sm, s.heading_weight),
+            period: font(t.xs, regular()),
+            note: font(t.xs, regular()),
+            feature: font(t.base, regular()),
             detail: font(t.xs, regular()),
         }
     }
@@ -571,7 +573,7 @@ impl Plans {
                 // The site's light pill: the light ground as the tint
                 // (pure white reads as no tint to the system).
                 button.setBezelColor(Some(&srgb(Colors::of(Scheme::Light).window, 1.)));
-                button.setFont(Some(&font(text_size().base, st().heading_weight)));
+                button.setFont(Some(&font(text_size().base, regular())));
                 button.setTag(index as isize);
                 // The night card's appearance: untinted (its window not
                 // key) it is dark glass with light text, never lost.
@@ -607,14 +609,14 @@ mod tests {
     #[test]
     fn a_plan_reads_its_lines_in_order() {
         let plan = Plan::parse(
-            "Aerolite\n$9.99\nper month\nAero, our agent, with inference included.\nGet Aerolite\n1,000 credits every month\tInference for Aero, run by Powermove",
+            "Aerolite\n$9.99\nper month\nAero, our agent, with inference included.\nGet Aerolite\n1,000 credits a month\tInference for Aero, run by Powermove",
         );
         assert_eq!(plan.action, Action::Button("Get Aerolite".into()));
         assert!(plan.offered());
         assert_eq!(
             plan.features,
             [(
-                "1,000 credits every month".to_owned(),
+                "1,000 credits a month".to_owned(),
                 "Inference for Aero, run by Powermove".to_owned()
             )]
         );

@@ -1475,7 +1475,7 @@ pub(crate) fn billing_rows(billing: &Value, busy: bool) -> Vec<Value> {
                     note.to_owned(),
                     format!("Get {name}"),
                     format!(
-                        "{} credits every month\tInference for Aero, run by Powermove",
+                        "{} credits a month\tInference for Aero, run by Powermove",
                         pm_agents::inference::grouped(credits(p))
                     ),
                 ];
@@ -1899,7 +1899,7 @@ mod cloud_tests {
         assert_eq!(
             options[1]["label"],
             "Aerolite\n$9.99\nper month\nAero, our agent, with inference included.\n\
-             Get Aerolite\n1,000 credits every month\tInference for Aero, run by Powermove"
+             Get Aerolite\n1,000 credits a month\tInference for Aero, run by Powermove"
         );
         assert_eq!(options.len(), 3);
         // Only the plans the backend lists: Aerolite alone, no Aero anywhere.
