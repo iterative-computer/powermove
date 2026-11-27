@@ -42,6 +42,7 @@ import {
   type Run,
   type ToolDetail,
   type ToolsRow,
+  modelDisplayName,
 } from "./present";
 
 /** Pure view memoization using native Preact. Importing preact/compat installs
@@ -2856,13 +2857,26 @@ function Conversation({
 function named(entries: [string, string][], current: string, fallback = "") {
   return entries.find(([v]) => v === current)?.[1] || current || fallback;
 }
-/** A saved choice the catalog no longer lists stays visible rather than
- *  missing; no choice is never a row of its own. */
+/** Names a catalogue listed this session, so a thread keeps its model's name
+ *  while the catalogue is away (signed out, or a 401). */
+const seenModelNames = new Map<string, string>();
+/** A model's name: the catalogue's, else `modelDisplayName`, else `fallback`
+ *  when no model is chosen. Never the raw id. */
+function modelNamed(entries: [string, string][], id: string, fallback = "") {
+  const label = entries.find(([v]) => v === id)?.[1];
+  if (label && label !== id) {
+    seenModelNames.set(id, label);
+    return label;
+  }
+  return id ? (seenModelNames.get(id) ?? modelDisplayName(id)) : fallback;
+}
+/** A saved model the catalog no longer lists stays visible, by name, rather
+ *  than missing; no choice is never a row of its own. */
 function pairs(entries: [string, string][], current: string) {
-  const options = entries.map(([v, label]) => ({ v, label }));
+  const options = entries.map(([v, label]) => ({ v, label: label && label !== v ? label : modelNamed(entries, v) }));
   return !current || entries.some(([v]) => v === current)
     ? options
-    : [...options, { v: current, label: current }];
+    : [...options, { v: current, label: modelNamed(entries, current) }];
 }
 function Composer({
   s,
@@ -2929,7 +2943,7 @@ function Composer({
       if (openModelMenu.current === open) openModelMenu.current = null;
     }
   };
-  const modelName = named(
+  const modelName = modelNamed(
     s.catalog.models,
     s.settings.model,
     named(s.catalog.providers, s.settings.provider),
@@ -3495,7 +3509,7 @@ function Composer({
                 ? chooserName(
                     s.catalog.models,
                     shownModel,
-                    named(s.catalog.models, shownModel, named(s.catalog.providers, s.settings.provider)),
+                    modelNamed(s.catalog.models, shownModel, named(s.catalog.providers, s.settings.provider)),
                   )
                 : modelName
           }

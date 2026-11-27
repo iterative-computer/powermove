@@ -13,6 +13,10 @@ telemetry = ["pm-telemetry/telemetry"]
 # The owner's Aero trial (Sandbox builds only; shipping builds never set it): turns on the
 # development switch (Settings › Providers and the Powermove harness) in a release build.
 aero-trial = ["pm-agents/require-core"]
+# The Sandbox and other ad-hoc signed builds (PM_V2_FEATURES=profile-session): the Powermove
+# account session lives in the profile (cloud/secrets, 0600) instead of the login Keychain, so a
+# rebuild never asks for the Keychain password. Shipped Developer ID builds never set it.
+profile-session = []
 # The Sandbox against a local cloud stack (PM_V2_FEATURES=dev-cloud-origin): PM_CLOUD_ORIGIN
 # may point the account, billing and Aero at http://127.0.0.1:<port>. Never in a shipped release.
 dev-cloud-origin = [
