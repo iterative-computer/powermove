@@ -190,12 +190,15 @@ pub struct Editor {
     deferred_panel_commands: Vec<String>,
 }
 
+/// A scrolling tab strip's offset, in points: it follows the trackpad
+/// continuously, as any macOS strip does, and a newly selected tab is scrolled
+/// just into view.
 #[derive(Default)]
 struct TabScroll {
     selected: String,
     viewport: f32,
     active: usize,
-    position: f32,
+    offset: f32,
 }
 
 #[cfg(test)]
@@ -208,37 +211,29 @@ struct RenderedTabLabel {
 }
 
 impl TabScroll {
-    fn reveal(
-        &mut self,
-        selected: &str,
-        active: usize,
-        viewport: f32,
-        widths: &[f32],
-        limit: usize,
-    ) {
+    /// Scrolls the active tab fully into view when the selection, the
+    /// viewport or the active index changes; otherwise keeps the offset.
+    fn reveal(&mut self, selected: &str, active: usize, viewport: f32, widths: &[f32], max: f32) {
         if self.selected != selected || self.viewport != viewport || self.active != active {
             self.selected = selected.to_owned();
             self.viewport = viewport;
             self.active = active;
-            let mut first = self.first().min(active).min(limit);
-            while first < active
-                && first + whole_tabs(viewport, widths[first..].iter().copied()).0 <= active
-            {
-                first += 1;
+            let start = widths[..active].iter().sum::<f32>() + active as f32 * TAB_SPACING;
+            let end = start + widths.get(active).copied().unwrap_or(0.);
+            if start < self.offset {
+                self.offset = start;
+            } else if end > self.offset + viewport {
+                self.offset = end - viewport;
             }
-            self.position = first as f32;
         }
-        self.position = self.position.min(limit as f32);
+        self.offset = self.offset.clamp(0., max.max(0.));
     }
 
-    fn first(&self) -> usize {
-        self.position.round() as usize
-    }
-
-    fn scroll(&mut self, delta: f32, limit: usize) -> bool {
-        let first = self.first();
-        self.position = (self.position - delta / TAB_STEP).clamp(0., limit as f32);
-        self.first() != first
+    /// Moves by a scroll delta in points; true when the offset changed.
+    fn scroll(&mut self, delta: f32, max: f32) -> bool {
+        let before = self.offset;
+        self.offset = (self.offset - delta).clamp(0., max.max(0.));
+        self.offset != before
     }
 }
 
@@ -2797,23 +2792,23 @@ impl Editor {
 /// A token colour at an alpha (`translucency.*`, `Tokens::edge`, `Tokens::line`).
 /// Space between neighbouring tab pills.
 const TAB_SPACING: f32 = pm_design::tab::GAP;
-const TAB_STEP: f32 = layout::MIN_TAB_WIDTH + TAB_SPACING;
 const TAB_EDGE_FADE: f32 = 16.;
 const TAB_PADDING: f32 = pm_design::tab::PAD;
 
-fn whole_tabs(viewport: f32, widths: impl IntoIterator<Item = f32>) -> (usize, f32) {
-    let mut count = 0;
-    let mut width = 0.;
-    for tab in widths {
-        let next = width + tab + if count > 0 { TAB_SPACING } else { 0. };
-        if next > viewport {
-            break;
+/// The tabs any part of which shows at `offset`: the first index and how many.
+fn visible_tabs(widths: &[f32], offset: f32, viewport: f32) -> (usize, usize) {
+    let (mut first, mut count, mut start) = (None, 0, 0.);
+    for (index, width) in widths.iter().enumerate() {
+        let end = start + width;
+        if end > offset && start < offset + viewport {
+            first.get_or_insert(index);
+            count += 1;
         }
-        count += 1;
-        width = next;
+        start = end + TAB_SPACING;
     }
-    (count, width)
+    (first.unwrap_or(0), count)
 }
+
 /// Width of a header title at `size` in the medium weight, as the tab strip draws it.
 fn title_width(text: &str, size: f32, window: &Window) -> f32 {
     measure_tab_text(text, size, FontWeight::MEDIUM, window)
@@ -4013,26 +4008,19 @@ impl Editor {
                 };
                 let track = group.tab_track(viewport - gaps, &widths);
                 let scrolling = multi && track.scroll > 0.;
-                let limit = tabs.len().saturating_sub(
-                    whole_tabs(viewport, track.widths.iter().rev().copied())
-                        .0
-                        .max(1),
-                );
+                let content = track.widths.iter().sum::<f32>() + gaps;
+                let limit = (content - viewport).max(0.);
                 let tab_key = tabs[0].clone();
-                let first = if scrolling {
+                let offset = if scrolling {
                     let state = self.tab_scrolls.entry(tab_key.clone()).or_default();
                     state.reveal(&id, active, viewport, &track.widths, limit);
-                    state.first()
+                    state.offset
                 } else {
                     self.tab_scrolls.remove(&tab_key);
-                    0
+                    0.
                 };
-                let (visible, clip_width) = if scrolling {
-                    whole_tabs(viewport, track.widths[first..].iter().copied())
-                } else {
-                    (tabs.len(), viewport)
-                };
-                let offset = track.widths[..first].iter().sum::<f32>() + first as f32 * TAB_SPACING;
+                let clip_width = viewport;
+                let (first, visible) = visible_tabs(&track.widths, offset, viewport);
                 let single_width = (p.rect.w - tools - m.inset - m.gap * 2.).max(0.);
                 let measure_label =
                     |label: &str| measure_tab_text(label, label_size, label_weight, w);
@@ -4312,12 +4300,10 @@ impl Editor {
                                 .h(px(m.control))
                                 .overflow_hidden()
                                 .overflow_fade(Edges::<AbsoluteLength> {
-                                    left: px(if first > 0 { TAB_EDGE_FADE } else { 0. }).into(),
-                                    right: px(if first + visible < tabs.len() {
-                                        TAB_EDGE_FADE
-                                    } else {
-                                        0.
-                                    })
+                                    left: px(TAB_EDGE_FADE * (offset / TAB_EDGE_FADE).clamp(0., 1.))
+                                        .into(),
+                                    right: px(TAB_EDGE_FADE
+                                        * ((limit - offset) / TAB_EDGE_FADE).clamp(0., 1.))
                                     .into(),
                                     top: px(0.).into(),
                                     bottom: px(0.).into(),
@@ -7262,46 +7248,31 @@ mod tests {
     fn dock_tabs_selection_reveals_the_active_tab() {
         let mut scroll = super::TabScroll::default();
         let widths = [72., 72., 72., 72., 64.];
-        scroll.reveal("pexels", 4, 250., &widths, 2);
-        assert_eq!(scroll.first(), 2);
-        assert!(!scroll.scroll(16., 2));
-        assert!(scroll.scroll(24., 2));
-        scroll.reveal("pexels", 4, 250., &widths, 2);
-        assert_eq!(scroll.first(), 1, "manual scrolling can browse other tabs");
-        scroll.reveal("voiceover", 3, 250., &widths, 2);
-        assert_eq!(scroll.first(), 1);
-        scroll.reveal("voiceover", 3, 150., &widths, 3);
-        assert_eq!(scroll.first(), 2);
-        scroll.reveal("properties", 0, 150., &widths, 3);
-        assert_eq!(scroll.first(), 0);
+        let content: f32 = widths.iter().sum::<f32>() + 4. * super::TAB_SPACING;
+        let max = content - 250.;
+        scroll.reveal("pexels", 4, 250., &widths, max);
+        assert_eq!(scroll.offset, max, "the last tab ends at the viewport's right edge");
+        // Scrolling follows the trackpad point for point, never by whole tabs.
+        assert!(scroll.scroll(3.5, max));
+        assert_eq!(scroll.offset, max - 3.5);
+        scroll.reveal("pexels", 4, 250., &widths, max);
+        assert_eq!(scroll.offset, max - 3.5, "manual scrolling is kept for the same selection");
+        scroll.reveal("properties", 0, 250., &widths, max);
+        assert_eq!(scroll.offset, 0.);
+        assert!(!scroll.scroll(10., max), "the offset stops at the first tab");
+        assert!(scroll.scroll(-1000., max));
+        assert_eq!(scroll.offset, max, "and at the last");
     }
 
     #[::core::prelude::v1::test]
-    fn dock_tabs_scroll_exposes_only_whole_tabs_outside_the_fade() {
-        let mut scroll = super::TabScroll::default();
+    fn dock_tabs_visible_range_follows_a_fractional_offset() {
         let widths = [72., 72., 120., 72., 64.];
-        for viewport in [120., 146., 188., 258., 366.] {
-            let limit = widths.len() - super::whole_tabs(viewport, widths.iter().rev().copied()).0;
-            for active in 0..widths.len() {
-                scroll.reveal("selected", active, viewport, &widths, limit);
-                let first = scroll.first();
-                let (visible, clip_width) =
-                    super::whole_tabs(viewport, widths[first..].iter().copied());
-                assert!(clip_width <= viewport);
-                let left = widths[..first].iter().sum::<f32>() + first as f32 * super::TAB_SPACING;
-                let right = left + clip_width;
-                assert!((first..first + visible).contains(&active));
-                let mut start = 0.;
-                for (index, tab) in widths.into_iter().enumerate() {
-                    let end = start + tab;
-                    assert!(
-                        end <= left || start >= right || (start >= left && end <= right),
-                        "tab {index} leaves a sliver at viewport {viewport}, offset {left}"
-                    );
-                    start = end + super::TAB_SPACING;
-                }
-            }
-        }
+        assert_eq!(super::visible_tabs(&widths, 0., 150.), (0, 2));
+        let (first, count) = super::visible_tabs(&widths, 40.5, 150.);
+        assert_eq!(first, 0, "a tab partly scrolled out still shows");
+        assert!(count >= 2);
+        let end: f32 = widths.iter().sum::<f32>() + 4. * super::TAB_SPACING;
+        assert_eq!(super::visible_tabs(&widths, end - 64., 64.), (4, 1));
     }
 
     #[::core::prelude::v1::test]
