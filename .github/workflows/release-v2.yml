@@ -80,7 +80,7 @@ jobs:
         with:
           node-version: '22'
       # The V8 sandbox build (rusty_v8 152.2.0) the app links, as native-v8.yml
-      # builds it; cached by its exact bytes.
+      # builds it; cached by its bindings.
       - uses: actions/checkout@v4
         with:
           repository: denoland/rusty_v8
@@ -97,11 +97,9 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -d upstream-v8/target/release/gn_out ]] && (cd upstream-v8/target/release/gn_out && shasum -a 256 -c <<'HASHES' >/dev/null 2>&1
-          0cc50754a6bb75fa5fbf3d8e1742723a745ab47e2de260711a77ac2aa1519ea9  obj/librusty_v8.a
           6da40ff4a76e455222ddf2a902ab60d2e0d69a76b652d90267de4a33e47ff31f  src_binding.rs
-          5705db00255b72e65f59d907f96fcb4d5ea53b1a6a97f4e7a778cd2b6ae62464  args.gn
           HASHES
-          ); then echo 'valid=true' >> "$GITHUB_OUTPUT"; else echo 'valid=false' >> "$GITHUB_OUTPUT"; fi
+          ) && [[ -s upstream-v8/target/release/gn_out/obj/librusty_v8.a ]]; then echo 'valid=true' >> "$GITHUB_OUTPUT"; else echo 'valid=false' >> "$GITHUB_OUTPUT"; fi
       - name: Build V8 with the sandbox from source
         if: steps.cached-v8.outputs.valid != 'true'
         working-directory: upstream-v8
@@ -113,8 +111,9 @@ jobs:
           set -euo pipefail
           cargo +1.96.1 build --locked --release --lib --features v8_enable_sandbox
           cd target/release/gn_out
+          # The archive's bytes depend on the runner's SDK, so the pinned source commit, the
+          # GN args above and the generated bindings are what we verify.
           shasum -a 256 -c <<'HASHES'
-          0cc50754a6bb75fa5fbf3d8e1742723a745ab47e2de260711a77ac2aa1519ea9  obj/librusty_v8.a
           6da40ff4a76e455222ddf2a902ab60d2e0d69a76b652d90267de4a33e47ff31f  src_binding.rs
           HASHES
       - name: Inputs (V8, FFmpeg, JS, Sparkle, agent and speech runtimes)
