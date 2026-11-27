@@ -290,10 +290,21 @@ impl Tools {
             let document = tools.active()?.document;
             Automation::fenced(&tools.session.host, document)?.revision(&tools.project)
         };
+        // Summary is the paged layer index its description names; a layer's
+        // properties come from op layer. Every later model call carries
+        // this result, so the full state stays opt-in (indexOnly:false).
+        let mut args = args.clone();
+        if op == "summary" {
+            for (key, value) in [("indexOnly", json!(true)), ("layerLimit", json!(40))] {
+                if args.get(key).is_none() {
+                    args[key] = value;
+                }
+            }
+        }
         let (mut result, revision) = 'read: {
             for _ in 0..8 {
                 let before = revision_now(self)?;
-                let result = self.session.dispatch(backing, args)?;
+                let result = self.session.dispatch(backing, &args)?;
                 if revision_now(self)? == before {
                     break 'read (result, before);
                 }
