@@ -61,9 +61,16 @@ async function start(c: Context<Env>, done: string, state: string, challenge: st
             };
           }).cause?.code === '23505'
     ) {
-      throw new ApiError({ error: 'bad_request' });
+      // The same link loaded again (a reload, or a browser that opens it
+      // twice) carries on while nothing has used it; any other reuse of a
+      // state is refused.
+      const [row] = await c.var.data.db.select().from(desktopAuth).where(eq(desktopAuth.state, state)).limit(1);
+      if (!row || row.challenge !== challenge || row.consumedAt || row.tokenHash || row.expiresAt <= new Date()) {
+        throw new ApiError({ error: 'bad_request' });
+      }
+    } else {
+      throw error;
     }
-    throw error;
   }
   try {
     const result = await createAuth(c.var.data, c.env).api.signInSocial({
@@ -82,9 +89,35 @@ async function start(c: Context<Env>, done: string, state: string, challenge: st
       redirect.headers.append('set-cookie', cookie);
     }
     return redirect;
-  } catch {
+  } catch (error) {
+    console.error('google sign-in start failed', (error as Error)?.name, (error as Error)?.message);
     await c.var.data.db.update(desktopAuth).set({ consumedAt: new Date() }).where(eq(desktopAuth.state, state));
     throw new ApiError({ error: 'bad_request' });
+  }
+}
+
+/* The browser routes answer a person, not a program: a failure is a page
+   that says what to do, never raw JSON. */
+async function inBrowser(c: Context<Env>, run: () => Promise<Response>): Promise<Response> {
+  try {
+    return await run();
+  } catch (error) {
+    if (!(error instanceof ApiError)) throw error;
+    const limited = error.status === 429;
+    const nonce = crypto.randomUUID();
+    c.header('Content-Security-Policy', `default-src 'none'; style-src 'nonce-${nonce}'`);
+    c.header('Cache-Control', 'no-store');
+    c.header('Referrer-Policy', 'no-referrer');
+    return c.html(page({
+      title: 'Sign-in didn’t finish',
+      nonce,
+      body: `<div class="badge" data-tone="danger">${icons.alert}</div><h1>Sign-in didn’t finish</h1><p>${
+        limited
+          ? 'Too many sign-in attempts. Wait a minute, then try again in Powermove.'
+          : 'This sign-in link has expired or was already used. Go back to Powermove and choose Continue with Google again.'
+      }</p>`,
+      foot: 'You can close this tab.',
+    }), error.status as 400);
   }
 }
 
@@ -153,7 +186,7 @@ export const desktop = new Hono<Env>()
     }),
     (c) => {
       const { state, challenge } = c.req.valid('query');
-      return start(c, '/v1/auth/desktop/done', state, challenge);
+      return inBrowser(c, () => start(c, '/v1/auth/desktop/done', state, challenge));
     },
   )
   .get(
@@ -163,7 +196,7 @@ export const desktop = new Hono<Env>()
         throw result.error;
       }
     }),
-    async (c) => {
+    (c) => inBrowser(c, async () => {
       const { state } = c.req.valid('query');
       const token = await mint(c, state);
       const link = `powermove://auth?state=${encodeURIComponent(state)}&token=${encodeURIComponent(token)}`;
@@ -179,7 +212,7 @@ export const desktop = new Hono<Env>()
         body: `<div class="badge" data-tone="success">${icons.check}</div><h1>You’re signed in</h1><p>Powermove should open on its own. If it doesn’t, open it below.</p><a class="button" href="${escapeHtml(link)}">Open Powermove</a>`,
         foot: 'You can close this tab once Powermove opens.',
       }));
-    },
+    }),
   )
   .post(
     '/exchange',
