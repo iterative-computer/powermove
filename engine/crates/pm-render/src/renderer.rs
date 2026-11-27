@@ -1473,15 +1473,23 @@ impl Renderer {
     }
     /// One allowance for reusable targets, kept mip pyramids and kept bind
     /// groups (with the compatibility uploads they own), split so that
-    /// together they keep at most `bytes` ([`target_shares`]). Visible
-    /// playback's pool ceiling ([`Self::set_playback_retention`]) is the
-    /// targets' part of the same allowance.
+    /// together they keep at most `bytes` ([`target_shares`]).
     pub fn set_target_pool_budget(&mut self, bytes: u64) {
         let (targets, pyramids, binds) = target_shares(bytes);
         let retained = self.prefix.bytes() + self.groups.bytes();
         self.pool.set_free_budget(targets.saturating_sub(retained));
         self.pyramids.set_budget(pyramids);
         self.binds.set_budget(binds);
+    }
+
+    /// Divide the playback target allowance between working textures and
+    /// the auxiliary caches that reference them.
+    pub fn set_playback_target_budget(&mut self, total: u64, pool: u64, shader: u64) {
+        let pool = pool.min(total);
+        let auxiliary = total - pool;
+        self.pyramids.set_budget(auxiliary / 2);
+        self.binds.set_budget(auxiliary - auxiliary / 2);
+        self.set_playback_retention(pool, shader);
     }
 
     /// Bytes the pooled targets, kept pyramids and kept bindings hold now

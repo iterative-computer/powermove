@@ -53,6 +53,22 @@ pub(crate) fn large_scene(scene: &Scene) -> bool {
     pm_eval::Comp::resolve(&scene.doc, &scene.comp)
         .is_ok_and(|comp| comp.layers().len() >= LARGE_SCENE_LAYERS)
 }
+/// Keep enough of the grant for a still at a cut, with a startup reserve
+/// for the next video when recent frames have only drawn stills or graphics.
+fn playback_cache_parts(reads_video: bool) -> (u64, u64, u64, u64, u64, u64) {
+    if reads_video {
+        (18, 15, 15, 7, 35, 10)
+    } else {
+        (4, 24, 5, 17, 36, 14)
+    }
+}
+
+/// Most playback target memory goes to the working textures that every
+/// pass needs. Mip pyramids and bindings share the rest of the allowance.
+fn playback_pool_budget(targets: u64) -> u64 {
+    (targets - targets / 8).min(96 << 20)
+}
+
 /// One viewer frame's request. The renderer's playback path, never an export.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameSpec {
@@ -698,6 +714,7 @@ pub struct Engine {
     budgeted_pressure: crate::memory::Pressure,
     visible_playback: bool,
     budgeted_playback: bool,
+    budgeted_video: bool,
     /// The settling renderer's part of the grant ([`split_for_settling`]).
     settle_budget: u64,
     /// PM_SCRUB_EXTRA_MIB: the borrowed scrub allowance in force (bytes).
@@ -995,6 +1012,7 @@ impl Engine {
             && pressure != crate::memory::Pressure::Critical
             && extra == 0
             && std::env::var_os("PM_PLAYBACK_RETENTION").is_none_or(|v| v != "0");
+        let reads_video = playback && self.renderer.reads_video();
         // A completed submission can return a surface for a turn before the
         // next needs it. Give that capacity back to the caches only after
         // playback has lived without it for two seconds so surface counts
@@ -1018,11 +1036,13 @@ impl Engine {
             || share != self.budgeted_grant
             || pressure != self.budgeted_pressure
             || playback != self.budgeted_playback
+            || reads_video != self.budgeted_video
         {
             self.budgeted_extra = extra;
             self.budgeted_grant = share;
             self.budgeted_pressure = pressure;
             self.budgeted_playback = playback;
+            self.budgeted_video = reads_video;
             // A traced viewer logs why its caches are trimmed (diagnostics).
             if crate::trace::enabled() {
                 eprintln!(
@@ -1064,16 +1084,14 @@ impl Engine {
             // decoded frames (35 %) over stills (10 %); the parts still sum
             // to the grant.
             let shares = knob("PM_FIX_SHARES") == Some(1);
-            let (frame_part, image_part, decoder_part, vector_part, pool_part, text_part) = if playback {
-                // Playing frames need enough decoded-frame lookahead (>=2 4K
-                // frames on 16 GiB Macs), warm text/vector rasters, and pooled
-                // intermediate targets under the same grant.
-                (26, 3, 20, 16, 21, 14)
-            } else if shares {
-                (35, 10, 25, 5, 10, 10)
-            } else {
-                (15, 20, 25, 5, 10, 10)
-            };
+            let (frame_part, image_part, decoder_part, vector_part, pool_part, text_part) =
+                if playback {
+                    playback_cache_parts(reads_video)
+                } else if shares {
+                    (35, 10, 25, 5, 10, 10)
+                } else {
+                    (15, 20, 25, 5, 10, 10)
+                };
             let images = cache * image_part / 100;
             let frames =
                 knob("PM_ABL_FRAME_CACHE_MIB").map_or(cache * frame_part / 100, |m| m << 20);
@@ -1082,14 +1100,7 @@ impl Engine {
             } else {
                 0
             };
-            // One allowance for targets, pyramids and bindings: playback's
-            // pool ceiling is its targets' part, never the whole of it again.
             let targets = cache * pool_part / 100;
-            let pool_limit = if playback {
-                pm_render::target_shares(targets).0.min(96 << 20)
-            } else {
-                0
-            };
             self.renderer.set_image_cache_budget(images);
             self.renderer
                 .apply_media_lease(pm_media::decode::service::MediaLease {
@@ -1102,9 +1113,16 @@ impl Engine {
                     .map_or(cache * if playback { 2 } else { 10 } / 100, |m| m << 20)
                     + extra * 4 / 10,
             );
-            self.renderer.set_target_pool_budget(targets);
-            self.renderer
-                .set_playback_retention(pool_limit, shader_limit);
+            if playback {
+                self.renderer.set_playback_target_budget(
+                    targets,
+                    playback_pool_budget(targets),
+                    shader_limit,
+                );
+            } else {
+                self.renderer.set_target_pool_budget(targets);
+                self.renderer.set_playback_retention(0, 0);
+            }
             let text_budget = if playback {
                 (cache * text_part / 100).max(pm_render::text::gpu::CACHE_BYTES)
             } else {
@@ -1401,6 +1419,7 @@ impl Engine {
             budgeted_pressure: crate::memory::Pressure::Normal,
             visible_playback: false,
             budgeted_playback: false,
+            budgeted_video: false,
             settle_budget: split_for_settling(DEFAULT_GRANT).1,
             budgeted_extra: 0,
         })
@@ -1767,17 +1786,21 @@ impl Engine {
         // view's size only while playing or dragging).
         self.renderer
             .set_preview_media(spec.preview_stills(scene), spec.preview_video());
-        // A plan that cannot be built reports through the frame itself.
-        self.renderer
-            .prepare_media(
-                &scene.doc,
-                &scene.comp,
-                time,
-                &request,
-                scene.media.as_ref(),
-            )
-            .map(|prepared| prepared.videos)
-            .unwrap_or_default()
+        let prepare = if spec.moment == Moment::Playing && large_scene(scene) {
+            pm_render::Renderer::prepare_media_ahead
+        } else {
+            pm_render::Renderer::prepare_media
+        };
+        prepare(
+            &mut self.renderer,
+            &scene.doc,
+            &scene.comp,
+            time,
+            &request,
+            scene.media.as_ref(),
+        )
+        .map(|prepared| prepared.videos)
+        .unwrap_or_default()
     }
     /// The definitions this engine draws with (the render cache's fingerprint).
     pub(crate) fn definitions(&self) -> &[pm_protocol::definitions::DefinitionSnapshot] {
@@ -6775,5 +6798,82 @@ mod layer_drag_profile {
             engine.frame_sampling(&scene, &spec),
             pm_render::sampling::Sampling::Final
         );
+    }
+}
+
+#[cfg(test)]
+mod playback_prepare_tests {
+    use super::*;
+
+    #[test]
+    fn playback_reserves_a_still_share_and_redistributes_idle_video_capacity() {
+        let (frame, image, decoder, vector, pool, text) = playback_cache_parts(true);
+        assert_eq!(frame + image + decoder + vector + pool + text, 100);
+        assert!(200_000_000 * image / 100 >= 24_908_912);
+        let (f, i, d, v, p, t) = playback_cache_parts(false);
+        assert_eq!(f + i + d + v + p + t, 100);
+        assert!(i > image && v > vector && p > pool && f + d < frame + decoder);
+        assert!(f > 0 && d > 0);
+    }
+
+    #[test]
+    fn playback_can_keep_working_targets_and_stills_together() {
+        let cache = (224 << 20) - 2 * 1920 * 1080 * 8;
+        let (_, image, _, _, pool, _) = playback_cache_parts(false);
+        let allowance = cache * pool / 100;
+        assert!(playback_pool_budget(allowance) >= 60 << 20);
+        assert!(playback_pool_budget(allowance) <= allowance);
+        assert!(cache * image / 100 >= 25_000_000);
+
+        let (_, video_image, _, _, video_pool, _) = playback_cache_parts(true);
+        assert!(cache * video_image / 100 >= 25_000_000);
+        assert!(playback_pool_budget(cache * video_pool / 100) >= 60_000_000);
+    }
+
+    #[test]
+    fn large_playing_scene_prepares_an_upcoming_video() {
+        let mut engine = Engine::new(Gpu::new("large playback preparation").unwrap()).unwrap();
+        let mut layers = vec![serde_json::json!({"type":"shape","on":true,"from":0,"dur":4}); 500];
+        layers.push(serde_json::json!({
+            "type":"video","id":"upcoming","on":true,"from":1,"dur":2,"d":{"asset":"clip"}
+        }));
+        let project = serde_json::json!({
+            "id":"root","w":64,"h":64,"fps":30,"dur":4,"layers":layers,
+            "assets":{"clip":{"type":"video","w":64,"h":64}},
+        });
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::json::parse(&project.to_string()).unwrap()),
+                1,
+            )),
+            comp: "root".into(),
+            media: Arc::new(pm_export::render::MediaPaths {
+                paths: [(
+                    "clip".into(),
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../../../engine/fixtures/h264-aac.mp4"),
+                )]
+                .into(),
+                ..Default::default()
+            }),
+            content: 1,
+        };
+        assert!(large_scene(&scene));
+        let output = Output {
+            width: 64,
+            height: 64,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let spec = FrameSpec {
+            moment: Moment::Playing,
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output)
+        };
+        assert!(engine.prepare(&scene, Ticks::ZERO, spec).is_empty());
+        let prepared = engine.prepare(&scene, Ticks::from_whole_seconds(1), spec);
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].0, "upcoming");
     }
 }

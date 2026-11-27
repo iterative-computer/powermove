@@ -195,7 +195,8 @@ impl TargetPool {
         self.free_budget = bytes.min(Self::FREE_BUDGET);
         self.evict_over(self.retention_budget());
     }
-    /// The total pool ceiling for visible playback, including the base pool.
+    /// The total pool ceiling for visible playback, including the base
+    /// pool. This grant can exceed the ordinary free budget.
     pub fn set_playback_budget(&mut self, bytes: u64) {
         self.playback_budget = bytes;
         self.evict_over(self.retention_budget());
@@ -654,6 +655,29 @@ mod tests {
         pool.set_playback_budget(0);
         assert_eq!(pool.idle(), 1);
         assert_eq!(pool.bytes(), bytes);
+    }
+
+    #[test]
+    fn playback_keeps_a_working_set_larger_than_the_ordinary_free_budget() {
+        let gpu = crate::device::Gpu::new("large playback working set").unwrap();
+        let mut pool = TargetPool::new();
+        let side = 1536;
+        let working_set = 4 * half_bytes(side);
+        pool.set_playback_budget(working_set);
+        assert_eq!(pool.retention_budget(), 72 << 20);
+        for _ in 0..3 {
+            pool.begin_frame();
+            let targets = (0..4)
+                .map(|_| pool.take_working(&gpu.device, side, side, Precision::Float16))
+                .collect::<Vec<_>>();
+            gpu.queue.submit([]);
+            pool.end_submitted_frame(&gpu.queue, targets);
+            assert_eq!(pool.bytes(), working_set);
+            assert_eq!(pool.created(), 4);
+            assert_eq!(pool.eviction_bytes, 0);
+        }
+        pool.set_playback_budget(0);
+        assert!(pool.bytes() <= TargetPool::FREE_BUDGET);
     }
 
     #[test]

@@ -344,6 +344,7 @@ pub(crate) fn order_pass<'d>(
     view: Option<&View3d>,
     root_comp: bool,
     skip_inactive_planes: bool,
+    has_3d: bool,
     mut geometry: Option<&mut crate::reuse::FrameGeometry>,
 ) -> JsResult<(Vec<&'d Node>, Pass3d)> {
     let mut ctx = Pass3d::default();
@@ -355,7 +356,13 @@ pub(crate) fn order_pass<'d>(
             .collect(),
         _ => pass,
     };
+    if !has_3d {
+        return Ok((pass, ctx));
+    }
     let mut order_planes = |scope: &mut Scope<'_, 'd>, block: &[&'d Node]| {
+        if block.len() <= 1 {
+            return Ok(block.to_vec());
+        }
         if let Some(cache) = geometry.as_deref_mut() {
             cache.order(scope, block, time, skip_inactive_planes)
         } else if skip_inactive_planes {
@@ -366,14 +373,6 @@ pub(crate) fn order_pass<'d>(
     };
     let roles: Vec<_> = pass.iter().map(|l| Role3d::of(l)).collect();
     if !roles.iter().any(Option::is_some) {
-        // Timeline order already holds when there is no 2.5D switch.
-        if !scope
-            .layers()
-            .iter()
-            .any(|l| js::flag(l, "threeD") || node::is_nullish(Some(l)))
-        {
-            return Ok((pass, ctx));
-        }
         return Ok((order_planes(scope, &pass)?, ctx));
     }
     // Camera and light layers split runs, but do not need a Studio scene

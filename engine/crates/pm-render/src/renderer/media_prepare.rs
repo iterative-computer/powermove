@@ -180,6 +180,138 @@ pub(super) fn planned_videos(plan: &CompPlan) -> Vec<crate::media::PlannedVideoD
     out
 }
 
+/// Scan only layers whose spans contain the requested time. A deadline also
+/// bounds work when many active precomps instance the same set of layers.
+fn visit_upcoming<'d>(
+    comp: &Comp<'d>,
+    seconds: f64,
+    scale: (f64, f64),
+    depth: u32,
+    deadline: std::time::Instant,
+    visit: &mut impl FnMut(&Comp<'d>, &'d pm_model::Node, &'d str, f64, (f64, f64)),
+) {
+    use pm_eval::node::{member, string, to_number};
+    for (index, layer) in comp.layers().iter().enumerate() {
+        if index % 64 == 0 && std::time::Instant::now() >= deadline {
+            return;
+        }
+        let layer_node = Some(layer);
+        let Some(kind) = string(member(layer_node, "type")).and_then(|s| s.as_str()) else {
+            continue;
+        };
+        if !matches!(kind, "image" | "video" | "precomp") {
+            continue;
+        }
+        let from = to_number(member(layer_node, "from"));
+        let end = from + to_number(member(layer_node, "dur"));
+        if !(from <= seconds && seconds < end)
+            || !upcoming_value(member(layer_node, "on"), seconds).truthy()
+        {
+            continue;
+        }
+        if kind != "precomp" {
+            visit(comp, layer, kind, seconds, scale);
+        } else if depth < plan::PRECOMP_MAX_DEPTH
+            && let Some((id, _)) = capability::precomp_target(comp.root(), layer)
+            && let Ok(child) = Comp::in_root(comp.root(), &id, comp.revision())
+            && let Some(at) = upcoming_source_time(layer, seconds)
+        {
+            let at = crate::retime::keep_frame_rate(layer, &child, at);
+            // Use the original still for nested draws, where the child's
+            // projected density can differ from the outer render scale.
+            visit_upcoming(&child, at, (0., 0.), depth + 1, deadline, visit);
+        }
+    }
+}
+
+/// Resolve stored values and keyframes without evaluating expressions.
+fn upcoming_value(field: Option<&pm_model::Node>, time: f64) -> pm_eval::JsValue {
+    use pm_eval::node::{array, is_property, js_value_opt, member};
+    if !is_property(field) {
+        return js_value_opt(field);
+    }
+    let keys = member(field, "kf");
+    if array(keys).is_some_and(|keys| !keys.is_empty() && keys.len() <= 128)
+        && let Ok(value) = pm_eval::keyframes::evaluate(keys, time, false, &mut Default::default())
+        && !matches!(value, pm_eval::JsValue::Null | pm_eval::JsValue::Undefined)
+    {
+        return value;
+    }
+    js_value_opt(member(field, "v"))
+}
+
+fn upcoming_source_time(layer: &pm_model::Node, time: f64) -> Option<f64> {
+    use pm_eval::node::{array, is_property, member, to_number, truthy};
+    let data = member(Some(layer), "d");
+    let source = member(data, "sourceTime");
+    if upcoming_value(member(data, "timeRemap"), time).truthy() && is_property(source) {
+        return (!truthy(member(source, "expr"))).then(|| {
+            let seconds = upcoming_value(source, time).to_number();
+            if seconds.is_nan() { 0. } else { seconds }
+        });
+    }
+    let speed = member(data, "speed");
+    // Integrating variable speed from the layer start can take longer than
+    // the available slack. The foreground renderer handles these layers.
+    if truthy(member(speed, "expr"))
+        || array(member(speed, "kf")).is_some_and(|keys| !keys.is_empty())
+    {
+        return None;
+    }
+    let number = |key, default| {
+        let value = upcoming_value(member(data, key), time);
+        if matches!(value, pm_eval::JsValue::Null | pm_eval::JsValue::Undefined) {
+            default
+        } else {
+            value.to_number()
+        }
+    };
+    Some((time - to_number(member(Some(layer), "from"))) * number("speed", 1.) + number("trim", 0.))
+}
+
+fn upcoming_edge(
+    layer: &pm_model::Node,
+    record: &pm_model::Node,
+    seconds: f64,
+    scale: (f64, f64),
+) -> Option<u32> {
+    use pm_eval::node::{member, to_number, truthy};
+    let layer = Some(layer);
+    if scale.0 == 0. || truthy(member(layer, "parent")) || truthy(member(layer, "is3D")) {
+        return None;
+    }
+    let data = member(layer, "d");
+    let p = member(layer, "p");
+    let dimension = |size, transform| {
+        let native = to_number(member(Some(record), size));
+        let size = upcoming_value(member(data, size), seconds).to_number();
+        let channel = member(p, transform);
+        if truthy(member(channel, "expr")) {
+            return None;
+        }
+        let zoom = upcoming_value(channel, seconds).to_number();
+        Some(
+            if size.is_finite() && size > 0. {
+                size
+            } else {
+                native
+            } * if zoom.is_finite() {
+                zoom.abs() / 100.
+            } else {
+                1.
+            },
+        )
+    };
+    // Use the larger output scale so rotated layers get enough pixels.
+    let density = scale.0.max(scale.1);
+    let (w, h) = (dimension("w", "scale.x")?, dimension("h", "scale.y")?);
+    crate::exec::source_edge(
+        &[w * density, 0., 0., h * density, 0., 0.],
+        [0., 0., 1., 1.],
+        None,
+    )
+}
+
 impl Renderer {
     /// Queue preparation of the videos selected by one planned view. The
     /// worker retains each completed source and matching idle decoder until
@@ -267,6 +399,81 @@ impl Renderer {
         Ok(result)
     }
 
+    /// Prepare media at one upcoming time on a large playback composition.
+    /// All file decoding remains on the existing preparation workers.
+    pub fn prepare_media_ahead(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+    ) -> Result<MediaPreparation, RenderError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2);
+        let comp = Comp::resolve(document, composition)
+            .map_err(|_| RenderError::Composition(composition.to_owned()))?;
+        let scale = request.scale.unwrap_or_else(|| {
+            plan::derived_scale(&comp, request.output_size.width, request.output_size.height)
+        });
+        let mut result = MediaPreparation::default();
+        let mut stills = std::collections::HashSet::new();
+        visit_upcoming(
+            &comp,
+            comp.seconds_at(time.get()),
+            scale,
+            0,
+            deadline,
+            &mut |comp, layer, kind, seconds, scale| {
+                use pm_eval::node::{is_str, member, string};
+                if std::time::Instant::now() >= deadline {
+                    return;
+                }
+                let data = member(Some(layer), "d");
+                let Some(asset) = string(member(data, "asset")).and_then(|s| s.as_str()) else {
+                    return;
+                };
+                let Some(record) = member(member(Some(comp.root()), "assets"), asset) else {
+                    return;
+                };
+                if kind == "image" && is_str(member(Some(record), "format"), "svg") {
+                    return;
+                }
+                let Some(path) = assets.path(asset, Some(record)) else {
+                    return;
+                };
+                let interpret = crate::footage::interpretation(record);
+                if kind == "image" {
+                    let edge = upcoming_edge(layer, record, seconds, scale);
+                    if !request.export && stills.insert((asset, edge)) {
+                        self.media.prepare_image(&path, edge, interpret.as_ref());
+                    }
+                } else if let Some(at) = upcoming_source_time(layer, seconds) {
+                    let id =
+                        pm_eval::node::to_js_string(member(Some(layer), "id")).to_string_lossy();
+                    let instance = crate::exec::instance_of(&id);
+                    let rate = comp.rate().map_or(pm_time::Rate::FPS_30, |r| r.rate);
+                    result.videos.push((id, instance));
+                    if self
+                        .media
+                        .prepare_video(
+                            &path,
+                            instance,
+                            at.max(0.),
+                            request.export,
+                            request.read_ahead,
+                            interpret.as_ref(),
+                            rate,
+                        )
+                        .unwrap_or(false)
+                    {
+                        result.queued_videos += 1;
+                    }
+                }
+            },
+        );
+        Ok(result)
+    }
+
     /// Wait for queued preparation in headless tests and performance runs.
     /// The interactive presenter must use `prepare_media` alone.
     pub fn finish_media_preparation(&mut self) -> Vec<String> {
@@ -276,5 +483,58 @@ impl Renderer {
             .into_iter()
             .map(|error| format!("{error:?}"))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod upcoming_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn large_scene_finds_active_stills_and_retimed_nested_video() {
+        let mut layers = vec![json!({"type":"shape","on":true,"from":0,"dur":4}); 600];
+        layers.extend([
+            json!({"type":"image","on":false,"from":0,"dur":4,"id":"off"}),
+            json!({"type":"image","on":true,"from":0,"dur":1,"id":"ended"}),
+            json!({"type":"image","on":true,"from":1,"dur":1,"id":"still"}),
+            json!({"type":"precomp","on":true,"from":1,"dur":2,"d":{
+                "comp":"child","timeRemap":true,"sourceTime":{"v":4,"kf":[]}
+            }}),
+        ]);
+        let project = json!({
+            "id":"root","layers":layers,
+            "comps":{"child":{"layers":[
+                {"type":"video","on":true,"from":3,"dur":2,"id":"nested","d":{"speed":2,"trim":0.5}},
+                {"type":"image","on":true,"from":0,"dur":2,"id":"outside"}
+            ]}}
+        });
+        let doc = Document::new(
+            Some(pm_model::json::parse(&project.to_string()).unwrap()),
+            1,
+        );
+        let comp = Comp::resolve(&doc, "root").unwrap();
+        let mut found = Vec::new();
+        let mut scan = |_: &Comp<'_>, layer: &pm_model::Node, kind: &str, time, _| {
+            let id = pm_eval::node::to_js_string(layer.get("id")).to_string_lossy();
+            found.push((id, kind.to_owned(), upcoming_source_time(layer, time)));
+        };
+        let now = std::time::Instant::now();
+        visit_upcoming(&comp, 1., (1., 1.), 0, now, &mut scan);
+        visit_upcoming(
+            &comp,
+            1.,
+            (1., 1.),
+            0,
+            now + std::time::Duration::from_secs(1),
+            &mut scan,
+        );
+        assert_eq!(
+            found,
+            [
+                ("still".into(), "image".into(), Some(0.)),
+                ("nested".into(), "video".into(), Some(2.5))
+            ]
+        );
     }
 }

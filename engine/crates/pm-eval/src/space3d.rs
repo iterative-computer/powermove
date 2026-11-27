@@ -11,6 +11,8 @@
 //! (`perspectiveAmount`), and `depthOrderedLayers` sorts runs of 3D layers
 //! back to front by surface, keeping coplanar artwork in timeline order.
 
+use std::collections::HashMap;
+
 use pm_model::Node;
 
 use crate::js_sem::{JsResult, JsThrow};
@@ -347,14 +349,76 @@ fn camera_data(layer: &Node) -> Option<&Node> {
 /// A pass's coplanar runs, independent of the camera used to sort them.
 #[derive(Default)]
 pub struct PlaneOrder {
-    runs: Vec<(usize, Vec<PlaneSurface>)>,
+    runs: Vec<PlaneRun>,
 }
 
+struct PlaneRun {
+    start: usize,
+    surfaces: Vec<PlaneSurface>,
+    inactive: Vec<usize>,
+}
+
+#[derive(Default)]
 struct PlaneSurface {
     plane: Option<[f64; 4]>,
     members: Vec<usize>,
     depth: f64,
     anchor: [f64; 3],
+}
+
+const PLANE_TOLERANCE: [f64; 4] = [1e-7, 1e-7, 1e-7, 1e-5];
+// Power-of-two cells make scaling exact and each cell over twice as wide
+// as the tolerance. A match can only be in this cell or its nearer neighbor.
+const PLANE_CELL_SCALE: [f64; 4] = [4_194_304., 4_194_304., 4_194_304., 32_768.];
+const INDEX_SURFACES_AT: usize = 16;
+type PlaneCell = [i64; 4];
+type SurfaceIndex = HashMap<PlaneCell, Vec<usize>>;
+
+fn plane_cells(plane: [f64; 4]) -> (PlaneCell, PlaneCell) {
+    let scaled: [f64; 4] = std::array::from_fn(|i| plane[i] * PLANE_CELL_SCALE[i]);
+    let cell = scaled.map(|v| v.floor() as i64);
+    let neighbor = std::array::from_fn(|i| {
+        cell[i].saturating_add(if scaled[i] - scaled[i].floor() < 0.5 {
+            -1
+        } else {
+            1
+        })
+    });
+    (cell, neighbor)
+}
+
+fn matching_surface(
+    surfaces: &[PlaneSurface],
+    index: Option<&SurfaceIndex>,
+    plane: [f64; 4],
+) -> Option<usize> {
+    let matches = |surface: &PlaneSurface| {
+        surface
+            .plane
+            .is_some_and(|q| (0..4).all(|i| (plane[i] - q[i]).abs() < PLANE_TOLERANCE[i]))
+    };
+    let Some(index) = index else {
+        return surfaces.iter().position(matches);
+    };
+    let (cell, neighbor) = plane_cells(plane);
+    // Tolerance is nontransitive. Pick the earliest matching representative,
+    // exactly as the timeline-order linear search does.
+    (0..16)
+        .filter_map(|bits| {
+            let key = std::array::from_fn(|i| {
+                if bits & (1 << i) == 0 {
+                    cell[i]
+                } else {
+                    neighbor[i]
+                }
+            });
+            index
+                .get(&key)?
+                .iter()
+                .copied()
+                .find(|&i| matches(&surfaces[i]))
+        })
+        .min()
 }
 
 impl PlaneOrder {
@@ -366,13 +430,24 @@ impl PlaneOrder {
         time: f64,
     ) -> JsResult<Vec<&'d Node>> {
         let mut result = layers.to_vec();
-        if self.runs.is_empty() {
-            return Ok(result);
-        }
-        let camera = scope.projection_camera_3d(time)?;
+        let camera = if self.runs.iter().any(|run| run.surfaces.len() > 1) {
+            scope.projection_camera_3d(time)?
+        } else {
+            None
+        };
         let forward = camera.map(|camera| camera.forward());
-        for (start, surfaces) in &self.runs {
+        for PlaneRun {
+            start,
+            surfaces,
+            inactive,
+        } in &self.runs
+        {
             if surfaces.len() == 1 {
+                if !inactive.is_empty() {
+                    for (slot, &i) in (*start..).zip(surfaces[0].members.iter().chain(inactive)) {
+                        result[slot] = layers[i];
+                    }
+                }
                 continue;
             }
             let mut depths: Vec<_> = surfaces
@@ -394,7 +469,11 @@ impl PlaneOrder {
                     .partial_cmp(&0.0)
                     .unwrap_or(core::cmp::Ordering::Equal)
             });
-            for (slot, &i) in (*start..).zip(depths.into_iter().flat_map(|(_, s)| &s.members)) {
+            let indices = depths
+                .into_iter()
+                .flat_map(|(_, s)| &s.members)
+                .chain(inactive);
+            for (slot, &i) in (*start..).zip(indices) {
                 result[slot] = layers[i];
             }
         }
@@ -518,18 +597,30 @@ impl<'d> Scope<'_, 'd> {
     /// `world3D(PM, L, T, positioning)`. With `positioning`, the layer's own
     /// transform is only its Z translation (`L.threeD`).
     pub fn world3d(&mut self, layer: &'d Node, time: f64, positioning: bool) -> JsResult<Mat4> {
-        let own = if positioning {
+        if positioning {
             let z = if flag(layer, "threeD") {
                 self.value3d(layer, "position.z", time, 0.0)?
             } else {
                 0.0
             };
-            translation(0.0, 0.0, z)
-        } else {
-            self.local3d(layer, time)?
-        };
+            let parent = self.parent3d(layer, time, None)?;
+            return Ok(multiply(&parent, &translation(0.0, 0.0, z)));
+        }
+        let key = (crate::scope::address(layer), time.to_bits());
+        if let Some(world) = self
+            .local_memo
+            .as_ref()
+            .and_then(|memo| memo.world3d.get(&key))
+        {
+            return Ok(*world);
+        }
+        let own = self.local3d(layer, time)?;
         let parent = self.parent3d(layer, time, None)?;
-        Ok(multiply(&parent, &own))
+        let world = multiply(&parent, &own);
+        if let Some(memo) = self.local_memo.as_mut() {
+            memo.world3d.insert(key, world);
+        }
+        Ok(world)
     }
 
     /// `is3DLayer(PM, layer)`: the layer's 3D switch or any enclosing 3D group.
@@ -540,10 +631,22 @@ impl<'d> Scope<'_, 'd> {
         if !node::truthy(layer.get("group")) {
             return Ok(false);
         }
-        Ok(self
+        let key = crate::scope::address(layer);
+        if let Some(value) = self
+            .local_memo
+            .as_ref()
+            .and_then(|memo| memo.is_3d.get(&key))
+        {
+            return Ok(*value);
+        }
+        let value = self
             .group_ancestors(layer)?
             .iter()
-            .any(|g| flag(g, "threeD")))
+            .any(|g| flag(g, "threeD"));
+        if let Some(memo) = self.local_memo.as_mut() {
+            memo.is_3d.insert(key, value);
+        }
+        Ok(value)
     }
 
     /// `perspectiveAmount(PM, layer, time)`: the outermost 3D group's lens
@@ -820,8 +923,8 @@ impl<'d> Scope<'_, 'd> {
         self.depth_ordered_layers_inner(layers, time, false)
     }
 
-    /// Renderer-only ordering. Retain the slots of inactive runs and tails
-    /// that cannot affect the depth order of a visible surface.
+    /// Renderer-only ordering using the drawable planes' surfaces. Keep
+    /// inactive runs, inactive tails, and 2D barriers in their original slots.
     pub fn depth_ordered_draw_layers(
         &mut self,
         layers: &[&'d Node],
@@ -848,21 +951,27 @@ impl<'d> Scope<'_, 'd> {
         time: f64,
         skip_inactive: bool,
     ) -> JsResult<PlaneOrder> {
-        let possible =
-            |layer: &Node| !skip_inactive || !crate::evaluator::outside_layer_span(layer, time);
         let mut order = PlaneOrder::default();
-        if skip_inactive {
-            let mut active_plane = false;
-            for &layer in layers {
-                if possible(layer) && self.is_3d_layer(layer)? {
-                    active_plane = true;
+        if layers.len() <= 1 {
+            return Ok(order);
+        }
+        let layers = if skip_inactive {
+            // No ordering is needed past the last drawable plane. Entire
+            // inactive passes can skip the group ancestry lookups as well.
+            let mut last = None;
+            for (i, &layer) in layers.iter().enumerate().rev() {
+                if !crate::evaluator::outside_layer_span(layer, time) && self.is_3d_layer(layer)? {
+                    last = Some(i);
                     break;
                 }
             }
-            if !active_plane {
+            let Some(last) = last else {
                 return Ok(order);
-            }
-        }
+            };
+            &layers[..=last]
+        } else {
+            layers
+        };
         let mut flags = Vec::with_capacity(layers.len());
         for layer in layers {
             flags.push(self.is_3d_layer(layer)?);
@@ -875,21 +984,39 @@ impl<'d> Scope<'_, 'd> {
                 start += 1;
                 continue;
             }
-            let mut end = start + 1;
-            while end < layers.len() && flags[end] {
-                end += 1;
+            let end = start + flags[start..].iter().take_while(|&&flag| flag).count();
+            let mut run = PlaneRun {
+                start,
+                surfaces: Vec::new(),
+                inactive: Vec::new(),
+            };
+            let mut active = Vec::new();
+            for i in start..end {
+                if skip_inactive && crate::evaluator::outside_layer_span(layers[i], time) {
+                    run.inactive.push(i);
+                } else {
+                    active.push(i);
+                }
             }
-            // Keep earlier inactive planes: one can still be the first
-            // member of a surface shared by a visible layer, and its anchor
-            // is the depth used to order that surface. An inactive suffix
-            // cannot contribute an anchor or change drawable order.
-            let Some(last) = layers[start..end].iter().rposition(|layer| possible(layer)) else {
-                start = end;
+            start = end;
+            let Some(&last) = active.last() else {
                 continue;
             };
-            let used = start..start + last + 1;
-            let mut surfaces: Vec<PlaneSurface> = Vec::new();
-            for i in used.clone() {
+            // Keep trailing inactive slots and 2D barriers in place. Earlier
+            // inactive planes follow the sorted drawable planes in this run.
+            run.inactive.retain(|&i| i < last);
+            if active.len() == 1 {
+                if !run.inactive.is_empty() {
+                    run.surfaces.push(PlaneSurface {
+                        members: active,
+                        ..Default::default()
+                    });
+                    order.runs.push(run);
+                }
+                continue;
+            }
+            let mut index: Option<SurfaceIndex> = None;
+            for i in active {
                 let layer = layers[i];
                 let m = self.world3d(layer, time, false)?;
                 let normal = [
@@ -911,14 +1038,18 @@ impl<'d> Scope<'_, 'd> {
                     plane = Some([n[0], n[1], n[2], n[0] * m[12] + n[1] * m[13] + n[2] * m[14]]);
                 }
                 if let Some(p) = plane
-                    && let Some(existing) = surfaces.iter_mut().find(|s| {
-                        s.plane.is_some_and(|q| {
-                            (0..3).all(|i| (p[i] - q[i]).abs() < 1e-7) && (p[3] - q[3]).abs() < 1e-5
-                        })
-                    })
+                    && let Some(existing) = matching_surface(&run.surfaces, index.as_ref(), p)
                 {
-                    existing.members.push(i);
+                    run.surfaces[existing].members.push(i);
                     continue;
+                }
+                if let Some(index) = &mut index
+                    && let Some(p) = plane
+                {
+                    index
+                        .entry(plane_cells(p).0)
+                        .or_default()
+                        .push(run.surfaces.len());
                 }
                 let ax = self.value3d(layer, "anchor.x", time, 0.0)?;
                 let ay = self.value3d(layer, "anchor.y", time, 0.0)?;
@@ -929,15 +1060,23 @@ impl<'d> Scope<'_, 'd> {
                 };
                 let depth = m[2] * ax + m[6] * ay + m[10] * az + m[14];
                 let anchor = transform_aim(&m, &[ax, ay, az]);
-                surfaces.push(PlaneSurface {
+                run.surfaces.push(PlaneSurface {
                     plane,
                     members: vec![i],
                     depth,
                     anchor: transform_aim(&to_scene, &anchor),
                 });
+                if run.surfaces.len() == INDEX_SURFACES_AT && index.is_none() {
+                    let mut cells = SurfaceIndex::new();
+                    for (i, surface) in run.surfaces.iter().enumerate() {
+                        if let Some(p) = surface.plane {
+                            cells.entry(plane_cells(p).0).or_default().push(i);
+                        }
+                    }
+                    index = Some(cells);
+                }
             }
-            order.runs.push((start, surfaces));
-            start = end;
+            order.runs.push(run);
         }
         Ok(order)
     }
@@ -1231,7 +1370,102 @@ mod tests {
         assert!(same(normal[0], b));
         assert!(same(scope.depth_ordered_draw_layers(&pass, 2.).unwrap()[0], b));
         // At four seconds neither plane can draw. Keep their stored order.
-        assert!(same(scope.depth_ordered_draw_layers(&pass, 4.).unwrap()[0], a));
+        assert!(same(
+            scope.depth_ordered_draw_layers(&pass, 4.).unwrap()[0],
+            a
+        ));
+    }
+
+    #[test]
+    fn draw_order_skips_expired_transforms_and_keeps_2d_barriers() {
+        let mut layers: Vec<_> = (0..3000)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("expired{i}"), "threeD": true, "from": 0, "dur": 1
+                })
+            })
+            .collect();
+        layers.extend([
+            serde_json::json!({"id":"front","threeD":true,"p":{"position.z":{"v":40}}}),
+            serde_json::json!({"id":"back","threeD":true,"p":{"position.z":{"v":10}}}),
+            serde_json::json!({"id":"barrier","from":0,"dur":1}),
+            serde_json::json!({"id":"other_run","threeD":true,"p":{"position.z":{"v":-40}}}),
+        ]);
+        let root = root(serde_json::json!(layers));
+        let comp = Comp::at_node(&root, &root, "c", 1);
+        let mut ev = Evaluator::new();
+        let mut scope = Scope::open(&mut ev, &comp);
+        scope.memoize_transforms();
+        let layers: Vec<_> = comp.layers().iter().collect();
+        let ordered = scope.depth_ordered_draw_layers(&layers, 2.).unwrap();
+        assert!(same(ordered[0], layers[3001]));
+        assert!(same(ordered[1], layers[3000]));
+        assert!(same(ordered[2], layers[0]));
+        assert!(same(ordered[3002], layers[3002]));
+        assert!(same(ordered[3003], layers[3003]));
+        let memo = scope.local_memo.as_ref().unwrap();
+        assert_eq!(memo.local3d.len(), 2);
+        assert_eq!(memo.world3d.len(), 2);
+    }
+
+    #[test]
+    fn surface_index_matches_a_linear_scan_across_cells_and_ties() {
+        let planes = [[0., 0., 1., -1e-6], [0., 0., 1., 12e-6]]
+            .into_iter()
+            .chain((1..320).map(|i| [-2e-8, 0., 1., f64::from(i) * 0.001]));
+        let mut index = SurfaceIndex::new();
+        let mut surfaces = Vec::new();
+        for plane in planes {
+            index
+                .entry(plane_cells(plane).0)
+                .or_default()
+                .push(surfaces.len());
+            surfaces.push(PlaneSurface {
+                plane: Some(plane),
+                ..Default::default()
+            });
+        }
+        let tie = [0., 0., 1., 5e-6];
+        assert_eq!(matching_surface(&surfaces, Some(&index), tie), Some(0));
+        for surface in &surfaces {
+            let plane = surface.plane.unwrap();
+            for adjustment in [-1.01, -0.99, 0., 0.99, 1.01] {
+                let query = std::array::from_fn(|i| plane[i] + adjustment * PLANE_TOLERANCE[i]);
+                assert_eq!(
+                    matching_surface(&surfaces, Some(&index), query),
+                    matching_surface(&surfaces, None, query),
+                    "plane {query:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transform_memo_keys_world_and_local_by_time_and_keeps_positioning_separate() {
+        let root = root(serde_json::json!([
+            {"id":"g","type":"group","threeD":true,"p":{"position.z":{"v":10}}},
+            {"id":"child","group":"g","p":{"position.x":{"v":42}}}
+        ]));
+        let comp = Comp::at_node(&root, &root, "c", 1);
+        let mut ev = Evaluator::new();
+        let mut scope = Scope::open(&mut ev, &comp);
+        scope.memoize_transforms();
+        let layer = &comp.layers()[1];
+        assert!(scope.is_3d_layer(layer).unwrap());
+        assert!(scope.is_3d_layer(layer).unwrap());
+        let world = scope.world3d(layer, 0., false).unwrap();
+        assert_eq!(scope.world3d(layer, 0., false).unwrap(), world);
+        assert_eq!(scope.world3d(layer, 1., false).unwrap(), world);
+        assert_ne!(scope.world3d(layer, 0., true).unwrap(), world);
+        let memo = scope.local_memo.as_ref().unwrap();
+        let key = crate::scope::address(layer);
+        assert_eq!(memo.is_3d.get(&key), Some(&true));
+        for time in [0_f64, 1.] {
+            let key = (key, time.to_bits());
+            assert!(memo.local3d.contains_key(&key));
+            assert_eq!(memo.world3d.get(&key), Some(&world));
+        }
+        assert_eq!(memo.world3d.len(), 2);
     }
 
     #[test]

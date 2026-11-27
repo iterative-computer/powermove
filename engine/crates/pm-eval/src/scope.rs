@@ -51,10 +51,13 @@ pub(crate) struct LocalMemo<'d> {
     index: Option<Arc<LayerIndex>>,
     local: std::collections::HashMap<(usize, u64), crate::transform::Mat2d, BuildAddressHasher>,
     ancestors: std::collections::HashMap<usize, Vec<&'d Node>, BuildAddressHasher>,
-    /// `local3D` and `parent3D` (its own parent lookup), by node and time:
+    pub(crate) is_3d: std::collections::HashMap<usize, bool, BuildAddressHasher>,
+    /// `local3D`, `world3D` and `parent3D` (its own parent lookup), by node and time:
     /// depth ordering and each plane matrix walk the same group and parent
     /// chains.
     pub(crate) local3d:
+        std::collections::HashMap<(usize, u64), crate::space3d::Mat4, BuildAddressHasher>,
+    pub(crate) world3d:
         std::collections::HashMap<(usize, u64), crate::space3d::Mat4, BuildAddressHasher>,
     pub(crate) parent3d:
         std::collections::HashMap<(usize, u64), crate::space3d::Mat4, BuildAddressHasher>,

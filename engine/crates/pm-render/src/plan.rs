@@ -1035,6 +1035,7 @@ pub(crate) fn comp_pass<'d>(
         b.options3d.view.as_ref(),
         b.precomp_depth == 0,
         b.material.is_none(),
+        facts.has_3d,
         b.reuse
             .as_deref_mut()
             .filter(|r| r.geometry_active)
@@ -1057,8 +1058,12 @@ pub(crate) fn comp_pass<'d>(
     // side regardless of their document stack order. The timeline cut and
     // stored layer order remain unchanged.
     let mut pass = pass;
+    let regular_pass = b.material.is_none();
+    let outside_span =
+        |layer: &Node| regular_pass && pm_eval::evaluator::outside_layer_span(layer, time);
     let pairs: Vec<_> = pass
         .iter()
+        .filter(|&&layer| !outside_span(layer))
         .filter_map(|&layer| {
             let overlap =
                 pm_eval::cut_transition::overlap(scope.comp.root(), layer, scope.layers(), time)?;
@@ -1102,7 +1107,7 @@ pub(crate) fn comp_pass<'d>(
     for &layer in pass.iter().rev() {
         // Outside its span a regular layer cannot draw. Avoid collecting
         // its render dependencies just to let draw_layer reject it.
-        if b.material.is_none() && pm_eval::evaluator::outside_layer_span(layer, time) {
+        if outside_span(layer) {
             continue;
         }
         let id = node::get(layer, b"id").to_js();

@@ -384,10 +384,16 @@ impl Orient {
         input: &Target,
         geometry: Geometry,
         format: wgpu::TextureFormat,
+        mipmaps: bool,
     ) -> Target {
         let coded = (input.width(), input.height());
         let (w, h) = geometry.output_size(coded);
-        let out = Target::new(
+        let make = if mipmaps {
+            Target::with_mips
+        } else {
+            Target::new
+        };
+        let out = make(
             device,
             "pm oriented source",
             w,

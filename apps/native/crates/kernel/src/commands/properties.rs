@@ -533,6 +533,11 @@ fn set_property_inner(
             super::timing::speed_ripple(cx, &layer, old_duration)?;
         }
     }
+    if channel == "c.size" && cx.origin().is_human() && values::text(&layer, "type") == Some("text")
+    {
+        let size = channels::get(&layer, &path).expect("resolved").clone();
+        resize_text_anchor(&mut layer, Some(&prop), &size, local, fps);
+    }
     if c.mark_intent {
         mark_intent(&mut layer, &channel, local);
     }
@@ -553,6 +558,107 @@ fn set_property_inner(
         Ok(())
     } else {
         cx.put_layer(&loc, layer)
+    }
+}
+
+/// Resize the text's local anchor along with the glyphs. The layer's
+/// position already places that anchor in the parent coordinate space.
+pub(super) fn resize_text_anchor(
+    layer: &mut Value,
+    previous: Option<&Value>,
+    size: &Value,
+    local: f64,
+    fps: f64,
+) {
+    let has_expression = |prop: &Value| prop.get("expr").is_some_and(Value::is_truthy);
+    if previous.is_some_and(has_expression) || has_expression(size) {
+        return;
+    }
+    let size_keys = track::keys_of(size);
+    let snapped = values::snap(local, fps).max(0.);
+    let at = if size_keys.is_empty() { local } else { snapped };
+    let font_size = |value: &Value| {
+        let value = if values::is_property(value) {
+            keyframes::value_at(value, at, "c.size")
+        } else {
+            value.clone()
+        };
+        // The same default and minimum used by text geometry.
+        let size = track::js_number(&value);
+        if size.is_nan() || size == 0. {
+            16.
+        } else {
+            size.max(1.)
+        }
+    };
+    let factor = font_size(size) / previous.map(font_size).unwrap_or(16.);
+    if !factor.is_finite() || factor <= 0. || factor == 1. {
+        return;
+    }
+    // A static pivot belongs to every size key. With distinct key times,
+    // leave it alone rather than moving the artwork at the other keys.
+    let multiple_size_times = size_keys
+        .windows(2)
+        .any(|keys| values::num(&keys[0], "t") != values::num(&keys[1], "t"));
+    let d = layer.get("d");
+    let paragraph = d
+        .and_then(|d| d.get("paragraph"))
+        .is_some_and(Value::is_truthy);
+    for (axis, start, end) in [("anchor.x", "x0", "x1"), ("anchor.y", "y0", "y1")] {
+        if paragraph && axis == "anchor.x" {
+            continue;
+        }
+        let Some(path) = channels::find(layer, axis) else {
+            continue;
+        };
+        let prop = channels::get(layer, &path).expect("resolved");
+        let animated = !track::keys_of(prop).is_empty();
+        if has_expression(prop) || (multiple_size_times && !animated) {
+            continue;
+        }
+        let anchor_at = if animated { snapped } else { at };
+        let Some(anchor) = keyframes::value_at(prop, anchor_at, axis).as_f64() else {
+            continue;
+        };
+        let next_anchor = anchor * factor;
+        if !next_anchor.is_finite() {
+            continue;
+        }
+
+        // Legacy font bounds already pin the rendered type by the anchor's
+        // fraction of those bounds. For a static pivot, scale the reference
+        // too so the fraction stays identical. An animated pivot shares its
+        // reference across all keys, so let rendering handle that axis.
+        let reference = layer.get("d").and_then(|d| d.get("fontAnchorBounds"));
+        let bounds = reference.and_then(|bounds| {
+            let lo = values::num(bounds, start)?;
+            let hi = values::num(bounds, end)?;
+            (lo.is_finite() && hi.is_finite() && hi > lo).then_some([lo, hi])
+        });
+        if let Some([lo, hi]) = bounds {
+            let (lo, hi) = (lo * factor, hi * factor);
+            if animated || !lo.is_finite() || !hi.is_finite() || hi <= lo {
+                continue;
+            }
+            let bounds_path = [channels::key("d"), channels::key("fontAnchorBounds")];
+            let bounds = channels::get_mut(layer, &bounds_path).expect("resolved");
+            values::obj(bounds).insert(start, Value::Number(lo));
+            values::obj(bounds).insert(end, Value::Number(hi));
+        }
+        if next_anchor == anchor {
+            continue;
+        }
+        let prop = channels::get_mut(layer, &path).expect("resolved");
+        let value = Value::Number(next_anchor);
+        if animated {
+            let (id, created) =
+                track::set_key_on(prop, snapped, value, "linear", fps, true, || new_id("k"));
+            if created {
+                track::apply_presets(track::keys_mut(prop), &[(id, "linear".into(), None)]);
+            }
+        } else {
+            values::obj(prop).insert("v", value);
+        }
     }
 }
 

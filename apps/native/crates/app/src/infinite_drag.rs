@@ -6,14 +6,44 @@
 //! mouse motion, and unhides the cursor. Under `#[cfg(test)]` or non-macOS
 //! targets, this is a safe no-op so synthetic tests never touch the OS cursor.
 
+use std::cell::Cell;
+
+/// Identifies a specific AppKit `NSEvent` instance so synthetic GPUI mouse-move
+/// repaints while `NSApp.currentEvent` still points to the last hardware drag
+/// event never re-consume its `deltaX`/`deltaY` in a runaway loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EventStamp {
+    timestamp_bits: u64,
+    event_number: isize,
+    ptr: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct InfiniteDrag {
     anchor: Option<(f64, f64)>,
+    last_event: Cell<Option<EventStamp>>,
+}
+
+fn dedup_delta<T: Copy>(
+    last: &Cell<Option<EventStamp>>,
+    sample: Option<(EventStamp, T)>,
+    zero: T,
+) -> T {
+    let Some((stamp, delta)) = sample else {
+        return zero;
+    };
+    if last.get() == Some(stamp) {
+        return zero;
+    }
+    last.set(Some(stamp));
+    delta
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos {
-    use objc2_app_kit::{NSApplication, NSCursor, NSEventType};
+    use super::EventStamp;
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSApplication, NSCursor, NSEvent, NSEventType};
     use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
     use std::ffi::c_void;
 
@@ -53,14 +83,22 @@ mod macos {
         fn CFRelease(cf: *const c_void);
     }
 
-    fn current_drag_event() -> Option<objc2::rc::Retained<objc2_app_kit::NSEvent>> {
+    fn event_stamp(event: &NSEvent) -> EventStamp {
+        EventStamp {
+            timestamp_bits: event.timestamp().to_bits(),
+            event_number: event.eventNumber(),
+            ptr: event as *const NSEvent as usize,
+        }
+    }
+
+    fn current_drag_event() -> Option<Retained<NSEvent>> {
         let mtm = MainThreadMarker::new()?;
         let app = NSApplication::sharedApplication(mtm);
         let event = app.currentEvent()?;
         (event.r#type() == NSEventType::LeftMouseDragged).then_some(event)
     }
 
-    fn current_pointer_event() -> Option<objc2::rc::Retained<objc2_app_kit::NSEvent>> {
+    fn current_pointer_event() -> Option<Retained<NSEvent>> {
         let mtm = MainThreadMarker::new()?;
         let app = NSApplication::sharedApplication(mtm);
         let event = app.currentEvent()?;
@@ -74,9 +112,10 @@ mod macos {
         .then_some(event)
     }
 
-    pub fn engage() -> Option<(f64, f64)> {
+    pub fn engage() -> Option<((f64, f64), EventStamp)> {
         // Only lock the hardware cursor during a genuine interactive drag.
-        current_drag_event()?;
+        let trigger = current_drag_event()?;
+        let stamp = event_stamp(&trigger);
         unsafe {
             let ev = CGEventCreate(std::ptr::null());
             if ev.is_null() {
@@ -91,16 +130,19 @@ mod macos {
                 return None;
             }
             NSCursor::hide();
-            Some((loc.x, loc.y))
+            Some(((loc.x, loc.y), stamp))
         }
     }
 
-    pub fn engage_pointer_lock(window_point: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    pub fn engage_pointer_lock(
+        window_point: Option<(f64, f64)>,
+    ) -> Option<((f64, f64), Option<EventStamp>)> {
         let mtm = MainThreadMarker::new()?;
         let app = NSApplication::sharedApplication(mtm);
         if !app.isActive() {
             return None;
         }
+        let stamp = current_pointer_event().as_deref().map(event_stamp);
         let target = app.keyWindow().and_then(|window| {
             let content_rect = window
                 .contentView()
@@ -143,19 +185,20 @@ mod macos {
                 NSCursor::unhide();
                 return None;
             }
-            Some((loc.x, loc.y))
+            Some(((loc.x, loc.y), stamp))
         }
     }
 
-    pub fn delta_x() -> Option<f64> {
-        let dx = current_drag_event()?.deltaX();
-        dx.is_finite().then_some(dx)
+    pub fn delta_x() -> Option<(EventStamp, f64)> {
+        let ev = current_drag_event()?;
+        let dx = ev.deltaX();
+        dx.is_finite().then_some((event_stamp(&ev), dx))
     }
 
-    pub fn delta_xy() -> Option<(f64, f64)> {
+    pub fn delta_xy() -> Option<(EventStamp, (f64, f64))> {
         let ev = current_pointer_event()?;
         let (dx, dy) = (ev.deltaX(), ev.deltaY());
-        (dx.is_finite() && dy.is_finite()).then_some((dx, dy))
+        (dx.is_finite() && dy.is_finite()).then_some((event_stamp(&ev), (dx, dy)))
     }
 
     pub fn release(anchor: (f64, f64)) {
@@ -172,7 +215,10 @@ mod macos {
 
 impl InfiniteDrag {
     pub fn new() -> Self {
-        Self { anchor: None }
+        Self {
+            anchor: None,
+            last_event: Cell::new(None),
+        }
     }
 
     pub fn engage(&mut self) {
@@ -181,7 +227,12 @@ impl InfiniteDrag {
         }
         #[cfg(all(target_os = "macos", not(test)))]
         {
-            self.anchor = macos::engage();
+            if let Some((anchor, stamp)) = macos::engage() {
+                self.anchor = Some(anchor);
+                // The drag event that crossed the threshold was already sampled
+                // in screen coordinates before engaging; never double-apply it.
+                self.last_event.set(Some(stamp));
+            }
         }
     }
 
@@ -189,7 +240,7 @@ impl InfiniteDrag {
         self.anchor?;
         #[cfg(all(target_os = "macos", not(test)))]
         {
-            macos::delta_x()
+            Some(dedup_delta(&self.last_event, macos::delta_x(), 0.0))
         }
         #[cfg(not(all(target_os = "macos", not(test))))]
         {
@@ -198,6 +249,7 @@ impl InfiniteDrag {
     }
 
     pub fn release(&mut self) {
+        self.last_event.set(None);
         if let Some(anchor) = self.anchor.take() {
             #[cfg(all(target_os = "macos", not(test)))]
             macos::release(anchor);
@@ -223,11 +275,15 @@ impl Drop for InfiniteDrag {
 #[derive(Debug, Default)]
 pub struct PointerLock {
     anchor: Option<(f64, f64)>,
+    last_event: Cell<Option<EventStamp>>,
 }
 
 impl PointerLock {
     pub fn new() -> Self {
-        Self { anchor: None }
+        Self {
+            anchor: None,
+            last_event: Cell::new(None),
+        }
     }
 
     pub fn engage(&mut self, window_point: Option<(f64, f64)>) {
@@ -236,7 +292,10 @@ impl PointerLock {
         }
         #[cfg(all(target_os = "macos", not(test)))]
         {
-            self.anchor = macos::engage_pointer_lock(window_point);
+            if let Some((anchor, stamp)) = macos::engage_pointer_lock(window_point) {
+                self.anchor = Some(anchor);
+                self.last_event.set(stamp);
+            }
         }
         #[cfg(not(all(target_os = "macos", not(test))))]
         let _ = window_point;
@@ -250,7 +309,7 @@ impl PointerLock {
         self.anchor?;
         #[cfg(all(target_os = "macos", not(test)))]
         {
-            macos::delta_xy()
+            Some(dedup_delta(&self.last_event, macos::delta_xy(), (0.0, 0.0)))
         }
         #[cfg(not(all(target_os = "macos", not(test))))]
         {
@@ -259,6 +318,7 @@ impl PointerLock {
     }
 
     pub fn release(&mut self) {
+        self.last_event.set(None);
         if let Some(anchor) = self.anchor.take() {
             #[cfg(all(target_os = "macos", not(test)))]
             macos::release(anchor);
@@ -271,5 +331,44 @@ impl PointerLock {
 impl Drop for PointerLock {
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stamp(ts: f64, num: isize, ptr: usize) -> EventStamp {
+        EventStamp {
+            timestamp_bits: ts.to_bits(),
+            event_number: num,
+            ptr,
+        }
+    }
+
+    #[test]
+    fn dedup_delta_ignores_repeated_current_event_when_mouse_stops() {
+        let last = Cell::new(Some(stamp(1.0, 10, 0x1000)));
+        // Triggering event already consumed when engaging.
+        assert_eq!(dedup_delta(&last, Some((stamp(1.0, 10, 0x1000), 4.0)), 0.0), 0.0);
+        // New hardware drag event applies once.
+        assert_eq!(dedup_delta(&last, Some((stamp(1.016, 11, 0x2000), 3.0)), 0.0), 3.0);
+        // Subsequent synthetic GPUI MouseMoveEvents see the same stale NSEvent -> 0.0.
+        assert_eq!(dedup_delta(&last, Some((stamp(1.016, 11, 0x2000), 3.0)), 0.0), 0.0);
+        assert_eq!(dedup_delta(&last, Some((stamp(1.016, 11, 0x2000), 3.0)), 0.0), 0.0);
+        // Non-drag currentEvent while still locked -> 0.0 (stays locked, no screen jump).
+        assert_eq!(dedup_delta(&last, None, 0.0), 0.0);
+        // Next genuine motion applies cleanly.
+        assert_eq!(dedup_delta(&last, Some((stamp(1.032, 12, 0x2000), -2.5)), 0.0), -2.5);
+    }
+
+    #[test]
+    fn dedup_delta_tracks_xy_pairs_for_pointer_lock() {
+        let last = Cell::new(None);
+        let s1 = stamp(2.0, 20, 0x3000);
+        assert_eq!(dedup_delta(&last, Some((s1, (5.0, -3.0))), (0.0, 0.0)), (5.0, -3.0));
+        assert_eq!(dedup_delta(&last, Some((s1, (5.0, -3.0))), (0.0, 0.0)), (0.0, 0.0));
+        let s2 = stamp(2.016, 21, 0x3000);
+        assert_eq!(dedup_delta(&last, Some((s2, (0.0, 1.5))), (0.0, 0.0)), (0.0, 1.5));
     }
 }

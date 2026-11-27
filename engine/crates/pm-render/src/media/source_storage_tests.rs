@@ -1261,3 +1261,115 @@ fn legacy_video_uploads_clip_and_round_to_rgba8_before_float_effects() {
         }
     }
 }
+
+#[test]
+fn full_and_larger_mipmapped_stills_cover_smaller_reads() {
+    let gpu = pm_gpu::Gpu::new("canonical still cache").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let mut media = MediaCache::new(&gpu.device);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tagged = path.join("tests/fixtures/stills2/png-chrm-srgb-gama-8.png");
+    let plain = path.join("../../fixtures/still-red.png");
+    let read = |media: &mut MediaCache, path: &Path, edge| {
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let target = media
+            .image_scaled(
+                &gpu.device,
+                &gpu.queue,
+                &pipelines,
+                &mut encoder,
+                path,
+                WorkingEncoding::Standard,
+                Precision::Float16,
+                None,
+                edge,
+            )
+            .unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        target
+    };
+
+    let full = read(&mut media, &tagged, Some(16));
+    for edge in [Some(1024), Some(2048), None] {
+        assert_eq!(read(&mut media, &tagged, edge).texture, full.texture);
+    }
+    assert_eq!(media.images.len(), 1);
+    assert_eq!(media.images.keys().next().unwrap().edge, None);
+
+    let preview = read(&mut media, &plain, Some(128));
+    media.begin_frame(false);
+    assert!(preview.texture.mip_level_count() > 1);
+    assert_eq!(read(&mut media, &plain, Some(64)).texture, preview.texture);
+    let key = media.images.keys().find(|key| key.path == plain).unwrap();
+    assert_eq!(media.image_seen.get(key), Some(&media.frame_epoch));
+    assert_eq!(media.images.len(), 2);
+
+    let native = read(&mut media, &plain, Some(2048));
+    assert_eq!(read(&mut media, &plain, None).texture, native.texture);
+    assert_eq!(read(&mut media, &plain, Some(32)).texture, native.texture);
+    assert_eq!(media.images.len(), 3);
+}
+
+#[test]
+fn idle_video_capacity_admits_still_prefetch_and_keeps_its_texture() {
+    let gpu = pm_gpu::Gpu::new("video to still loan").unwrap();
+    let pipelines = Pipelines::new(&gpu.device);
+    let mut media = MediaCache::new(&gpu.device);
+    let still = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/still-red.png");
+    let decoded = pm_media::image::imageio::decoded_bytes_estimate(&still).unwrap();
+    let lease = MediaLease {
+        frame_cache: decoded / 2,
+        decoders: decoded * 16,
+    };
+    media.trim_images(1);
+    media.apply_lease(lease);
+    media.begin_frame(true);
+    media.prepare_image(&still, None, None);
+    media.wait_for_stills();
+    assert!(media.stills.held() > lease.frame_cache);
+    let service_cap = media.applied_video_lease.unwrap();
+    assert!(
+        service_cap.frame_cache + service_cap.decoders + media.stills.limit()
+            <= lease.frame_cache + lease.decoders
+    );
+
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    let before = pm_perf::snapshot();
+    let texture = media
+        .image_scaled(
+            &gpu.device,
+            &gpu.queue,
+            &pipelines,
+            &mut encoder,
+            &still,
+            WorkingEncoding::Standard,
+            Precision::Float16,
+            None,
+            None,
+        )
+        .unwrap();
+    gpu.queue.submit([encoder.finish()]);
+    assert_eq!(
+        pm_perf::snapshot()
+            .since(&before)
+            .get(pm_perf::Counter::StillDecodes),
+        0
+    );
+    media.flush();
+    media.begin_frame(true);
+    media.flush();
+    assert_eq!(media.image_bytes(), texture.bytes());
+    let service_cap = media.applied_video_lease.unwrap();
+    assert!(
+        service_cap.frame_cache
+            + service_cap.decoders
+            + media.stills.limit()
+            + (texture.bytes() as usize - 1)
+            <= lease.frame_cache + lease.decoders
+    );
+    media.apply_lease(MediaLease {
+        frame_cache: 0,
+        decoders: 0,
+    });
+    assert_eq!(media.image_bytes(), 0);
+}

@@ -119,6 +119,125 @@ fn a_static_channel_takes_the_value_and_undo_restores_it() {
     assert_eq!(num(&layer(&s, "s1"), &["p", "opacity", "v"]), 100.0);
 }
 
+fn text_store(paragraph: bool, x: f64, y: f64) -> DocumentStore {
+    DocumentStore::new_untitled(
+        parse(&format!(
+            r#"{{
+      "id":"P","compId":"C","w":200,"h":100,"fps":30,"dur":4,
+      "layers":[{{"id":"t","type":"text","from":0,"dur":4,
+        "d":{{"text":"Title","size":80,"paragraph":{paragraph},"boxWidth":200}},
+        "p":{{"position.x":{{"v":100,"kf":[]}},"position.y":{{"v":50,"kf":[]}},
+              "anchor.x":{{"v":{x},"kf":[]}},"anchor.y":{{"v":{y},"kf":[]}}}}
+      }}]
+    }}"#
+        ))
+        .unwrap(),
+    )
+}
+
+#[test]
+fn text_size_resizes_about_the_anchor() {
+    for (paragraph, x, y, expected_x) in [
+        (false, 0., 40., 0.),
+        (false, 30., 60., 60.),
+        (true, 30., 60., 30.),
+    ] {
+        let mut s = text_store(paragraph, x, y);
+        run(&mut s, set("t", "c.size", 160., 0.));
+        let resized = layer(&s, "t");
+        assert_eq!(num(&resized, &["p", "anchor.x", "v"]), expected_x);
+        assert_eq!(num(&resized, &["p", "anchor.y", "v"]), y * 2.);
+        assert_eq!(num(&resized, &["p", "position.x", "v"]), 100.);
+        assert_eq!(num(&resized, &["p", "position.y", "v"]), 50.);
+    }
+}
+
+#[test]
+fn text_size_keys_only_change_the_anchor_at_the_edited_time() {
+    let mut s = text_store(false, 0., 40.);
+    let key = |channel, value, time| {
+        PropertyCommand::Set(SetProperty {
+            mode: KeyMode::Keyframe,
+            ..SetProperty::new("t", channel, value, time)
+        })
+        .into()
+    };
+
+    // One size key is still a constant size across the layer.
+    run(&mut s, key("c.size", 160., 0.));
+    assert_eq!(num(&layer(&s, "t"), &["p", "anchor.y", "v"]), 80.);
+    // Adding and editing another size key must leave the static anchor alone.
+    run(&mut s, key("c.size", 80., 1.));
+    run(&mut s, set("t", "c.size", 120., 1.));
+    assert_eq!(num(&layer(&s, "t"), &["p", "anchor.y", "v"]), 80.);
+
+    run(&mut s, key("anchor.y", 80., 0.));
+    run(&mut s, key("anchor.y", 60., 1.));
+    let before = keys(&s, "t", "anchor.y");
+    run(&mut s, set("t", "c.size", 240., 1.));
+    let after = keys(&s, "t", "anchor.y");
+    assert_eq!(after[0], before[0]);
+    assert_eq!(num(&after[1], &["v"]), 120.);
+}
+
+#[test]
+fn static_text_size_keys_an_animated_anchor_at_the_playhead() {
+    let mut s = text_store(false, 0., 40.);
+    for (time, value) in [(0., 40.), (2., 80.)] {
+        run(
+            &mut s,
+            PropertyCommand::Set(SetProperty {
+                mode: KeyMode::Keyframe,
+                ..SetProperty::new("t", "anchor.y", value, time)
+            })
+            .into(),
+        );
+    }
+    run(&mut s, set("t", "c.size", 160., 1.));
+    let after = keys(&s, "t", "anchor.y");
+    assert_eq!(after.len(), 3);
+    for (key, (t, v)) in after.iter().zip([(0., 40.), (1., 120.), (2., 80.)]) {
+        assert_eq!(num(key, &["t"]), t);
+        assert_eq!(num(key, &["v"]), v);
+    }
+}
+
+#[test]
+fn text_size_preserves_the_legacy_font_bounds_anchor_fraction() {
+    let mut s = text_store(false, 30., 60.);
+    let mut patch = pm_model::Map::new();
+    patch.insert(
+        "fontAnchorBounds",
+        parse(r#"{"x0":-10,"x1":70,"y0":20,"y1":100}"#).unwrap(),
+    );
+    run(
+        &mut s,
+        pm_kernel::ContentCommand::Set {
+            layer_id: "t".into(),
+            patch,
+            time: 0.,
+        }
+        .into(),
+    );
+    let original = layer(&s, "t");
+    run(&mut s, set("t", "c.size", 160., 0.));
+    let resized = layer(&s, "t");
+    for (axis, start, end) in [("anchor.x", "x0", "x1"), ("anchor.y", "y0", "y1")] {
+        let fraction = |layer: &Value| {
+            let lo = num(layer, &["d", "fontAnchorBounds", start]);
+            let hi = num(layer, &["d", "fontAnchorBounds", end]);
+            (num(layer, &["p", axis, "v"]) - lo) / (hi - lo)
+        };
+        assert_eq!(fraction(&resized), fraction(&original));
+        assert_eq!(
+            num(&resized, &["p", axis, "v"]),
+            num(&original, &["p", axis, "v"]) * 2.
+        );
+    }
+    s.undo().unwrap();
+    assert_eq!(layer(&s, "t"), original);
+}
+
 #[test]
 fn an_animated_channel_is_keyed_at_the_playhead_in_layer_time() {
     let mut s = store();

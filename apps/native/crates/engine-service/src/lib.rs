@@ -4460,14 +4460,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 && let Some(r) = runtime.get_mut(&id)
             {
                 if now - r.prepared >= PREPARE_EVERY_SECONDS {
-                    r.prepared = now;
                     let ahead = (PREPARE_AHEAD_SECONDS
                         * pm_protocol::common::TICKS_PER_SECOND as f64)
                         * f64::from(r.transport.rate().num.signum());
                     let at = (spec.time.get() + ahead as i64).max(0);
                     prepare_at = Some(Ticks::new(at).unwrap_or(spec.time));
                 } else {
-                    refine_at = r.lookahead.refine.pop_front();
+                    refine_at = r.lookahead.refine.front().copied();
                 }
             } else if let Some(r) = runtime.get_mut(&id) {
                 r.lookahead = Lookahead::default();
@@ -4821,18 +4820,29 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // of a second on a heavy project) while frames are due.
             // A composition without stills or videos has none to open ahead.
             let mut prepared = None;
-            let may_prepare = slack() && !large_scene;
-            if let Some(at) = prepare_at.filter(|at| {
-                may_prepare && engine.has_visual_media(&scene) && !shared.disk.rendered(&scene, *at)
-            }) {
-                let videos = engine.prepare(&scene, at, spec);
-                if let Some(r) = runtime.get_mut(&id) {
-                    r.lookahead.planned(at, videos, frame_ticks);
+            if slack() {
+                if let Some(at) = prepare_at {
+                    if let Some(r) = runtime.get_mut(&id) {
+                        r.prepared = now;
+                    }
+                    if (large_scene || engine.has_visual_media(&scene))
+                        && !shared.disk.rendered(&scene, at)
+                    {
+                        let videos = engine.prepare(&scene, at, spec);
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.lookahead.planned(at, videos, frame_ticks);
+                        }
+                        prepared = Some("ahead");
+                    }
+                } else if let Some(at) = refine_at {
+                    if let Some(r) = runtime.get_mut(&id) {
+                        r.lookahead.refine.pop_front();
+                    }
+                    if !shared.disk.rendered(&scene, at) {
+                        engine.prepare(&scene, at, spec);
+                        prepared = Some("entry");
+                    }
                 }
-                prepared = Some("ahead");
-            } else if let Some(at) = refine_at.filter(|at| may_prepare && !shared.disk.rendered(&scene, *at)) {
-                engine.prepare(&scene, at, spec);
-                prepared = Some("entry");
             }
             if let (Some(recorder), Some(start)) = (&recorder, after) {
                 recorder.record(serde_json::json!({

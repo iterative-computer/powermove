@@ -22,9 +22,11 @@ impl PassFacts {
             group_spans: group_spans(all),
             matte_sources: MatteSources::of(all),
             solo: all.iter().any(|l| js::flag(l, "solo")),
-            has_3d: all
-                .iter()
-                .any(|l| js::flag(l, "threeD") || pm_eval::parenting::Role3d::of(l).is_some()),
+            has_3d: all.iter().any(|l| {
+                js::flag(l, "threeD")
+                    || node::is_nullish(Some(l))
+                    || pm_eval::parenting::Role3d::of(l).is_some()
+            }),
         }
     }
 
@@ -177,10 +179,10 @@ const FIELDS: [&str; 7] = [
 ];
 
 fn inputs(layer: &Node) -> impl Iterator<Item = Option<&Node>> {
-    FIELDS
-        .into_iter()
-        .map(move |key| layer.get(key))
-        .chain([layer.get("d").and_then(|d| d.get("definition"))])
+    FIELDS.into_iter().map(move |key| layer.get(key)).chain([
+        layer.get("d").and_then(|d| d.get("definition")),
+        node::is_nullish(Some(layer)).then_some(layer),
+    ])
 }
 
 fn same_input(a: Option<&Node>, b: &Option<Node>) -> bool {
@@ -200,7 +202,7 @@ struct Entry {
     comp: (JsString, bool),
     revision: u64,
     layers: Option<Node>,
-    members: Vec<([Option<Node>; FIELDS.len() + 1], Span)>,
+    members: Vec<([Option<Node>; FIELDS.len() + 2], Span)>,
     facts: Arc<PassFacts>,
 }
 
