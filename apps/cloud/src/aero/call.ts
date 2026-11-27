@@ -17,6 +17,7 @@ import { ChunkEncoder } from './sse';
 import { V2Error } from '../v2-error';
 import { productionProblems } from '../production';
 import { emitter } from '../telemetry';
+import { pricingOf } from './pricing';
 
 /** What the Worker hands the object: the client's request, already validated, and who it is for. */
 export interface CallStart { request: unknown; userId: string; requestId: string; key: string; cacheKey: string }
@@ -67,7 +68,7 @@ export class AeroCall {
     await this.ctx.storage.put({ start: owner.token });
     const data = this.data(this.env);
     const globalDailyUsd = Number(this.env.AERO_GLOBAL_DAILY_USD ?? 50);
-    const meter = new Meter({ data, store: this.ctx.storage, userId: start.userId, key: start.key, model, requestedMax: prepared.maxOutputTokens, globalDailyNano: Math.round((Number.isFinite(globalDailyUsd) && globalDailyUsd >= 0 ? globalDailyUsd : 50) * 1e9), emit: emitter(this.env, (promise) => this.ctx.waitUntil?.(promise)) });
+    const meter = new Meter({ data, store: this.ctx.storage, pricing: pricingOf(this.env), userId: start.userId, key: start.key, model, requestedMax: prepared.maxOutputTokens, globalDailyNano: Math.round((Number.isFinite(globalDailyUsd) && globalDailyUsd >= 0 ? globalDailyUsd : 50) * 1e9), emit: emitter(this.env, (promise) => this.ctx.waitUntil?.(promise)) });
     const encoder = new ChunkEncoder(`chatcmpl-${start.requestId}`, model.id, model.provider);
     const result = streamText({
       model: languageModel(this.env, model, meter.fetch),
@@ -166,7 +167,7 @@ export class AeroCall {
     if (!await this.ctx.storage.get('call') && !await this.ctx.storage.get('intent')) return;
     const data = this.data(this.env);
     try {
-      await settleStored(this.ctx.storage, data, emitter(this.env, (promise) => this.ctx.waitUntil?.(promise)));
+      await settleStored(this.ctx.storage, data, pricingOf(this.env), emitter(this.env, (promise) => this.ctx.waitUntil?.(promise)));
     } catch (error) {
       console.error('aero settle retry', (error as Error)?.name ?? 'unknown');
       await this.ctx.storage.setAlarm(Date.now() + retryDelay((await this.ctx.storage.get<number>('attempts')) ?? 0));

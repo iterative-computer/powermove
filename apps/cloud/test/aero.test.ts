@@ -4,7 +4,9 @@ import { withData } from './db';
 import { billing, frames, fxReduce, periodOf, stack, subscribe, type Stack } from './billing-helpers';
 import { creditLedger } from '../src/db/schema';
 import { consume } from '../src/abuse';
-import { CREDIT_NANO_USD, MODELS, cost, modelById } from '../src/aero/catalogue';
+import { MODELS, modelById } from '../src/aero/catalogue';
+import { CREDIT_NANO_USD, PRICING, PRICING_JSON, cost } from './pricing';
+import { parsePricing } from '../src/aero/pricing';
 import { meteredOf } from '../src/aero/meter';
 
 const TOOLS = [{ type: 'function', function: { name: 'read_file', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } }];
@@ -45,15 +47,6 @@ test('costs are exact nano-USD at list price: no rounding, cached input at the c
   // 1M cache write at $5/M = $5 = 1,000 credits; at the 1-hour TTL $8/M.
   expect(cost(opus, usage(1_000_000, { cacheWrite: 1_000_000 })).nanoUsd).toBe(1000 * CREDIT_NANO_USD);
   expect(cost(opus, usage(1_000_000, { cacheWrite: 1_000_000, cacheWriteLong: 1_000_000 })).nanoUsd).toBe(8_000_000_000);
-  for (const model of MODELS) {
-    expect(model.price.cachedInput).toBeLessThan(model.price.input);
-    // Every price is a whole number of nano-USD per token, so integer costs are exact.
-    for (const price of [model.price, ...(model.price.long ? [model.price.long] : [])]) {
-      for (const value of [price.input, price.cachedInput, price.cacheWrite, price.cacheWriteLong, price.output]) expect(Math.abs(value * 1000 - Math.round(value * 1000))).toBeLessThan(1e-9);
-      expect(price.cacheWrite).toBeCloseTo(price.input * 1.25, 12);
-      expect(price.cacheWriteLong).toBeCloseTo(price.input * (model.provider === 'anthropic' ? 2 : 2.5), 12);
-    }
-  }
   // The AI SDK's usage reaches cost() whole: reasoning is inside output, the long-TTL writes come from the raw usage.
   expect(meteredOf({ inputTokens: 10, inputTokenDetails: { noCacheTokens: 4, cacheReadTokens: 2, cacheWriteTokens: 4 }, outputTokens: 7, outputTokenDetails: { textTokens: 2, reasoningTokens: 5 }, totalTokens: 17, raw: { cache_creation: { ephemeral_1h_input_tokens: 3 } } }))
     .toEqual({ input: 10, cacheRead: 2, cacheWrite: 4, cacheWriteLong: 3, output: 7, reasoning: 5 });
@@ -230,3 +223,17 @@ test('a client that aborts mid-stream: the provider stream is read to its end an
       expect(await spends(s, data)).toHaveLength(1);
     } finally { await s.stop(); }
   }));
+
+test('AERO_PRICING: every catalogue model priced, whole nano-USD per token, nothing else; anything else is unusable', () => {
+  expect(parsePricing(PRICING_JSON)).toEqual(PRICING);
+  for (const model of MODELS) expect(PRICING.models[model.id]).toBeDefined();
+  const bad = (change: (p: any) => void) => { const p = JSON.parse(PRICING_JSON); change(p); return parsePricing(JSON.stringify(p)); };
+  expect(parsePricing(undefined)).toBeNull();
+  expect(parsePricing('not json')).toBeNull();
+  expect(bad(p => { delete p.models['openai/gpt-6-luna']; })).toBeNull();
+  expect(bad(p => { p.models['openai/gpt-6-luna'].input = 0.0001; })).toBeNull();
+  expect(bad(p => { p.models['openai/gpt-6-luna'].input = -1; })).toBeNull();
+  expect(bad(p => { p.creditNanoUsd = 0.5; })).toBeNull();
+  expect(bad(p => { delete p.version; })).toBeNull();
+  expect(bad(p => { p.models['openai/gpt-6-luna'].typo = 1; })).toBeNull();
+});

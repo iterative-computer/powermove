@@ -6,13 +6,12 @@ import type { AeroOverview } from '@powermove/registry/wire';
 import type { Db } from '../db/client';
 import { user } from '../db/auth-schema';
 import { aeroBlocks, billingReversals, creditLedger, subscriptions } from '../db/schema';
-import { CREDIT_NANO_USD } from '../aero/catalogue';
+import { pricingOf } from '../aero/pricing';
 import { displayCredits, periodBalance, spendingPeriod } from './ledger';
 import { planById } from './plans';
 
 const DAY = 86_400_000;
 const usd = (nano: number) => nano / 1e9;
-const credits = (nano: number) => nano / CREDIT_NANO_USD;
 /** A request row's spend. */
 const spent = sql`case when ${creditLedger.kind} = 'spend' then ${creditLedger.costNanoUsd} when ${creditLedger.holdExpiresAt} <= now() then ${creditLedger.holdNanoUsd} else 0 end`;
 const requests = inArray(creditLedger.kind, ['spend', 'hold']);
@@ -27,16 +26,19 @@ const usageColumns = {
   output: sql<string>`coalesce(sum(${creditLedger.outputTokens}), 0)`,
 };
 type UsageRow = { nano: string; calls: number; estimatedCalls: number; estimatedNano: string; input: string; cached: string; cacheWrite: string; output: string };
-function usage(row: UsageRow | undefined): AeroOverview['today'] {
+function usage(row: UsageRow | undefined, unit: number): AeroOverview['today'] {
   const input = Number(row?.input ?? 0), cached = Number(row?.cached ?? 0), nano = Number(row?.nano ?? 0);
   return {
-    costUsd: usd(nano), credits: credits(nano), calls: row?.calls ?? 0, estimatedCalls: row?.estimatedCalls ?? 0, estimatedUsd: usd(Number(row?.estimatedNano ?? 0)),
+    costUsd: usd(nano), credits: nano / unit, calls: row?.calls ?? 0, estimatedCalls: row?.estimatedCalls ?? 0, estimatedUsd: usd(Number(row?.estimatedNano ?? 0)),
     inputTokens: input, cachedTokens: cached, cacheWriteTokens: Number(row?.cacheWrite ?? 0), outputTokens: Number(row?.output ?? 0),
     cacheHitRatio: input > 0 ? cached / input : 0,
   };
 }
 
 export async function aeroOverview(db: Db, env: CloudflareBindings, now = new Date()): Promise<AeroOverview> {
+  // Costs are the ledger's nano-USD; credits use the pricing's unit.
+  const unit = pricingOf(env).creditNanoUsd;
+  const credits = (nano: number) => nano / unit;
   const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const since = new Date(today.getTime() - 29 * DAY);
   const [todayRow] = await db.select(usageColumns).from(creditLedger).where(and(requests, gte(creditLedger.createdAt, today)));
@@ -65,7 +67,7 @@ export async function aeroOverview(db: Db, env: CloudflareBindings, now = new Da
     .groupBy(creditLedger.userId, user.email).orderBy(desc(sql`sum(${spent})`)).limit(10);
   const topAccounts = await Promise.all(top.map(async (row) => {
     const current = await spendingPeriod(db, row.id);
-    const left = current ? displayCredits(await periodBalance(db, row.id, current.period)).remaining : null;
+    const left = current ? displayCredits(await periodBalance(db, row.id, current.period, unit), unit).remaining : null;
     return { user: { id: row.id, email: row.email }, costUsd: usd(Number(row.nano)), calls: row.calls, creditsLeft: left };
   }));
 
@@ -84,8 +86,8 @@ export async function aeroOverview(db: Db, env: CloudflareBindings, now = new Da
 
   return {
     generatedAt: now.toISOString(),
-    today: usage(todayRow as UsageRow), last30: usage(last30Row as UsageRow),
-    models: models.map(row => ({ model: row.model ?? 'unknown', ...usage(row as UsageRow) })),
+    today: usage(todayRow as UsageRow, unit), last30: usage(last30Row as UsageRow, unit),
+    models: models.map(row => ({ model: row.model ?? 'unknown', ...usage(row as UsageRow, unit) })),
     daily,
     subscriptions: { active: subs?.active ?? 0, mrrCents: (subs?.active ?? 0) * planById('aerolite').priceCents, new30: subs?.new30 ?? 0, cancelling: subs?.cancelling ?? 0, pastDue: subs?.pastDue ?? 0 },
     topAccounts,

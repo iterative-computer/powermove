@@ -6,6 +6,7 @@ import { withData } from './db';
 import { frames, stack, subscribe, type Stack } from './billing-helpers';
 import { aeroBlocks, creditLedger } from '../src/db/schema';
 import { modelById } from '../src/aero/catalogue';
+import { PRICING } from './pricing';
 import { DEADLINES, MAX_DRAIN_MS, Meter } from '../src/aero/meter';
 import type { Data } from '../src/db/client';
 
@@ -117,7 +118,7 @@ test('5. provider egress fails closed: anything but the one metered generation c
     const sent: string[] = [];
     const meter = new Meter({
       data, store: { get: async () => undefined, put: async () => {}, deleteAll: async () => {}, setAlarm: async () => {}, deleteAlarm: async () => {} },
-      userId: 'u', key: 'request:u:x', model: modelById('openai/gpt-6-luna')!, requestedMax: undefined, globalDailyNano: 50e9,
+      userId: 'u', key: 'request:u:x', model: modelById('openai/gpt-6-luna')!, requestedMax: undefined, globalDailyNano: 50e9, pricing: PRICING,
       fetch: async (input) => { sent.push(String(input)); return new Response('{}'); },
     });
     await expect(meter.fetch('https://api.openai.com/v1/files', { method: 'GET' })).rejects.toThrow('unmetered');

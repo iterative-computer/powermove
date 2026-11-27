@@ -1,5 +1,6 @@
 /* What a production Worker must and must not have. `ENVIRONMENT=production` (wrangler.jsonc) turns the checks on;
    local stacks set `ENVIRONMENT=development` in .dev.vars. */
+import { parsePricing } from './aero/pricing';
 
 /** Development-only settings: each one sends mail to a log, trusts a local identity provider, database, Stripe or
     model provider, or lets a script deliver one-time codes. */
@@ -18,6 +19,7 @@ export function productionProblems(env: CloudflareBindings): string[] {
   for (const name of REQUIRED) if (typeof raw[name] !== 'string' || raw[name] === '') problems.push(`${name} missing`);
   for (const name of ['TURNSTILE_SITE_KEY', 'TURNSTILE_SECRET_KEY'] as const) if (typeof raw[name] === 'string' && TEST_TURNSTILE.test(raw[name] as string)) problems.push(`${name} is a test key`);
   if (env.TURNSTILE_ENABLED !== '1') problems.push('TURNSTILE_ENABLED off');
+  if (!parsePricing(env.AERO_PRICING)) problems.push('AERO_PRICING missing or malformed');
   if (typeof env.STRIPE_SECRET_KEY === 'string' && !env.STRIPE_SECRET_KEY.startsWith('sk_live_') && !env.STRIPE_SECRET_KEY.startsWith('rk_live_')) problems.push('STRIPE_SECRET_KEY not live');
   return problems;
 }

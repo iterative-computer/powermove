@@ -37,6 +37,8 @@ interface CloudflareBindings {
   RL_AERO?: RateLimit;
   /** The most Aero may spend across all accounts in a UTC day, in USD (default 50). */
   AERO_GLOBAL_DAILY_USD?: string;
+  /** What Aero costs, a secret (aero/pricing.ts has the shape). */
+  AERO_PRICING?: string;
   /** Sign-in codes sent across all addresses in a UTC day (default 150, below the mail quota). */
   EMAIL_DAILY_LIMIT?: string;
 }

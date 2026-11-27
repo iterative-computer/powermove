@@ -7,6 +7,7 @@ import { checkoutSessions, stripeCustomers } from '../db/schema';
 import { billingState, currentSubscription, lockBalance, publicStatus } from '../billing/ledger';
 import { type Plan, isForSale, planById } from '../billing/plans';
 import { stripeClient } from '../billing/stripe';
+import { pricingOf } from '../aero/pricing';
 import { consume } from '../abuse';
 import { icons, page } from '../page';
 import { V2Error } from '../v2-error';
@@ -50,7 +51,7 @@ export const billing = new Hono<Env>()
   .get('/', async (c) => {
     const userId = signedIn(c);
     c.header('Cache-Control', 'no-store');
-    return c.json(await billingState(c.var.data.db, userId));
+    return c.json(await billingState(c.var.data.db, userId, pricingOf(c.env).creditNanoUsd));
   })
   .post('/checkout', async (c) => {
     const userId = signedIn(c);

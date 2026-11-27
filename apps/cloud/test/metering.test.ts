@@ -8,7 +8,8 @@ import { and, eq, ne } from 'drizzle-orm';
 import { withData } from './db';
 import { billing, frames, fxReduce, periodOf, stack, subscribe, type Stack } from './billing-helpers';
 import { creditLedger } from '../src/db/schema';
-import { CREDIT_NANO_USD, modelById } from '../src/aero/catalogue';
+import { modelById } from '../src/aero/catalogue';
+import { CREDIT_NANO_USD } from './pricing';
 import { HOLD_TTL_MS, anthropicRaw, inputBound, openaiRaw } from '../src/aero/meter';
 import { imageTokens } from '../src/aero/images';
 import { displayCredits } from '../src/billing/ledger';
@@ -269,8 +270,8 @@ test('display credits: derived from exact nano-USD, used rounds up, remaining do
   withData(async (data) => {
     const s = await stack(data);
     try {
-      expect(displayCredits({ includedNano: 1000 * CREDIT_NANO_USD, usedNano: 1, heldNano: 0, remainingNano: 1000 * CREDIT_NANO_USD - 1 })).toEqual({ included: 1000, used: 1, remaining: 999 });
-      expect(displayCredits({ includedNano: 1000 * CREDIT_NANO_USD, usedNano: 0, heldNano: 0, remainingNano: 1000 * CREDIT_NANO_USD })).toEqual({ included: 1000, used: 0, remaining: 1000 });
+      expect(displayCredits({ includedNano: 1000 * CREDIT_NANO_USD, usedNano: 1, heldNano: 0, remainingNano: 1000 * CREDIT_NANO_USD - 1 }, CREDIT_NANO_USD)).toEqual({ included: 1000, used: 1, remaining: 999 });
+      expect(displayCredits({ includedNano: 1000 * CREDIT_NANO_USD, usedNano: 0, heldNano: 0, remainingNano: 1000 * CREDIT_NANO_USD }, CREDIT_NANO_USD)).toEqual({ included: 1000, used: 0, remaining: 1000 });
       await subscribe(s);
       // Three requests of 0.4 credits each: 1.2 credits spent, shown as 2 used, never 3.
       for (const id of ['a', 'b', 'c']) await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: `request:${s.user.id}:${id}`, credits: 0, costNanoUsd: 2_000_000, model: 'openai/gpt-6-luna', ...await periodOf(data, s.user.id) });

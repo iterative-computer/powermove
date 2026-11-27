@@ -6,6 +6,7 @@ import { AERO_BODY_BYTES, readJsonLimited } from '../body';
 import { MODELS, modelById } from '../aero/catalogue';
 import type { CallStart } from '../aero/call';
 import { endpointFor } from '../aero/providers';
+import { pricingOf } from '../aero/pricing';
 import { ChatRequest, UnsupportedRequest, prepare } from '../aero/translate';
 import { V2Error } from '../v2-error';
 
@@ -41,7 +42,7 @@ export const aero = new Hono<Env>()
     if (edge && !edge.success) throw new V2Error(429, 'rate_limited', 60);
     const rate = await consume(c.var.data.db, 'aero_user', userId);
     if (!rate.ok) throw new V2Error(429, 'rate_limited', rate.retryAfterSeconds);
-    const { remainingNano, subscriptionId, period } = await spendable(c.var.data.db, userId);
+    const { remainingNano, subscriptionId, period } = await spendable(c.var.data.db, userId, pricingOf(c.env).creditNanoUsd);
     if (remainingNano <= 0 || !subscriptionId || !period) throw new V2Error(402, 'credits_exhausted');
     const parsed = ChatRequest.safeParse(await readJsonLimited(c, AERO_BODY_BYTES));
     if (!parsed.success) throw new V2Error(400, 'invalid_request');

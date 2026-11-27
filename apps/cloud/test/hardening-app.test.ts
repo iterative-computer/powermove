@@ -24,7 +24,7 @@ test('6. production refuses to serve with any development setting, or without it
       expect([name, r.status]).toEqual([name, 503]);
       expect(await r.json() as unknown).toEqual({ error: { code: 'misconfigured' } });
     }
-    for (const [name, value] of [['STRIPE_PRICE_AEROLITE', undefined], ['STRIPE_WEBHOOK_SECRET', undefined], ['TURNSTILE_SECRET_KEY', undefined], ['TURNSTILE_SITE_KEY', '1x00000000000000000000AA'], ['STRIPE_SECRET_KEY', 'sk_test_x'], ['TURNSTILE_ENABLED', '0']] as const) {
+    for (const [name, value] of [['AERO_PRICING', undefined], ['AERO_PRICING', '{"version":"x"}'], ['STRIPE_PRICE_AEROLITE', undefined], ['STRIPE_WEBHOOK_SECRET', undefined], ['TURNSTILE_SECRET_KEY', undefined], ['TURNSTILE_SITE_KEY', '1x00000000000000000000AA'], ['STRIPE_SECRET_KEY', 'sk_test_x'], ['TURNSTILE_ENABLED', '0']] as const) {
       const r = await app.request('/v1/store/featured', {}, { ...good, [name]: value } as CloudflareBindings);
       expect([name, r.status]).toEqual([name, 503]);
     }
