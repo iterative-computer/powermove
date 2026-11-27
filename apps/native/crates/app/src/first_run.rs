@@ -363,6 +363,10 @@ pub struct Flow {
     powermove: Option<String>,
     /// The account step's email, then the code sent to it.
     sign_in: SignInFlow,
+    /// The library opened and the first run handed off into the app: no
+    /// window of the first run ever shows again (a later sign-in or billing
+    /// change still reaches the flow).
+    entered: bool,
 }
 // The account step's sign-in is `sign_in::SignInFlow`, the same as the
 // sign-in sheet's.
@@ -395,6 +399,7 @@ impl Flow {
             chosen: None,
             extensions: None,
             recent: None,
+            entered: false,
             plan,
         }
     }
@@ -445,6 +450,9 @@ impl Flow {
     }
     /// Whether this launch has a Welcome window to show.
     pub fn visible(&self) -> bool {
+        if self.entered {
+            return false;
+        }
         self.review
             || self.plan.launch == Launch::Migrate
             || self.onboarding.is_some()
@@ -504,6 +512,11 @@ impl Flow {
     fn enter(&mut self) -> Vec<Effect> {
         self.entry = Entry::Entering;
         vec![Effect::Enter(self.chosen.clone())]
+    }
+    /// The library opened and the app's first window is up: the first run is
+    /// over for this launch.
+    pub fn entered(&mut self) {
+        self.entered = true;
     }
     /// The library didn't open. The editor stays closed and the person can retry.
     pub fn enter_failed(&mut self, details: String) -> Vec<Effect> {
@@ -2128,6 +2141,9 @@ impl Driver {
         }
         // The editor that opens next starts the transfer (`firstRunWorkspace`).
         note_workspace_request(opened.bring_workspace);
+        // Before anything else can call `show`: the first run never opens a
+        // window again (the stage came back on a billing change).
+        self.flow.borrow_mut().entered();
         (self.finish)(cx);
         match self.window.borrow_mut().take() {
             Some(GateWindow::Welcome(handle)) => {
