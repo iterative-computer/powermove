@@ -658,11 +658,16 @@ impl Renderer {
         let format = pm_gpu::target::working_format(precision);
         let mut queued = 0;
         if self.effect_host.is_none() {
-            let first = crate::effects::prewarm::document_definitions(document);
+            let first = crate::effects::prewarm::document_definitions(document, &self.effects);
             queued += self.effects.prewarm(&self.device, format, &first);
         }
         queued += self.shaders.prewarm(&self.device, format, document);
         queued
+    }
+
+    /// Time spent building or waiting for effect pipelines since the last sample.
+    pub fn take_effect_program_build_us(&mut self) -> u64 {
+        self.effects.take_program_build_us()
     }
 
     /// The draw reuse's counters (with the frames drawn from a kept bottom
@@ -790,6 +795,7 @@ impl Renderer {
     /// the renderer's definitions; `None` goes back to them.
     pub fn set_effect_host(&mut self, host: Option<Arc<dyn EffectHost>>) {
         self.effect_host = host;
+        self.reuse.geometry.clear_membership();
     }
 
     /// Replaces the effect, transition, and layer definitions with an
@@ -802,6 +808,7 @@ impl Renderer {
         set: &pm_protocol::definitions::DefinitionSetSnapshot,
     ) -> Result<Vec<pm_protocol::error::EngineError>, pm_protocol::definitions::UpdateError> {
         let out = self.effects.set_snapshot(set);
+        self.reuse.geometry.clear_membership();
         self.refresh_meshes();
         out
     }
@@ -813,6 +820,7 @@ impl Renderer {
         update: &pm_protocol::definitions::DefinitionsUpdate,
     ) -> Result<Vec<pm_protocol::error::EngineError>, pm_protocol::definitions::UpdateError> {
         let out = self.effects.apply(update);
+        self.reuse.geometry.clear_membership();
         self.refresh_meshes();
         out
     }
@@ -820,6 +828,7 @@ impl Renderer {
     /// Forgets every definition: effects and transitions are routed again.
     pub fn clear_definitions(&mut self) {
         self.effects.clear();
+        self.reuse.geometry.clear_membership();
         self.refresh_meshes();
     }
 

@@ -43,15 +43,56 @@ const V4_OWNER: &str = "v4-extension:";
 const V4_THEME: &str = "extension.v4theme:";
 /// Layer 1: toolbar buttons `extension.v4toolbar:<panel>:<id>`.
 const V4_TOOLBAR: &str = "extension.v4toolbar:";
+const V4_TOOLBAR_MENU: &str = "extension.v4toolbar-menu:";
+const V4_ADD: &str = "extension.v4add:";
+const V4_STATUS: &str = "extension.v4status:";
+const V4_TOOL_TOGGLE: &str = "extension.v4tool-toggle:";
 /// Layer 1: panel header pills `extension.v4header:<owner>:<key>`.
 const V4_HEADER: &str = "extension.v4header:";
 /// Layer 1: menu bar items `extension.v4menubar:<panel>:<key>`.
 const V4_MENUBAR: &str = "extension.v4menubar:";
 /// Layer 2: interactive viewer tools `extension.v4tool:<panel>:<id>`.
 pub(crate) const V4_TOOL: &str = "extension.v4tool:";
+fn chrome_string(item: &Value, field: &str) -> Option<String> {
+    item[field].as_str().map(str::to_owned)
+}
+
+fn chrome_order(value: &Value) -> Option<i32> {
+    value
+        .as_i64()
+        .map(|order| order.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+        .or_else(|| value.as_u64().map(|_| i32::MAX))
+}
+
+fn parse_chrome_menu(
+    prefix: &str,
+    panel: &str,
+    items: &[Value],
+) -> Vec<pm_shell::ExtensionMenuItem> {
+    items
+        .iter()
+        .map(|item| pm_shell::ExtensionMenuItem {
+            separator: item == "-" || item["separator"] == true,
+            label: item["label"].as_str().unwrap_or_default().to_owned(),
+            icon: chrome_string(item, "icon"),
+            key: chrome_string(item, "key"),
+            checked: item["checked"] == true,
+            disabled: item["disabled"] == true,
+            command: item["actionKey"]
+                .as_str()
+                .map(|key| format!("{prefix}{panel}:{key}")),
+            submenu: item["submenu"]
+                .as_array()
+                .map(|items| parse_chrome_menu(prefix, panel, items))
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
 /// `extension.choice:<token>:<index>`: a built-in row of a menu that also
 /// carries extension items; its own callback runs.
 const CHOICE: &str = "extension.choice:";
+const MENU_CLOSED: &str = "extension.menuClosed:";
 /// Runs the row chosen from a menu (`target`: `token:index`) once the
 /// update that heard it returns: what a row does may read the entity that
 /// heard it (the timeline asks the Controller for the time), and reading an
@@ -158,6 +199,16 @@ struct OpenMenu {
     key: u64,
     entries: Vec<MenuEntry>,
     at: (f32, f32),
+    completion: Option<String>,
+}
+
+fn append_extension_entries(entries: &mut Vec<MenuEntry>, extra: Vec<MenuEntry>) {
+    if !extra.is_empty() {
+        if entries.last().is_some_and(|entry| !entry.label.is_empty()) {
+            entries.push(MenuEntry::separator());
+        }
+        entries.extend(extra);
+    }
 }
 
 /// What an extension's menu items are in the native menu.
@@ -235,6 +286,17 @@ pub struct Extensions {
     v4_theme_choices: Vec<Choice>,
     v4_tool_choices: Vec<Choice>,
     v4_toolbar_seen: u64,
+    v4_toolbar_mods_seen: u64,
+    v4_toolbar_add_seen: u64,
+    v4_status_seen: u64,
+    v4_status_mods_seen: u64,
+    v4_header_mods_seen: u64,
+    v4_toolbar: Vec<pm_shell::ExtensionToolbarItem>,
+    v4_toolbar_tools: Vec<pm_shell::ExtensionToolbarItem>,
+    v4_tools: Vec<String>,
+    pub(crate) v4_status: Vec<pm_shell::view::ExtensionStatusBarItem>,
+    pub(crate) v4_status_mods: Vec<pm_shell::view::ExtensionStatusBarMod>,
+    pub(crate) v4_header_mods: Vec<pm_shell::view::PanelHeaderMod>,
     v4_headers_seen: u64,
     v4_menubar_seen: u64,
     v4_tools_seen: u64,
@@ -337,6 +399,17 @@ impl Default for Extensions {
             v4_theme_choices: vec![],
             v4_tool_choices: vec![],
             v4_toolbar_seen: 0,
+            v4_toolbar_mods_seen: 0,
+            v4_toolbar_add_seen: 0,
+            v4_status_seen: 0,
+            v4_status_mods_seen: 0,
+            v4_header_mods_seen: 0,
+            v4_toolbar: Vec::new(),
+            v4_toolbar_tools: Vec::new(),
+            v4_tools: Vec::new(),
+            v4_status: Vec::new(),
+            v4_status_mods: Vec::new(),
+            v4_header_mods: Vec::new(),
             v4_headers_seen: 0,
             v4_menubar_seen: 0,
             v4_tools_seen: 0,
@@ -393,6 +466,17 @@ impl Extensions {
         self.v4_seen = u64::MAX;
         self.v4_themes_seen = u64::MAX;
         self.v4_toolbar_seen = u64::MAX;
+        self.v4_toolbar_mods_seen = u64::MAX;
+        self.v4_toolbar_add_seen = u64::MAX;
+        self.v4_status_seen = u64::MAX;
+        self.v4_status_mods_seen = u64::MAX;
+        self.v4_header_mods_seen = u64::MAX;
+        self.v4_toolbar.clear();
+        self.v4_toolbar_tools.clear();
+        self.v4_tools.clear();
+        self.v4_status.clear();
+        self.v4_status_mods.clear();
+        self.v4_header_mods.clear();
         self.v4_headers_seen = u64::MAX;
         self.v4_menubar_seen = u64::MAX;
         self.v4_tools_seen = u64::MAX;
@@ -1219,13 +1303,10 @@ impl Controller {
                 let shell = self.host.borrow();
                 match open {
                     Some(OpenMenu {
-                        mut entries, at, ..
+                        mut entries, at, completion, ..
                     }) => {
-                        if !items.is_empty() {
-                            entries.push(MenuEntry::separator());
-                            entries.extend(items);
-                        }
-                        shell.context_menu(&entries, at.0, at.1);
+                        append_extension_entries(&mut entries, items);
+                        shell.context_menu_with_completion(&entries, at.0, at.1, completion);
                     }
                     None if request["key"].is_null() => shell.context_menu(
                         &items,
@@ -1247,6 +1328,9 @@ impl Controller {
         at: (f32, f32),
         cx: &mut Context<Self>,
     ) -> Option<Vec<MenuEntry>> {
+        if pm_builtins::is_protected_surface(id) {
+            return Some(entries);
+        }
         self.extension_menu(
             vec![("panel:context", json!({"panelId": id}))],
             entries,
@@ -1276,13 +1360,29 @@ impl Controller {
         at: (f32, f32),
         cx: &mut Context<Self>,
     ) -> Option<Vec<MenuEntry>> {
+        self.collect_extension_menu(locations, entries, tail, at, None, cx)
+    }
+
+    fn collect_extension_menu(
+        &mut self,
+        locations: Vec<(&'static str, Value)>,
+        entries: Vec<MenuEntry>,
+        tail: Vec<MenuEntry>,
+        at: (f32, f32),
+        completion: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<MenuEntry>> {
         let with_tail = |mut entries: Vec<MenuEntry>| {
-            if !tail.is_empty() {
-                entries.push(MenuEntry::separator());
-                entries.extend(tail);
-            }
+            append_extension_entries(&mut entries, tail);
             entries
         };
+        let locations: Vec<_> = locations.into_iter().filter(|(location, context)| {
+            !pm_builtins::is_protected_surface(location)
+                && !context["panelId"].as_str().is_some_and(pm_builtins::is_protected_surface)
+        }).collect();
+        if locations.is_empty() {
+            return Some(with_tail(entries));
+        }
         let compat = self.extensions.host.as_ref().is_some_and(|h| h.view() != 0);
         let runtime = self.builtins.runtime.clone().filter(|r| r.has_extensions());
         // With no realm nothing can add to it, so it opens right away.
@@ -1306,16 +1406,24 @@ impl Controller {
             };
             let _ = this.update(cx, |v, cx| {
                 let mut entries = entries;
-                if !extra.is_empty() {
-                    entries.push(MenuEntry::separator());
-                    entries.extend(extra);
-                }
-                v.open_compat_menu(locations, with_tail(entries), at, cx);
+                append_extension_entries(&mut entries, extra);
+                v.open_compat_menu(locations, with_tail(entries), at, completion, cx);
             });
         })
         .detach();
         None
     }
+    pub(crate) fn open_surface_context_menu(
+        &mut self,
+        location: &'static str,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(entries) = self.extension_menu(vec![(location, json!({}))], vec![], at, cx) {
+            self.host.borrow().context_menu(&entries, at.0, at.1);
+        }
+    }
+
     /// True when some extension can add to a context menu.
     pub fn extensions_listen(&self) -> bool {
         self.extensions.host.as_ref().is_some_and(|h| h.view() != 0)
@@ -1348,7 +1456,7 @@ impl Controller {
                     if row.is_null() {
                         return MenuEntry::separator();
                     }
-                    let label = row["label"].as_str().unwrap_or_default();
+                    let label = row["label"].as_str().or_else(|| row.as_str()).unwrap_or_default();
                     if row["separator"] == true {
                         return MenuEntry::separator();
                     }
@@ -1362,7 +1470,7 @@ impl Controller {
                         _ => MenuEntry::item(label, format!("{CHOICE}{token}:{index}")),
                     }
                     .checked(row["checked"] == true);
-                    entry.enabled &= row["disabled"] != true;
+                    entry.enabled &= row["disabled"] != true && row["enabled"] != false;
                     entry.shortcut = row["id"]
                         .as_str()
                         .filter(|c| !c.is_empty())
@@ -1372,9 +1480,14 @@ impl Controller {
                 .collect()
         }
         let entries = entries(rows, token, &mut 0);
-        self.extensions.choice = Some((token, choose));
-        if let Some(entries) = self.extension_menu(locations, entries, at, cx) {
-            self.host.borrow().context_menu(&entries, at.0, at.1);
+        if let Some((_, previous)) = self.extensions.choice.replace((token, choose)) {
+            cx.defer(move |cx| previous(None, cx));
+        }
+        let completion = Some(format!("{MENU_CLOSED}{token}"));
+        if let Some(entries) =
+            self.collect_extension_menu(locations, entries, vec![], at, completion.clone(), cx)
+        {
+            self.host.borrow().context_menu_with_completion(&entries, at.0, at.1, completion);
         }
     }
     /// v1–3 realms add to the menu, which opens when they answer or the
@@ -1384,10 +1497,11 @@ impl Controller {
         locations: Vec<(&'static str, Value)>,
         entries: Vec<MenuEntry>,
         at: (f32, f32),
+        completion: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(host) = self.extensions.host.as_ref().filter(|h| h.view() != 0) else {
-            self.host.borrow().context_menu(&entries, at.0, at.1);
+            self.host.borrow().context_menu_with_completion(&entries, at.0, at.1, completion);
             return;
         };
         self.extensions.next_menu += 1;
@@ -1397,14 +1511,14 @@ impl Controller {
             .map(|(location, ctx)| json!([location, ctx]))
             .collect();
         host.gather_menus(pairs, key);
-        self.extensions.menu = Some(OpenMenu { key, entries, at });
+        self.extensions.menu = Some(OpenMenu { key, entries, at, completion });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(MENU_DEADLINE).await;
             let _ = this.update(cx, |v, _| {
                 if let Some(menu) = v.extensions.menu.take_if(|menu| menu.key == key) {
                     v.host
                         .borrow()
-                        .context_menu(&menu.entries, menu.at.0, menu.at.1);
+                        .context_menu_with_completion(&menu.entries, menu.at.0, menu.at.1, menu.completion);
                 }
             });
         })
@@ -1972,6 +2086,22 @@ impl Controller {
             }
             return true;
         }
+        if cmd.name == "shellToolbarContextMenu" {
+            if let [x, y] = cmd.args.as_slice()
+                && let (Some(x), Some(y)) = (x.as_f64(), y.as_f64())
+            {
+                self.open_surface_context_menu("toolbar:context", (x as f32, y as f32), cx);
+            }
+            return true;
+        }
+        if let Some(token) = cmd.name.strip_prefix(MENU_CLOSED) {
+            if let Ok(token) = token.parse::<u64>()
+                && let Some((_, choose)) = self.extensions.choice.take_if(|(waiting, _)| *waiting == token)
+            {
+                cx.defer(move |cx| choose(None, cx));
+            }
+            return true;
+        }
         if let Some(target) = cmd.name.strip_prefix(CHOICE) {
             run_choice(&mut self.extensions.choice, target, cx);
             return true;
@@ -2025,29 +2155,54 @@ impl Controller {
             }
             return true;
         }
-        if let Some(target) = cmd.name.strip_prefix(V4_TOOLBAR) {
-            if let (Some(runtime), Some((panel, id))) =
-                (self.builtins.runtime.clone(), target.split_once(':'))
-            {
-                let (panel, id) = (panel.to_owned(), id.to_owned());
-                cx.spawn(async move |this, cx| {
-                    let ticket = cx
-                        .background_executor()
-                        .spawn(async move { runtime.run_toolbar(&panel, &id) })
-                        .await;
-                    let result = match ticket {
-                        Ok(ticket) => ticket.await.map(drop),
-                        Err(error) => Err(error),
-                    };
-                    if let Err(error) = result {
-                        let _ = this.update(cx, |v, cx| {
-                            v.message = format!("Toolbar action failed: {error}");
-                            cx.notify();
-                        });
+        type Action = fn(
+            &pm_builtins::Builtins,
+            &str,
+            &str,
+        )
+            -> pm_runtime_v8::Result<pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>>;
+        let actions: [(&str, Action); 4] = [
+            (V4_TOOLBAR, pm_builtins::Builtins::run_toolbar),
+            (V4_TOOLBAR_MENU, pm_builtins::Builtins::run_toolbar_menu),
+            (V4_ADD, pm_builtins::Builtins::run_toolbar_add_item),
+            (V4_STATUS, pm_builtins::Builtins::run_status_bar),
+        ];
+        for (prefix, action) in actions {
+            if let Some(target) = cmd.name.strip_prefix(prefix) {
+                if let (Some(runtime), Some((panel, id))) =
+                    (self.builtins.runtime.clone(), target.split_once(':'))
+                {
+                    let (panel, id) = (panel.to_owned(), id.to_owned());
+                    cx.spawn(async move |this, cx| {
+                        let ticket = cx
+                            .background_executor()
+                            .spawn(async move { action(&runtime, &panel, &id) })
+                            .await;
+                        let result = match ticket {
+                            Ok(ticket) => ticket.await.map(drop),
+                            Err(error) => Err(error),
+                        };
+                        if let Err(error) = result {
+                            let _ = this.update(cx, |v, cx| {
+                                v.note(format!("Extension action failed: {error}"), cx);
+                            });
+                        }
+                    })
+                    .detach();
+                }
+                return true;
+            }
+        }
+        if cmd.name == "workspaceSetLayout" {
+            let layout = cmd.args.first().cloned().unwrap_or(Value::Null);
+            let owner = cx.entity();
+            cx.defer(move |cx| {
+                owner.update(cx, |this, cx| {
+                    if let Err(error) = this.set_extension_workspace_layout(&layout, cx) {
+                        this.note(error.to_string(), cx);
                     }
                 })
-                .detach();
-            }
+            });
             return true;
         }
         if let Some(target) = cmd.name.strip_prefix(V4_HEADER) {
@@ -2100,15 +2255,17 @@ impl Controller {
             }
             return true;
         }
-        if let Some(target) = cmd.name.strip_prefix(V4_TOOL) {
-            if let Some((panel, tool_id)) = target.split_once(':') {
-                self.tool = cmd.name.clone();
-                if let Some(runtime) = &self.builtins.runtime {
-                    runtime.set_active_tool(Some((panel, tool_id)));
-                    runtime.emit_event("tool", &json!({"tool": self.tool}));
-                }
-                cx.notify();
+        if let Some(target) = cmd.name.strip_prefix(V4_TOOL_TOGGLE) {
+            let command = format!("{V4_TOOL}{target}");
+            if self.tool == command {
+                self.host.borrow().send_command("toolSelect", vec![]);
+            } else {
+                self.activate_extension_tool(&command, cx);
             }
+            return true;
+        }
+        if cmd.name.starts_with(V4_TOOL) {
+            self.activate_extension_tool(&cmd.name, cx);
             return true;
         }
         if let Some(target) = cmd.name.strip_prefix(V4_COMMAND) {
@@ -2260,12 +2417,70 @@ impl Controller {
         shell.contributed_choices = self.extensions.palette_choices();
         shell.set_contributed_bindings(V4_OWNER, bindings);
     }
+    fn activate_extension_tool(&mut self, command: &str, cx: &mut Context<Self>) {
+        if !self.extensions.v4_tools.iter().any(|tool| tool == command) {
+            return;
+        }
+        if let Some((panel, id)) = command
+            .strip_prefix(V4_TOOL)
+            .and_then(|target| target.split_once(':'))
+        {
+            self.tool = command.to_owned();
+            self.host.borrow().select_tool(command);
+            if let Some(runtime) = &self.builtins.runtime {
+                runtime.set_active_tool(Some((panel, id)));
+                runtime.emit_event("tool", &json!({"tool": self.tool}));
+            }
+            self.sync_extension_tool_buttons();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn sync_extension_tool_buttons(&self) {
+        let items = self
+            .extensions
+            .v4_toolbar
+            .iter()
+            .cloned()
+            .chain(
+                self.extensions
+                    .v4_toolbar_tools
+                    .iter()
+                    .cloned()
+                    .map(|mut item| {
+                        item.active = item.command.strip_prefix(V4_TOOL_TOGGLE)
+                            == self.tool.strip_prefix(V4_TOOL);
+                        item
+                    }),
+            )
+            .collect::<Vec<_>>();
+        self.host.borrow_mut().set_extension_toolbar(&items);
+    }
+
+    pub(crate) fn set_extension_workspace_layout(
+        &mut self,
+        value: &Value,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let editor = self
+            .shell
+            .as_ref()
+            .and_then(|editor| editor.upgrade())
+            .ok_or_else(|| anyhow::anyhow!("No editor workspace is open."))?;
+        let state = editor.read(cx);
+        let (docks, name) =
+            crate::panel_bridge::extension_layout_plan(value, &state.layout, &state.panels(cx))?;
+        editor.update(cx, |editor, cx| editor.save_agent_layout(&name, docks, cx))?;
+        Ok(())
+    }
+
     /// Layer 1 & Layer 2: synchronizes v4 extension toolbar items, panel header
     /// actions, macOS menu bar items, and interactive viewer tools.
     pub fn sync_v4_chrome(&mut self, runtime: &pm_builtins::Builtins, cx: &mut Context<Self>) {
+        let mut toolbar_changed = false;
         if let Some((rev, list)) = runtime.toolbar_items_since(self.extensions.v4_toolbar_seen) {
             self.extensions.v4_toolbar_seen = rev;
-            let items: Vec<pm_shell::ExtensionToolbarItem> = list
+            self.extensions.v4_toolbar = list
                 .iter()
                 .filter_map(|item| {
                     let panel = item["panel"].as_str()?;
@@ -2279,10 +2494,118 @@ impl Controller {
                         active: item["active"] == true,
                         badge: item["badge"].as_str().map(str::to_owned),
                         command: format!("{V4_TOOLBAR}{panel}:{id}"),
+                        zone: item["zone"].as_str().unwrap_or("after-add").to_owned(),
+                        order: chrome_order(&item["order"]).unwrap_or_default(),
+                        variant: item["variant"].as_str().unwrap_or("default").to_owned(),
+                        disabled: item["disabled"] == true,
+                        menu: item["menu"]
+                            .as_array()
+                            .map(|items| parse_chrome_menu(V4_TOOLBAR_MENU, panel, items))
+                            .unwrap_or_default(),
                     })
                 })
                 .collect();
-            self.host.borrow_mut().set_extension_toolbar(&items);
+            toolbar_changed = true;
+        }
+        if let Some((rev, list)) = runtime.toolbar_mods_since(self.extensions.v4_toolbar_mods_seen)
+        {
+            self.extensions.v4_toolbar_mods_seen = rev;
+            let mods = list
+                .iter()
+                .filter_map(|item| {
+                    Some(pm_shell::ExtensionToolbarMod {
+                        target: chrome_string(item, "target")?,
+                        hidden: item["hidden"].as_bool(),
+                        label: chrome_string(item, "label"),
+                        icon: chrome_string(item, "icon"),
+                        tooltip: chrome_string(item, "tooltip"),
+                        badge: chrome_string(item, "badge"),
+                        order: chrome_order(&item["order"]),
+                    })
+                })
+                .collect::<Vec<_>>();
+            self.host.borrow_mut().set_extension_toolbar_mods(&mods);
+        }
+        if let Some((rev, list)) =
+            runtime.toolbar_add_items_since(self.extensions.v4_toolbar_add_seen)
+        {
+            self.extensions.v4_toolbar_add_seen = rev;
+            let items = list
+                .iter()
+                .filter_map(|item| {
+                    let panel = item["panel"].as_str()?;
+                    let id = chrome_string(item, "id")?;
+                    Some(pm_shell::ExtensionAddMenuItem {
+                        command: format!("{V4_ADD}{panel}:{id}"),
+                        id,
+                        label: chrome_string(item, "label")?,
+                        icon: chrome_string(item, "icon"),
+                        section: chrome_string(item, "section"),
+                        tooltip: chrome_string(item, "tooltip"),
+                    })
+                })
+                .collect::<Vec<_>>();
+            self.host.borrow_mut().set_extension_add_items(&items);
+        }
+        if let Some((rev, list)) = runtime.status_bar_items_since(self.extensions.v4_status_seen) {
+            self.extensions.v4_status_seen = rev;
+            self.extensions.v4_status = list
+                .iter()
+                .filter_map(|item| {
+                    let panel = item["panel"].as_str()?;
+                    let id = chrome_string(item, "id")?;
+                    Some(pm_shell::view::ExtensionStatusBarItem {
+                        command: format!("{V4_STATUS}{panel}:{id}"),
+                        id,
+                        side: chrome_string(item, "side")?,
+                        order: chrome_order(&item["order"]).unwrap_or_default(),
+                        text: chrome_string(item, "text")?,
+                        icon: chrome_string(item, "icon"),
+                        tooltip: chrome_string(item, "tooltip"),
+                        tone: chrome_string(item, "tone").unwrap_or_default(),
+                        clickable: item["clickable"] == true,
+                    })
+                })
+                .collect();
+            cx.notify();
+        }
+        if let Some((rev, list)) =
+            runtime.status_bar_mods_since(self.extensions.v4_status_mods_seen)
+        {
+            self.extensions.v4_status_mods_seen = rev;
+            self.extensions.v4_status_mods = list
+                .iter()
+                .filter_map(|item| {
+                    Some(pm_shell::view::ExtensionStatusBarMod {
+                        target: chrome_string(item, "target")?,
+                        hidden: item["hidden"].as_bool(),
+                        text: chrome_string(item, "text"),
+                    })
+                })
+                .collect();
+            cx.notify();
+        }
+        if let Some((rev, list)) =
+            runtime.panel_header_mods_since(self.extensions.v4_header_mods_seen)
+        {
+            self.extensions.v4_header_mods_seen = rev;
+            self.extensions.v4_header_mods = list
+                .iter()
+                .filter_map(|item| {
+                    let panel_id = chrome_string(item, "panelId")?;
+                    if pm_builtins::is_protected_surface(&panel_id) {
+                        return None;
+                    }
+                    Some(pm_shell::view::PanelHeaderMod {
+                        panel_id,
+                        title: chrome_string(item, "title"),
+                        icon: chrome_string(item, "icon"),
+                        badge: chrome_string(item, "badge"),
+                        hidden: item["hidden"].as_bool(),
+                    })
+                })
+                .collect();
+            cx.notify();
         }
         if let Some((rev, list)) = runtime.panel_headers_since(self.extensions.v4_headers_seen) {
             self.extensions.v4_headers_seen = rev;
@@ -2316,44 +2639,12 @@ impl Controller {
         }
         if let Some((rev, list)) = runtime.menu_bar_since(self.extensions.v4_menubar_seen) {
             self.extensions.v4_menubar_seen = rev;
-            fn parse_items(panel: &str, arr: &[Value]) -> Vec<pm_shell::ExtensionMenuItem> {
-                arr.iter()
-                    .map(|raw| {
-                        if raw == "-" {
-                            return pm_shell::ExtensionMenuItem {
-                                separator: true,
-                                label: String::new(),
-                                key: None,
-                                checked: false,
-                                disabled: false,
-                                command: None,
-                                submenu: vec![],
-                            };
-                        }
-                        let submenu = raw["submenu"]
-                            .as_array()
-                            .map(|sub| parse_items(panel, sub))
-                            .unwrap_or_default();
-                        pm_shell::ExtensionMenuItem {
-                            separator: false,
-                            label: raw["label"].as_str().unwrap_or_default().to_owned(),
-                            key: raw["key"].as_str().map(str::to_owned),
-                            checked: raw["checked"] == true,
-                            disabled: raw["disabled"] == true,
-                            command: raw["actionKey"]
-                                .as_str()
-                                .map(|k| format!("{V4_MENUBAR}{panel}:{k}")),
-                            submenu,
-                        }
-                    })
-                    .collect()
-            }
             let sections: Vec<pm_shell::ExtensionMenuSection> = list
                 .iter()
                 .filter_map(|entry| {
                     let panel = entry["panel"].as_str()?;
                     let menu_name = entry["menuName"].as_str()?.to_owned();
-                    let items = parse_items(panel, entry["items"].as_array()?);
+                    let items = parse_chrome_menu(V4_MENUBAR, panel, entry["items"].as_array()?);
                     Some(pm_shell::ExtensionMenuSection { menu_name, items })
                 })
                 .collect();
@@ -2363,6 +2654,8 @@ impl Controller {
             self.extensions.v4_tools_seen = rev;
             let mut choices = Vec::new();
             let mut bindings = Vec::new();
+            self.extensions.v4_toolbar_tools.clear();
+            self.extensions.v4_tools.clear();
             for tool in &list {
                 let (Some(panel), Some(id), Some(title)) = (
                     tool["panel"].as_str(),
@@ -2372,6 +2665,25 @@ impl Controller {
                     continue;
                 };
                 let cmd = format!("{V4_TOOL}{panel}:{id}");
+                self.extensions.v4_tools.push(cmd.clone());
+                if tool["showInToolbar"] == true {
+                    self.extensions
+                        .v4_toolbar_tools
+                        .push(pm_shell::ExtensionToolbarItem {
+                            id: id.to_owned(),
+                            label: title.to_owned(),
+                            icon: chrome_string(tool, "icon"),
+                            tooltip: title.to_owned(),
+                            active: false,
+                            badge: None,
+                            command: format!("{V4_TOOL_TOGGLE}{panel}:{id}"),
+                            zone: "after-add".into(),
+                            order: 0,
+                            variant: "default".into(),
+                            disabled: false,
+                            menu: Vec::new(),
+                        });
+                }
                 choices.push(Choice {
                     label: format!("Tool: {title}"),
                     command: cmd.clone(),
@@ -2394,6 +2706,13 @@ impl Controller {
             let mut shell = self.host.borrow_mut();
             shell.contributed_choices = self.extensions.palette_choices();
             shell.set_contributed_bindings("v4-tools:", bindings);
+            if self.tool.starts_with(V4_TOOL) && !self.extensions.v4_tools.contains(&self.tool) {
+                shell.send_command("toolSelect", vec![]);
+            }
+            toolbar_changed = true;
+        }
+        if toolbar_changed {
+            self.sync_extension_tool_buttons();
         }
     }
     /// Layer 1: trailing panel header action buttons contributed for `panel_id`.
@@ -2401,6 +2720,9 @@ impl Controller {
         &self,
         panel_id: &str,
     ) -> Vec<pm_shell::integration::PanelHeaderButton> {
+        if pm_builtins::is_protected_surface(panel_id) {
+            return Vec::new();
+        }
         self.extensions
             .v4_panel_headers
             .iter()
@@ -3342,7 +3664,7 @@ fn wait_ticket(
 /// Every v4 extension's items for a menu, as native entries (off the main
 /// thread). Realms gather in parallel, each giving its contributions 100 ms;
 /// one 150 ms deadline covers them all.
-fn v4_menu_items(runtime: &pm_builtins::Builtins, location: &str, ctx: &Value) -> Vec<MenuEntry> {
+pub(crate) fn v4_menu_items(runtime: &pm_builtins::Builtins, location: &str, ctx: &Value) -> Vec<MenuEntry> {
     let mut entries = vec![];
     let tickets = runtime.gather_menus(location, ctx);
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);

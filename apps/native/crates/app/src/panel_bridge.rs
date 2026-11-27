@@ -460,7 +460,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
         }
         "set_panel_layout" => {
             target.with(cx, |_, editor, _, cx| {
-                let (docks, name) = layout_plan(editor, args, cx)?;
+                let (docks, name) = layout_plan(args, |id| registered(editor, id, cx)).map_err(|error| Error::invalid(error.to_string()))?;
                 let (id, name) = editor
                     .update(cx, |e, cx| e.save_agent_layout(&name, docks, cx))
                     .map_err(|e| Error::invalid(e.to_string()))?;
@@ -1029,43 +1029,118 @@ fn workspace(
     })
 }
 
+/// Apply the SDK's panel snapshot using existing dock locations and placement rules.
+pub(crate) fn extension_layout_plan(
+    args: &Value,
+    current: &layout::Layout,
+    panels: &layout::Panels,
+) -> anyhow::Result<(Vec<layout::Dock>, String)> {
+    if args.get("docks").is_some() {
+        return layout_plan(args, |id| panels.contains(id));
+    }
+    let open = args["openPanels"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Provide docks or an openPanels array."))?;
+    let mut requested = Vec::new();
+    for id in open {
+        let id = id.as_str().unwrap_or_default();
+        validate_dock_panel(id, |id| panels.contains(id) && !requested.contains(&id))?;
+        requested.push(id);
+    }
+    let mut next = current.clone();
+    let closing: Vec<_> = current
+        .open_panels()
+        .into_iter()
+        .filter(|id| !requested.contains(id))
+        .collect();
+    for id in closing {
+        next.close_panel(id)?;
+    }
+    for &id in &requested {
+        next.restore_panel(id, panels)?;
+    }
+    if let Some(shown) = args.get("shownPanels") {
+        for id in shown
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Use an array for shownPanels."))?
+        {
+            let id = id.as_str().unwrap_or_default();
+            validate_dock_panel(id, |id| requested.contains(&id))?;
+            next.show_panel(id, panels)?;
+        }
+    }
+    validate_workspace_docks(&next.docks)?;
+    let name = args["name"].as_str().unwrap_or("Extension Workspace");
+    Ok((next.docks, name.to_owned()))
+}
+
+fn validate_dock_panel(id: &str, available: impl FnOnce(&str) -> bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !id.eq_ignore_ascii_case("toolbar") && !pm_builtins::is_protected_surface(id),
+        "Settings and the toolbar cannot be placed in docks."
+    );
+    anyhow::ensure!(
+        available(id),
+        "Use registered panel IDs once. Load new extensions before arranging their panels."
+    );
+    Ok(())
+}
+
+fn validate_workspace_docks(docks: &[layout::Dock]) -> anyhow::Result<()> {
+    let viewer_centered = docks.iter().any(|dock| {
+        dock.id == "center"
+            && dock
+                .groups
+                .iter()
+                .any(|group| group.tabs.iter().any(|id| id == "viewer"))
+    });
+    let timeline_present = docks
+        .iter()
+        .flat_map(|dock| &dock.groups)
+        .flat_map(|group| &group.tabs)
+        .any(|id| id == "timeline");
+    anyhow::ensure!(
+        viewer_centered && timeline_present,
+        "Keep viewer in the center dock and include timeline."
+    );
+    Ok(())
+}
+
 /// set_panel_layout's checks (main's `setPanelLayout`): the docks and name
 /// of the new workspace.
-fn layout_plan(
-    editor: &Entity<Editor>,
+pub(crate) fn layout_plan(
     args: &Value,
-    cx: &mut App,
-) -> Result<(Vec<layout::Dock>, String)> {
+    registered: impl Fn(&str) -> bool,
+) -> anyhow::Result<(Vec<layout::Dock>, String)> {
     const DOCKS: [&str; 4] = ["left", "center", "bottom", "right"];
     let name = args["name"]
         .as_str()
         .map(str::trim)
         .filter(|n| !n.is_empty() && n.chars().count() <= 80)
-        .ok_or_else(|| Error::invalid("Name the new workspace (up to 80 characters)."))?;
+        .ok_or_else(|| anyhow::anyhow!("Name the new workspace (up to 80 characters)."))?;
     let mut seen_docks = Vec::new();
     let mut seen_panels: Vec<String> = Vec::new();
     let mut docks = Vec::new();
-    for raw in args["docks"].as_array().into_iter().flatten() {
+    for raw in args["docks"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Provide a docks array."))?
+    {
         let id = raw["id"].as_str().unwrap_or_default();
         if !DOCKS.contains(&id) || seen_docks.contains(&id) {
-            return Err(Error::invalid(
+            return Err(anyhow::anyhow!(
                 "Use each left, center, bottom or right dock once.",
             ));
         }
         seen_docks.push(id);
         let mut groups = Vec::new();
-        for panel in raw["panels"].as_array().into_iter().flatten() {
+        for panel in raw["panels"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Provide a panels array in the {id} dock."))?
+        {
             let pid = panel["id"].as_str().unwrap_or_default();
-            if !registered(editor, pid, cx) || seen_panels.iter().any(|p| p == pid) {
-                return Err(Error::invalid(
-                    "Use registered panel IDs once. Load new extensions before arranging their panels.",
-                ));
-            }
-            if pid == "toolbar" {
-                return Err(Error::invalid(
-                    "The toolbar lives in the titlebar; leave it out of the docks.",
-                ));
-            }
+            validate_dock_panel(pid, |id| {
+                registered(id) && !seen_panels.iter().any(|p| p == id)
+            })?;
             seen_panels.push(pid.into());
             let size = (panel["flex"] != true)
                 .then(|| panel["size"].as_f64())
@@ -1087,14 +1162,7 @@ fn layout_plan(
             collapsed: false,
         });
     }
-    let viewer_centred = docks
-        .iter()
-        .any(|d| d.id == "center" && d.groups.iter().any(|g| g.tabs[0] == "viewer"));
-    if !viewer_centred || !seen_panels.iter().any(|p| p == "timeline") {
-        return Err(Error::invalid(
-            "Keep viewer in the center dock and include timeline.",
-        ));
-    }
+    validate_workspace_docks(&docks)?;
     // Effect Controls sits below Project by default, as in the built-in layouts.
     if !seen_panels.iter().any(|p| p == "layer-effects")
         && let Some(dock) = docks
@@ -1683,5 +1751,57 @@ mod lease_tests {
         drop(lease);
         assert!(authorize_build(Some(&b), &args).is_err());
         assert!(authorize_build(None, &args).is_err());
+    }
+}
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn extension_workspace_layout_validates_docks_and_reserved_panels() {
+    let mut request = json!({"name":"Extension Workspace", "docks":[
+        {"id":"center","panels":[{"id":"viewer"}]},
+        {"id":"bottom","panels":[{"id":"timeline"}]}
+    ]});
+    let registered = |id: &str| matches!(id, "viewer" | "timeline" | "inspector");
+    let (docks, name) = layout_plan(&request, registered).unwrap();
+    assert_eq!(name, "Extension Workspace");
+    assert_eq!(docks[0].groups[0].active(), "viewer");
+    request["docks"][1]["panels"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({}));
+    for id in [
+        "settings",
+        "Settings",
+        "panel:settings.top",
+        "toolbar",
+        "Toolbar",
+    ] {
+        request["docks"][1]["panels"][1] = json!({"id":id});
+        let error = layout_plan(&request, |_| true).unwrap_err();
+        assert!(
+            error.to_string().contains("cannot be placed in docks"),
+            "{id}: {error}"
+        );
+    }
+    let panels = layout::Panels::new(vec![]);
+    let current = layout::Layout::preset(pm_shell::workspace::FALLBACK);
+    let snapshot =
+        json!({"openPanels":["viewer","timeline","inspector"], "shownPanels":["inspector"]});
+    let (docks, _) = extension_layout_plan(&snapshot, &current, &panels).unwrap();
+    assert_eq!(
+        docks
+            .iter()
+            .flat_map(|d| &d.groups)
+            .flat_map(|g| &g.tabs)
+            .count(),
+        3
+    );
+    for id in ["settings", "toolbar"] {
+        let snapshot = json!({"openPanels":["viewer","timeline",id]});
+        assert!(extension_layout_plan(&snapshot, &current, &panels).is_err());
+    }
+    for id in ["missing-panel", "viewer"] {
+        request["docks"][1]["panels"][1] = json!({"id":id});
+        assert!(layout_plan(&request, registered).is_err(), "{id}");
     }
 }

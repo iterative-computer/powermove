@@ -86,6 +86,7 @@ pub enum Outbound {
 }
 pub type Sink = Rc<dyn Fn(Outbound, &mut App)>;
 pub struct ProjectLibrary {
+    pub(crate) slot_owner: Option<WeakEntity<crate::session::Controller>>,
     pub controller: LibraryController<KernelLibraryPort>,
     delete_toast: Option<Entity<crate::action_toast::ToastView>>,
     sink: Sink,
@@ -230,6 +231,7 @@ impl ProjectLibrary {
         controller.query.sort = Sort::from_key(&setting("projectsSort"));
         let layout = Layout::from_key(&setting("projectsView"));
         Self {
+            slot_owner: None,
             controller,
             delete_toast: None,
             sink,
@@ -666,16 +668,33 @@ impl ProjectLibrary {
                 None => serde_json::json!({"separator": true}),
             })
             .collect();
-        let this = cx.entity();
-        crate::v4_native::menu(window, &options, cx, move |index, cx| {
+        let this = cx.entity().downgrade();
+        let choose = move |index: Option<usize>, cx: &mut App| {
             let chosen = index.and_then(|i| actions.get(i).copied().flatten());
             if let Some(action) = chosen {
-                this.update(cx, |v, cx| {
+                let _ = this.update(cx, |v, cx| {
                     let _ = v.controller.menu(&id, action);
                     v.pump(cx);
                 });
             }
-        });
+        };
+        let project_id = row.id.clone();
+        if let Some(owner) = self.slot_owner.as_ref().and_then(WeakEntity::upgrade)
+            && owner.read(cx).extensions_listen()
+        {
+            let at = window.mouse_position();
+            owner.update(cx, |v, cx| {
+                v.extension_rows_menu(
+                    vec![("home:context", json!({"projectId": project_id}))],
+                    &options,
+                    (at.x.into(), at.y.into()),
+                    Box::new(choose),
+                    cx,
+                );
+            });
+        } else {
+            crate::v4_native::menu(window, &options, cx, choose);
+        }
     }
 }
 /// Development builds: an on-screen review runs a row's context-menu choice
@@ -2162,6 +2181,8 @@ impl Render for ProjectLibrary {
                 Some(switch) => switch.clone().into_any_element(),
                 None => view_switch.into_any_element(),
             });
+        let [header_slots, top_slots, bottom_slots] = ["home.header", "home.top", "home.bottom"]
+            .map(|id| crate::builtins::window_slot(self.slot_owner.as_ref(), id, &t, window, cx));
         let header = div()
             .flex()
             .flex_col()
@@ -2170,7 +2191,8 @@ impl Render for ProjectLibrary {
             .px(px(INSET))
             .pb(px(t.space.md))
             .child(title_row)
-            .child(controls_row);
+            .child(controls_row)
+            .children(header_slots);
         // Body: cards or rows; an empty section says so with v1's copy.
         let width = (sheet - 2. * INSET).max(0.);
         // As many cards of the usual width as fit when four or more do;
@@ -2399,7 +2421,9 @@ impl Render for ProjectLibrary {
             .elevated(&t, Elevation::Panel)
             .overflow_hidden()
             .child(header)
-            .child(body);
+            .children(top_slots)
+            .child(body)
+            .children(bottom_slots);
         let menu = self.menu_overlay(&kit, cx);
         div()
             .id("home")

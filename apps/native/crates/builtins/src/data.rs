@@ -802,7 +802,12 @@ impl KernelData for Data {
                     let p = p.as_ref().ok_or("No open project")?;
                     // The timeline's workspace facts too: a chrome change
                     // alone moves no document revision.
-                    json!({"project":p.project,"document":p.snapshot.doc_id.to_string(),"revision":p.revision(),"layerNumbers":crate::models::layer_numbers(p),"timelineView":timeline_view(p)})
+                    let timeline_chrome = p
+                        .workspace
+                        .get("chrome")
+                        .and_then(|c| c.get("timeline"))
+                        .map(wire);
+                    json!({"project":p.project,"document":p.snapshot.doc_id.to_string(),"revision":p.revision(),"layerNumbers":crate::models::layer_numbers(p),"timelineView":timeline_view(p),"timelineChrome":timeline_chrome})
                 }
                 Query::Selection => {
                     let p = p.as_ref().ok_or("No open project")?;

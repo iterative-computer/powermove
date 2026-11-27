@@ -206,23 +206,25 @@ impl TargetPool {
         self.playback_budget > 0
     }
 
+    /// The pool's assigned playback share, when playback retention is active.
+    pub fn playback_budget(&self) -> Option<u64> {
+        self.playback_retention().then_some(self.playback_budget)
+    }
+
     fn retention_budget(&self) -> u64 {
         if !self.playback_retention() {
             return self.free_budget;
         }
-        let retired = self
-            .retired
-            .iter()
-            .filter(|(_, done)| !complete(done))
-            .map(|(bytes, _)| *bytes)
-            .sum::<u64>();
+        // A discarded target's submitted commands still own its storage.
+        // Count that in usage, but keep the reusable working set: trimming
+        // it to compensate would force those same allocations next frame.
         let checked_out = self
             .retained
             .iter()
             .filter(|(texture, _)| !self.free.iter().any(|(_, t, _)| &t.texture == *texture))
             .map(|(_, (bytes, _))| *bytes)
             .sum::<u64>();
-        self.playback_budget.saturating_sub(retired + checked_out)
+        self.playback_budget.saturating_sub(checked_out)
     }
 
     pub const FREE_BUDGET: u64 = 48 << 20;
@@ -425,7 +427,6 @@ impl TargetPool {
     /// Frees the idle targets unused longest until at most `budget` bytes
     /// and [`Self::MAX_FREE`] targets are idle.
     fn evict_over(&mut self, budget: u64) {
-        // Retaining one more old generation can lower the remaining budget.
         while self.free_bytes > budget.min(self.retention_budget_or_unbounded(budget))
             || self.free.len() > Self::MAX_FREE
         {
@@ -678,6 +679,33 @@ mod tests {
         }
         pool.set_playback_budget(0);
         assert!(pool.bytes() <= TargetPool::FREE_BUDGET);
+    }
+
+    #[test]
+    fn retired_playback_targets_do_not_shrink_the_reusable_working_set() {
+        let gpu = crate::device::Gpu::new("queue-ordered target reuse").unwrap();
+        let mut pool = TargetPool::new();
+        let bytes = 1920 * 1080 * 8;
+        let take =
+            |pool: &mut TargetPool| pool.take_working(&gpu.device, 1920, 1080, Precision::Float16);
+        pool.set_playback_budget(5 * bytes);
+        pool.begin_frame();
+        let targets = (0..5).map(|_| take(&mut pool)).collect::<Vec<_>>();
+        gpu.queue.submit([]);
+        pool.end_submitted_frame(&gpu.queue, targets);
+        let stale = take(&mut pool);
+        pool.release(stale);
+        assert_eq!(pool.retired_bytes(), bytes);
+        pool.set_playback_budget(4 * bytes);
+        assert_eq!(pool.idle(), 4);
+
+        pool.begin_frame();
+        let targets = (0..4).map(|_| take(&mut pool)).collect::<Vec<_>>();
+        assert_eq!(pool.created(), 5);
+        assert_eq!(pool.eviction_bytes, 0);
+        gpu.queue.submit([]);
+        pool.end_submitted_frame(&gpu.queue, targets);
+        assert_eq!(pool.idle(), 4);
     }
 
     #[test]

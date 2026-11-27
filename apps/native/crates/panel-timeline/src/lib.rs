@@ -119,8 +119,39 @@ pub fn focused_group_for_published(published: &Published) -> Option<String> {
         .then(|| id.to_owned())
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TimelineChrome {
+    pub hide_type_badges: bool,
+    pub toolbar_density: ToolbarDensity,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToolbarDensity {
+    #[default]
+    Normal,
+    Compact,
+    Comfortable,
+}
+
+impl TimelineChrome {
+    pub fn from_workspace(workspace: &pm_model::Value) -> Self {
+        let chrome = workspace.get("chrome").and_then(|c| c.get("timeline"));
+        let field = |name| chrome.and_then(|c| c.get(name));
+        let toolbar_density = match field("toolbarDensity") {
+            Some(pm_model::Value::String(value)) if value == "compact" => ToolbarDensity::Compact,
+            Some(pm_model::Value::String(value)) if value == "comfortable" => ToolbarDensity::Comfortable,
+            _ => ToolbarDensity::Normal,
+        };
+        Self {
+            hide_type_badges: matches!(field("showTypeBadges"), Some(pm_model::Value::Bool(false))),
+            toolbar_density,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct TimelineModel {
+    pub chrome: TimelineChrome,
     pub index: Arc<TimelineIndex>,
     pub selection: Selection,
     /// Focused group layer id (double-clicked to edit like a composition).
@@ -254,6 +285,7 @@ impl TimelineModel {
                 crate::session::same_model_ui(seen, &published.ui_state.timeline)
             })
             && self.selection == published.selection
+            && self.chrome == TimelineChrome::from_workspace(&published.workspace)
     }
 
     fn follows_snapshot(&self, snapshot: &pm_kernel::Snapshot) -> bool {
@@ -273,6 +305,7 @@ impl TimelineModel {
         if new_document {
             *self = Self::default();
         }
+        self.chrome = TimelineChrome::from_workspace(&published.workspace);
         let selection_changed = self.selection.layers() != published.selection.layers();
         let keys_changed = self.selection.keys() != published.selection.keys()
             || self.selection.key_layers() != published.selection.key_layers();

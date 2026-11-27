@@ -12,6 +12,84 @@
 mod support;
 
 #[cfg(target_os = "macos")]
+fn legacy_text_uses_close_camera_density(fonts: Box<dyn pm_render::text::TextFonts>) {
+    use pm_protocol::{
+        color::Precision,
+        common::{Size, Ticks},
+    };
+    use pm_render::{
+        MapResolver, OutputKind, RenderRequest, Renderer,
+        plan::{Content, Source},
+    };
+    use serde_json::json;
+    use support::doc::{layer, load, no_fill, project, set};
+
+    let mut group = layer("group", "group", json!({}), 128., 128., 2.);
+    group["threeD"] = json!(true);
+    let mut text = layer(
+        "text",
+        "text",
+        json!({
+            "text":"Close camera", "font":"Helvetica", "size":20, "color":"#FFFFFF",
+            "align":"center"
+        }),
+        0.,
+        0.,
+        2.,
+    );
+    text["group"] = json!("group");
+    text["compat"] = json!(1);
+    set(&mut text, "scale.x", json!(25));
+    set(&mut text, "scale.y", json!(25));
+    set(&mut group, "rotation.y", json!(10));
+    let doc = load(&project(256, 256, 2., no_fill(), vec![group, text]));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_text_fonts(Some(fonts));
+    let mut camera = pm_eval::space3d::default_camera_25d(256., 256.);
+    camera.position[2] /= 9.;
+    renderer.set_plane_camera(Some(camera));
+    let mut request = RenderRequest::at_scale(Size::new(256, 256), 1., Precision::Float16);
+    request.output_kind = OutputKind::Final;
+    let density = |renderer: &mut Renderer, request: &RenderRequest| {
+        let (plan, failures) = renderer
+            .plan(
+                &doc,
+                "Ptest-root",
+                Ticks::ZERO,
+                request,
+                &MapResolver::default(),
+            )
+            .unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+        let draw = &plan.draws[0];
+        let Content::Placed(placed) = &draw.content else {
+            panic!("expected projective text");
+        };
+        let Content::Texture {
+            source: Source::Text(text),
+            ..
+        } = &placed.content
+        else {
+            panic!("expected a text raster");
+        };
+        // Undo the authored 25% scale to measure the actual raster density.
+        let local_width = draw.matrix[0].abs() / 0.25;
+        f64::from(text.width()) / local_width
+    };
+    let exact = density(&mut renderer, &request);
+    assert!(
+        (1.5..4.0).contains(&exact),
+        "legacy text painted at {exact}×"
+    );
+    request.output_kind = OutputKind::Preview;
+    request.viewer = true;
+    request.sampling = pm_render::sampling::Sampling::Playback;
+    let preview = density(&mut renderer, &request);
+    assert!(preview >= exact, "named camera preview fell to {preview}×");
+    println!("25%-scale legacy text paints at {exact:.3}× settled and {preview:.3}× in playback");
+}
+
+#[cfg(target_os = "macos")]
 fn main() {
     use pm_protocol::color::Precision;
     use pm_render::text::gpu::Coverage;
@@ -29,6 +107,7 @@ fn main() {
         frame_prefix_large_plane_groups_under_adjustment();
         return;
     }
+    legacy_text_uses_close_camera_density(fonts());
     frame_prefix_large_plane_groups_under_adjustment();
     packed_glow_specialization_preserves_gpu_bits();
     density_replay_keeps_compat_passthrough_layers(fonts());

@@ -413,7 +413,13 @@ impl Controller {
         };
         let editor = Some(self.host.borrow().window.clone());
         let kernel = self.kernel.clone();
-        let library = cx.new(|cx| ProjectLibrary::new(port, rx, tokens, sink, editor, kernel, cx));
+        let owner = cx.entity();
+        let library = cx.new(|cx| {
+            cx.observe(&owner, |_, _, cx| cx.notify()).detach();
+            let mut library = ProjectLibrary::new(port, rx, tokens, sink, editor, kernel, cx);
+            library.slot_owner = Some(owner.downgrade());
+            library
+        });
         self.library = Some(library.clone());
         Some(library)
     }

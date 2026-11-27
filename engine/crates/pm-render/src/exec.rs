@@ -541,12 +541,32 @@ impl Exec<'_> {
                         // shares its parent's pixel space: it renders only
                         // the region, drawn 1:1.
                         let group = child.group;
-                        let child_region = if group { region } else { None };
+                        let accumulate = matches!(source, Source::Accumulate(_));
+                        let child_region = if group {
+                            if self.pipelines.direct_group_target
+                                && !self.final_frame
+                                && self.recycle
+                                && !self.depth_id
+                                && !accumulate
+                                && r.plane.is_none()
+                                && r.level2.is_none()
+                                && child.view.is_none()
+                                && (child.width, child.height) == (plan.width, plan.height)
+                            {
+                                crate::composite::exec::group_region(
+                                    draw, child, *uv, *alpha, region,
+                                )
+                                .or(region)
+                            } else {
+                                region
+                            }
+                        } else {
+                            None
+                        };
                         // The same composition planned the same way earlier
                         // in this frame: its target holds exactly the pixels
                         // rendering it again would draw (never a group pass:
                         // `comp_twins` lists nested compositions only).
-                        let accumulate = matches!(source, Source::Accumulate(_));
                         let cache_group = group && !accumulate && self.groups.is_some();
                         if cache_group
                             && let Some((target, revision)) =

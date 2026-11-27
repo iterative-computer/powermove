@@ -3,8 +3,8 @@
 //! Images come from `pm-media`'s readers at their native depth; video
 //! frames from the decode service, selected by section 5 rule 7. Both reach
 //! the GPU without copies through `pm-gpu`'s decode-in import, are
-//! normalized there (section 13), and are converted here by the source pass
-//! (`shaders/source.wgsl`): chroma upsampling, matrix, transfer and
+//! normalized there or directly in the source pass (section 13). The source
+//! pass (`shaders/source.wgsl`) handles chroma upsampling, matrix, transfer and
 //! primaries into the working encoding, and premultiplication.
 
 use pm_text::file_version::FileVersion;
@@ -16,7 +16,7 @@ use pm_color::alpha::{shader_code, source_plan};
 use pm_color::chroma::{Factors, Filter, filters, sample_origin};
 use pm_color::ycbcr::Matrix;
 use pm_gpu::decode_in::deinterlace::{CodeSpace, Deinterlacer, FieldPass};
-use pm_gpu::decode_in::{DecodeImporter, Normalized};
+use pm_gpu::decode_in::{DecodeImporter, ImportedFrame, Normalized};
 use pm_gpu::{Target, working_format};
 use pm_media::clip::ClipTiming;
 use pm_media::decode::scrub::{ScrubStats, ViewerDecode, Want};
@@ -1210,7 +1210,7 @@ fn convert_format(
         queue,
         pipelines,
         encoder,
-        normalized,
+        SourcePlanes::Normalized(normalized),
         color,
         working,
         precision,
@@ -1223,13 +1223,18 @@ fn convert_format(
     )
 }
 
+enum SourcePlanes<'a> {
+    Normalized(&'a Normalized),
+    ProgressiveYuv(&'a ImportedFrame, [f32; 5]),
+}
+
 #[allow(clippy::too_many_arguments)]
 fn convert_format_scaled(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     pipelines: &Pipelines,
     encoder: &mut wgpu::CommandEncoder,
-    normalized: &Normalized,
+    planes: SourcePlanes<'_>,
     color: &SourceColor,
     working: WorkingEncoding,
     precision: Precision,
@@ -1240,14 +1245,19 @@ fn convert_format_scaled(
     packed: Option<&pm_media::frame::PixelFormat>,
     size: Option<(u32, u32)>,
 ) -> Target {
-    let (luma, chroma, chroma_info) = match normalized {
-        Normalized::Rgb { rgba } => (rgba, None, None),
-        Normalized::YCbCr { luma, chroma } => (
-            luma,
-            Some(chroma),
-            Some((factors, chroma.width(), chroma.height())),
+    let (luma, chroma, cr, codes) = match planes {
+        SourcePlanes::Normalized(Normalized::Rgb { rgba }) => (rgba, None, None, None),
+        SourcePlanes::Normalized(Normalized::YCbCr { luma, chroma }) => {
+            (luma, Some(chroma), None, None)
+        }
+        SourcePlanes::ProgressiveYuv(frame, codes) => (
+            &frame.textures[0],
+            Some(&frame.textures[1]),
+            frame.textures.get(2),
+            Some(codes),
         ),
     };
+    let chroma_info = chroma.map(|t| (factors, t.width(), t.height()));
     let (w, h) = size.unwrap_or((luma.width(), luma.height()));
     let out = reuse
         .filter(|t| t.width() == w && t.height() == h && t.format() == format)
@@ -1262,6 +1272,11 @@ fn convert_format_scaled(
             )
         });
     let mut uniform = source_uniform(color, working, precision, chroma_info);
+    if let Some([max, y_off, y_div, c_off, c_div]) = codes {
+        uniform.a[0] = if cr.is_some() { 4 } else { 3 };
+        uniform.codes = [max, y_off, y_div, c_off];
+        uniform.chroma_divisor[0] = c_div;
+    }
     if let Some(packed) = packed {
         // Packed stills normalize in this same pass. m0 is otherwise unused
         // for RGB; preserve the decode-in shader's exact code-value arithmetic.
@@ -1297,6 +1312,7 @@ fn convert_format_scaled(
     // Both bindings accept an unfilterable float texture, so reuse its view.
     let chroma_view =
         chroma.map_or_else(|| luma_view.clone(), |c| c.create_view(&Default::default()));
+    let cr_view = cr.map_or_else(|| luma_view.clone(), |c| c.create_view(&Default::default()));
     let layout = pipelines.source_layout(format);
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("pm source"),
@@ -1317,6 +1333,10 @@ fn convert_format_scaled(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: wgpu::BindingResource::TextureView(&out.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&cr_view),
             },
         ],
     });
@@ -1370,6 +1390,23 @@ struct FrameKey {
     edge: Option<u32>,
 }
 
+struct ConvertedFrame {
+    target: Target,
+    revision: u64,
+    entry_epoch: u64,
+}
+
+fn reusable_video_target(target: &Target, w: u32, h: u32, format: wgpu::TextureFormat) -> bool {
+    target.width() == w
+        && target.height() == h
+        && target.format() == format
+        && target.texture.mip_level_count() == 1
+        && target
+            .texture
+            .usage()
+            .contains(pm_gpu::target::working_usage())
+}
+
 /// The frame cache of a renderer without a lease share: export jobs,
 /// headless renders, and the viewer before the host grants a lease.
 pub const DEFAULT_FRAME_CACHE: usize = 64 << 20;
@@ -1395,7 +1432,7 @@ fn still_share(lease: MediaLease, look_ahead: bool, wanted: bool) -> (MediaLease
 }
 
 /// Media state kept across frames: decoded and converted stills, video
-/// sources and sessions, and the last converted frame of each source.
+/// sources and sessions, and a working set of converted video frames.
 pub struct MediaCache {
     pool: FramePool,
     service: Arc<DecodeService>,
@@ -1429,10 +1466,8 @@ pub struct MediaCache {
     pub(crate) still_pending: bool,
     /// What says the frame being drawn is superseded (viewer frames).
     pub(crate) interrupt: Option<Interrupt>,
-    /// Converted video frames replaced during the current render, and those
-    /// replaced earlier (free to overwrite: every read of them is
-    /// submitted). A UHD frame converts into 66 MB (`rgba16float`).
-    retired_frames: Vec<Target>,
+    /// Converted video frames no longer in the keyed cache. Their reads
+    /// are submitted, so their storage can be overwritten on this queue.
     free_frames: Vec<Target>,
     importer: Option<DecodeImporter>,
     images: BTreeMap<ImageKey, Target>,
@@ -1460,9 +1495,9 @@ pub struct MediaCache {
     /// opened: a file replaced at the same path is reopened.
     sources: BTreeMap<PathBuf, ((u64, u128), Arc<MediaSource>)>,
     source_seen: BTreeMap<PathBuf, std::time::Instant>,
-    frames: BTreeMap<FrameKey, (Target, u64)>,
+    frames: BTreeMap<FrameKey, ConvertedFrame>,
     frame_epoch: u64,
-    frame_seen: BTreeMap<PathBuf, u64>,
+    submitted_frame_epoch: u64,
     /// Display streams read by recent frames. Background preparation must
     /// not seek their pooled decoder ahead of the playing picture.
     video_seen: HashMap<(PathBuf, u64), u64>,
@@ -1534,7 +1569,6 @@ impl MediaCache {
             stand_ins: Vec::new(),
             still_pending: false,
             interrupt: None,
-            retired_frames: Vec::new(),
             free_frames: Vec::new(),
             importer: DecodeImporter::new(device).ok(),
             images: BTreeMap::new(),
@@ -1553,7 +1587,7 @@ impl MediaCache {
             source_seen: BTreeMap::new(),
             frames: BTreeMap::new(),
             frame_epoch: 0,
-            frame_seen: BTreeMap::new(),
+            submitted_frame_epoch: 0,
             video_seen: HashMap::new(),
             scrub_last: BTreeMap::new(),
             next_texture_revision: 0,
@@ -1938,7 +1972,6 @@ impl MediaCache {
     }
 
     fn source(&mut self, path: &Path) -> Result<Arc<MediaSource>, MediaFailure> {
-        self.frame_seen.insert(path.to_path_buf(), self.frame_epoch);
         self.source_seen
             .insert(path.to_path_buf(), std::time::Instant::now());
         self.drain_prepared();
@@ -2104,6 +2137,40 @@ impl MediaCache {
         Ok(Some((source, fetched.frame)))
     }
 
+    fn cached_video_frame(&mut self, key: &FrameKey) -> Option<Target> {
+        let frame = self.frames.get_mut(key)?;
+        frame.entry_epoch = self.frame_epoch;
+        pm_perf::bump(pm_perf::Counter::MediaCacheHits);
+        Some(frame.target.clone())
+    }
+
+    fn take_video_target(
+        &mut self,
+        key: &FrameKey,
+        w: u32,
+        h: u32,
+        format: wgpu::TextureFormat,
+    ) -> Option<Target> {
+        let matches = |target: &Target| reusable_video_target(target, w, h, format);
+        if let Some(i) = self.free_frames.iter().position(matches) {
+            return Some(self.free_frames.swap_remove(i));
+        }
+        // The earlier commands were submitted on this queue. All reads in
+        // this frame still need their original texels, even when two layers
+        // use different timestamps of the same file.
+        let replaced = self
+            .frames
+            .iter()
+            .filter(|(_, frame)| {
+                frame.entry_epoch < self.frame_epoch
+                    && frame.entry_epoch <= self.submitted_frame_epoch
+                    && matches(&frame.target)
+            })
+            .min_by_key(|(old, frame)| (old.path != key.path, frame.entry_epoch))
+            .map(|(old, _)| old.clone())?;
+        self.frames.remove(&replaced).map(|frame| frame.target)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn video_inner(
         &mut self,
@@ -2122,10 +2189,13 @@ impl MediaCache {
         sequence: bool,
         source_exact: bool,
     ) -> Result<Option<Target>, MediaFailure> {
-        let first_use = self.frame_seen.get(path).copied() != Some(self.frame_epoch);
         let src = self.source(path)?;
         if !export && !source_exact {
-            self.service.note_display(src.id, instance);
+            if self.playback.is_some() {
+                self.service.note_active_display(src.id, instance);
+            } else {
+                self.service.note_display(src.id, instance);
+            }
             self.video_seen
                 .insert((path.to_path_buf(), instance), self.frame_epoch);
         }
@@ -2163,6 +2233,7 @@ impl MediaCache {
         } else {
             None
         };
+        let hdr_light = self.hdr_light;
         let key_of = |frame: usize| FrameKey {
             path: path.to_path_buf(),
             frame,
@@ -2171,13 +2242,12 @@ impl MediaCache {
             export,
             reading: reading_key,
             linear: working == WorkingEncoding::LinearLight,
-            hdr_light: self.hdr_light,
+            hdr_light,
             edge,
         };
-        // The newest converted frame of the source (a paused redraw).
-        if let Some((t, _)) = self.frames.get(&key_of(n)) {
-            pm_perf::bump(pm_perf::Counter::MediaCacheHits);
-            return Ok(Some(t.clone()));
+        // A converted source frame (e.g. a paused redraw or a held frame).
+        if let Some(target) = self.cached_video_frame(&key_of(n)) {
+            return Ok(Some(target));
         }
         // Export frames, and deinterlaced frames (the current frame and its
         // neighbors: random access includes neighboring fields), decode on
@@ -2268,9 +2338,8 @@ impl MediaCache {
         };
         // A stand-in may be the frame converted last.
         let key = key_of(n);
-        if let Some((t, _)) = self.frames.get(&key) {
-            pm_perf::bump(pm_perf::Counter::MediaCacheHits);
-            return Ok(Some(t.clone()));
+        if let Some(target) = self.cached_video_frame(&key) {
+            return Ok(Some(target));
         }
         pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
         let color = video_color(
@@ -2285,7 +2354,7 @@ impl MediaCache {
         if self.deinterlacer.is_none() && fields.is_some() {
             self.deinterlacer = Some(Deinterlacer::new(device));
         }
-        let preview_edge = key_of(n).edge;
+        let preview_edge = key.edge;
         let compact = preview_edge.is_some()
             && frame.format.bits <= 8
             && !self.hdr_light
@@ -2302,11 +2371,12 @@ impl MediaCache {
         // submitted) is overwritten instead of allocating another.
         let native = (frame.format.width as u32, frame.format.height as u32);
         let (w, h) = preview_size(native, preview_edge);
-        let mut reuse = self
-            .free_frames
-            .iter()
-            .position(|t| t.width() == w && t.height() == h && t.format() == format)
-            .map(|i| self.free_frames.swap_remove(i));
+        let reuse =
+            if self.playback.is_some() && !export && Geometry::of(&reading, (w, h)).is_identity() {
+                self.take_video_target(&key, w, h, format)
+            } else {
+                None
+            };
         let importer = self.importer.as_ref().ok_or_else(|| {
             MediaFailure::Failed("the device cannot import decoded frames".into())
         })?;
@@ -2323,6 +2393,10 @@ impl MediaCache {
         let mut held = vec![];
         // The importer's normalizations to hand back once recorded.
         let mut recycled = vec![];
+        let codes = fields
+            .is_none()
+            .then(|| imported.progressive_yuv_codes(range))
+            .flatten();
         let normalized = match &fields {
             Some(f) => {
                 let prev = import(&f.prev)?;
@@ -2355,44 +2429,27 @@ impl MediaCache {
                     )
                     .map_err(|e| MediaFailure::Failed(e.to_string()))?;
                 recycled.extend([np, nc, nn]);
-                out
+                Some(out)
             }
+            None if codes.is_some() => None,
             // Only the source pass reads it, by texel: luma without alpha
             // goes to R32Float (the same loaded values; bwdif above keeps
             // RGBA32Float).
-            None => importer
-                .normalize_luma_as(queue, encoder, &imported, range)
-                .map_err(|e| MediaFailure::Failed(e.to_string()))?,
+            None => Some(
+                importer
+                    .normalize_luma_as(queue, encoder, &imported, range)
+                    .map_err(|e| MediaFailure::Failed(e.to_string()))?,
+            ),
         };
-        if reuse.is_none()
-            && first_use
-            && self.playback.is_some()
-            && !export
-            && Geometry::of(&reading, (w, h)).is_identity()
-        {
-            // The previous render's reads have been submitted, and this
-            // render has not used the source yet. Overwrite the last
-            // picture on the same queue without retaining a second UHD
-            // texture. A second read in this render needs distinct storage.
-            let replaced = self.frames.iter().find_map(|(old, (target, _))| {
-                (old.path == key.path
-                    && old.precision == key.precision
-                    && old.export == key.export
-                    && old.linear == key.linear
-                    && old.hdr_light == key.hdr_light
-                    && target.width() == w
-                    && target.height() == h
-                    && target.format() == format)
-                    .then(|| old.clone())
-            });
-            reuse = replaced.and_then(|old| self.frames.remove(&old).map(|(target, _)| target));
-        }
         let converted = convert_format_scaled(
             device,
             queue,
             pipelines,
             encoder,
-            &normalized,
+            match codes {
+                Some(codes) => SourcePlanes::ProgressiveYuv(&imported, codes),
+                None => SourcePlanes::Normalized(normalized.as_ref().expect("normalized above")),
+            },
             &color,
             working,
             precision,
@@ -2403,7 +2460,9 @@ impl MediaCache {
             None,
             Some((w, h)),
         );
-        if fields.is_none() {
+        if fields.is_none()
+            && let Some(normalized) = normalized
+        {
             importer.recycle(normalized);
         }
         for n in recycled {
@@ -2426,24 +2485,15 @@ impl MediaCache {
         };
         drop(imported);
         drop(held);
-        // Keep only the newest frame per source and precision. The older
-        // one may still be read by this render: it is reused from the next.
-        let mut retired = Vec::new();
-        self.frames.retain(|k, (t, _)| {
-            let keep = k.path != key.path
-                || k.precision != key.precision
-                || k.export != key.export
-                || k.linear != key.linear
-                || k.hdr_light != key.hdr_light;
-            if !keep {
-                retired.push(t.clone());
-            }
-            keep
-        });
-        self.retired_frames.extend(retired);
         self.next_texture_revision += 1;
-        self.frames
-            .insert(key, (target.clone(), self.next_texture_revision));
+        self.frames.insert(
+            key,
+            ConvertedFrame {
+                target: target.clone(),
+                revision: self.next_texture_revision,
+                entry_epoch: self.frame_epoch,
+            },
+        );
         self.recount();
         Ok(Some(target))
     }
@@ -2569,24 +2619,32 @@ impl MediaCache {
 
     pub fn trim_frames(&mut self, budget: u64) {
         self.frame_budget = budget;
-        self.free_frames.clear();
-        self.retired_frames.clear();
         // The frames the last render read stay (the next frame of a drag
         // draws the same clip frame, only moved; a 6K source's one frame is
         // larger than the whole budget), unless memory is critically short:
         // what one frame draws is the bound, and idle release drops them.
         let keep = (!self.image_pressure).then_some(self.frame_epoch);
-        while self.frame_bytes() > budget {
+        let mut bytes = self.frame_bytes();
+        while bytes > budget {
+            if let Some(target) = self.free_frames.pop() {
+                bytes -= target.bytes();
+                continue;
+            }
             let Some(key) = self
                 .frames
-                .keys()
-                .filter(|k| keep.is_none() || self.frame_seen.get(&k.path).copied() != keep)
-                .min_by_key(|k| self.frame_seen.get(&k.path).copied().unwrap_or(0))
-                .cloned()
+                .iter()
+                .filter(|(_, frame)| Some(frame.entry_epoch) != keep)
+                .min_by_key(|(_, frame)| frame.entry_epoch)
+                .map(|(key, _)| key.clone())
             else {
                 break;
             };
-            self.frames.remove(&key);
+            bytes -= self
+                .frames
+                .remove(&key)
+                .expect("selected above")
+                .target
+                .bytes();
         }
         self.recount();
     }
@@ -2596,13 +2654,11 @@ impl MediaCache {
     }
 
     pub fn frame_bytes(&self) -> u64 {
-        self.frames.values().map(|(t, _)| t.bytes()).sum::<u64>()
-            + self
-                .retired_frames
-                .iter()
-                .chain(&self.free_frames)
-                .map(Target::bytes)
-                .sum::<u64>()
+        self.frames
+            .values()
+            .map(|frame| frame.target.bytes())
+            .sum::<u64>()
+            + self.free_frames.iter().map(Target::bytes).sum::<u64>()
     }
 
     /// A drag frame is drawing (PM_FIX_VIDEO2's scrub-only retention).
@@ -2621,8 +2677,7 @@ impl MediaCache {
         self.bytes = self
             .images
             .values()
-            .chain(self.frames.values().map(|(target, _)| target))
-            .chain(&self.retired_frames)
+            .chain(self.frames.values().map(|frame| &frame.target))
             .chain(&self.free_frames)
             .map(Target::bytes)
             .sum();
@@ -2634,7 +2689,7 @@ impl MediaCache {
     pub(crate) fn texture_revision(&self, texture: &wgpu::Texture) -> Option<u64> {
         self.frames
             .values()
-            .find_map(|(target, revision)| (&target.texture == texture).then_some(*revision))
+            .find_map(|frame| (&frame.target.texture == texture).then_some(frame.revision))
     }
 
     /// Changes whenever a display frame a scrub asked for has decoded,
@@ -2832,26 +2887,33 @@ impl MediaCache {
         self.still_pending = false;
         self.image_over = None;
         let frame = self.frame_epoch;
-        self.frames.retain(|key, _| {
-            self.frame_seen
-                .get(&key.path)
-                .is_some_and(|seen| frame.wrapping_sub(*seen) <= 30)
+        self.frames.retain(|_, entry| {
+            // A render that returned before submission may have recorded
+            // the conversion without ever writing the texture.
+            if entry.entry_epoch > self.submitted_frame_epoch {
+                return false;
+            }
+            if frame.wrapping_sub(entry.entry_epoch) <= 30 {
+                return true;
+            }
+            self.free_frames.push(entry.target.clone());
+            false
         });
-        self.frame_seen
-            .retain(|_, seen| frame.wrapping_sub(*seen) <= 30);
         // A layer instance that stopped showing its clip gives back the
         // decode worker it kept (with its frames), even while other
         // instances keep the source busy.
+        let unseen_limit = if self.playback.is_some() { 4 } else { 30 };
         let gone: Vec<_> = self
             .video_seen
             .iter()
-            .filter(|(_, seen)| frame.wrapping_sub(**seen) > 30)
+            .filter(|(_, seen)| frame.wrapping_sub(**seen) > unseen_limit)
             .map(|(key, _)| key.clone())
             .collect();
         for (path, instance) in gone {
             self.video_seen.remove(&(path.clone(), instance));
             if let Some((_, source)) = self.sources.get(&path) {
                 self.viewer.release_instance(source.id, instance);
+                self.service.release_display_instance(source.id, instance);
             }
         }
         self.recount();
@@ -2901,10 +2963,9 @@ impl MediaCache {
         self.still_prepared_at = None;
         self.stills.set_limit(0);
         self.frames.clear();
-        self.retired_frames.clear();
         self.free_frames.clear();
-        self.frame_seen.clear();
         self.video_seen.clear();
+        self.service.set_active_display([]);
         self.viewer.release(None);
         self.source_viewer.release(None);
         if keep.is_empty() {
@@ -2948,8 +3009,8 @@ impl MediaCache {
     }
 
     /// After a render's commands are submitted: releases CoreVideo texture
-    /// cache entries no longer in use, makes converted frames this render
-    /// replaced free for reuse (two are kept), notes a frame whose own
+    /// cache entries no longer in use, marks the converted frames safe for
+    /// queue-ordered reuse, notes a frame whose own
     /// stills exceeded the image budget, and brings the stills back within
     /// the budget: the frame before's that this one did not read go first,
     /// and under critical memory pressure this frame's too (nothing is being
@@ -2969,14 +3030,19 @@ impl MediaCache {
         let budget = self.effective_image_budget();
         self.image_over = (current > budget).then_some((current, budget));
         self.evict_images(if self.image_pressure { u64::MAX } else { epoch });
+        self.submitted_frame_epoch = epoch;
+        let active_instances = self
+            .video_seen
+            .iter()
+            .filter(|(_, seen)| self.playback.is_some() && **seen == epoch)
+            .filter_map(|((path, instance), _)| {
+                self.sources
+                    .get(path)
+                    .map(|(_, source)| (source.id, *instance))
+            });
+        self.service.set_active_display(active_instances);
         if self.look_ahead && self.still_prepared_at.is_some() {
             self.apply_shares();
-        }
-        self.free_frames.append(&mut self.retired_frames);
-        let excess = self.free_frames.len().saturating_sub(2);
-        self.free_frames.drain(..excess);
-        while self.free_frames.iter().map(Target::bytes).sum::<u64>() > 16 << 20 {
-            self.free_frames.pop();
         }
         self.recount();
         if self.frame_bytes() > self.frame_budget {

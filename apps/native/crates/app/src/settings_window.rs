@@ -10,6 +10,11 @@ use pm_shell::settings_window::{Event, Section, SettingsChrome};
 use serde_json::{Value, json};
 use std::{cell::RefCell, rc::Rc};
 
+/// Settings follows the user's appearance and accessibility preferences.
+pub(crate) fn base_tokens(editor: &pm_design::Tokens) -> pm_design::Tokens {
+    pm_design::Tokens::new(editor.scheme, editor.accessibility)
+}
+
 thread_local! {
     /// The editor hosting the Settings window.
     static HOST: RefCell<Option<WeakEntity<Controller>>> = const { RefCell::new(None) };
@@ -511,4 +516,22 @@ pub(crate) fn show_page(page: &'static str, cx: &mut App) {
             })
         });
     });
+}
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn settings_use_base_tokens_with_an_extension_theme_active() {
+    use pm_design::{Accessibility, Scheme, Tokens};
+    pm_shell::theme::set(vec![("colors.accent".into(), 0x123456 as f64)]).unwrap();
+    let accessibility = Accessibility {
+        reduce_motion: true,
+        ..Default::default()
+    };
+    for scheme in [Scheme::Dark, Scheme::Light] {
+        let base = Tokens::new(scheme, accessibility);
+        let themed = pm_shell::theme::tokens(scheme, accessibility);
+        assert_ne!(themed.colors.accent, base.colors.accent);
+        assert_eq!(base_tokens(&themed), base);
+    }
+    pm_shell::theme::clear();
 }

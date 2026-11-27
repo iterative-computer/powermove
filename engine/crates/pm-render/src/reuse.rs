@@ -30,7 +30,7 @@ use std::sync::Arc;
 use pm_eval::{JsResult, Scope, node};
 use pm_model::{JsString, Node, NodeKind};
 
-use crate::plan::{Build, Draw, Quad};
+use crate::plan::{Build, Content, Draw, Quad};
 
 /// Counters of the reuse (tests and `compose_bench`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +72,7 @@ pub(crate) struct BuildKey {
     pub final_output: bool,
     /// Playing frames name the files a sequence reads next.
     pub read_ahead: bool,
+    pub camera_preview: bool,
     /// Interactive viewer group focus (`RenderRequest::focus_group`).
     pub focus_group: Option<String>,
 }
@@ -97,6 +98,7 @@ struct Entry {
     group: Option<Arc<crate::pass_facts::PassFacts>>,
     camera: Option<pm_eval::space3d::Camera3d>,
     camera_dof: Option<(f64, f64)>,
+    projection: Option<Box<PlaneDraw>>,
     shaders: Vec<pm_glsl::Key>,
     /// An image's asset and the path its resolver answered.
     media: Option<(String, PathBuf)>,
@@ -131,6 +133,7 @@ pub struct DrawReuse {
     facts: crate::pass_facts::FactsCache,
     pub(crate) geometry: FrameGeometry,
     pub(crate) geometry_active: bool,
+    same_snapshot: bool,
 }
 
 struct LayerTraits {
@@ -139,17 +142,41 @@ struct LayerTraits {
     static_time: bool,
 }
 
-/// Only contains camera-independent work for one immutable document and time.
+/// Camera-independent work for one immutable document.
 #[derive(Default)]
 pub(crate) struct FrameGeometry {
     root: Option<Node>,
     facts: HashMap<usize, Arc<crate::pass_facts::PassFacts>>,
-    memberships: HashMap<(ScopeKey, usize, bool), Box<[usize]>>,
-    orders: HashMap<(ScopeKey, bool, Vec<usize>), pm_eval::space3d::PlaneOrder>,
+    memberships: HashMap<(CompositionKey, usize, bool), Membership>,
+    orders: HashMap<(CompositionKey, bool, Vec<usize>), OrderEntry>,
+    build: u64,
+    static_worlds: HashMap<(CompositionKey, usize), bool>,
     pub(crate) quads: HashMap<(ScopeKey, usize, [u64; 6]), LayerGeometry>,
 }
 
+type CompositionKey = (usize, usize);
 pub(crate) type ScopeKey = (usize, usize, u64);
+
+struct Membership {
+    indices: Box<[usize]>,
+    time: u64,
+    static_time: bool,
+    groups: Vec<(usize, bool)>,
+    used: u64,
+}
+
+struct OrderEntry {
+    order: pm_eval::space3d::PlaneOrder,
+    time: u64,
+    /// When present, all active planes used to compute world geometry are
+    /// static. These activity bits still need to match at the new time.
+    activity: Option<Box<[bool]>>,
+    used: u64,
+}
+
+fn composition_key(scope: &Scope<'_, '_>) -> CompositionKey {
+    (address(scope.comp.node()), address(scope.project.node()))
+}
 
 pub(crate) fn scope_key(scope: &Scope<'_, '_>, time: f64) -> ScopeKey {
     (
@@ -169,26 +196,140 @@ pub(crate) struct LayerGeometry {
     pub world: pm_eval::space3d::Mat4,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum RasterProjection {
+    Text {
+        bounds: [f64; 4],
+        density: f64,
+        world: pm_eval::transform::Mat2d,
+    },
+    Shape {
+        bounds: [f64; 4],
+        density: (f64, f64),
+    },
+}
+
+pub(crate) struct PlaneDraw {
+    pub world: pm_eval::space3d::Mat4,
+    pub quad: [f64; 4],
+    pub raster: Option<(RasterProjection, pm_eval::anchor::Offset)>,
+}
+
+impl PlaneDraw {
+    fn project(
+        &self,
+        draw: &Draw,
+        camera: pm_eval::space3d::Camera3d,
+        comp_size: (f64, f64),
+        target: (u32, u32),
+        scale: (f64, f64),
+        origin: (f64, f64),
+        named_preview: bool,
+    ) -> Option<Draw> {
+        use crate::space25d::{fold, local};
+        let matrix = camera.project_plane(&self.world, comp_size.0, comp_size.1);
+        if let Some((raster, offset)) = self.raster {
+            let bounds = match raster {
+                RasterProjection::Text { bounds, .. } | RasterProjection::Shape { bounds, .. } => {
+                    bounds
+                }
+            };
+            let content = crate::plan::plane_at_origin(
+                fold(&matrix, scale, 1., 1., -offset.x, -offset.y),
+                origin,
+            );
+            if local::outside_target(&content, bounds, target.0, target.1) {
+                return None;
+            }
+            let same_density = match raster {
+                RasterProjection::Text { density, world, .. } => {
+                    crate::plan::legacy_plane_text_density(&content, bounds, &world, true)
+                        == density
+                }
+                RasterProjection::Shape { density, .. } => {
+                    let (dx, dy) = if named_preview {
+                        scale
+                    } else {
+                        local::density_from_matrix(&matrix, offset, scale, bounds)
+                    };
+                    (
+                        local::playback_density_capped(dx, bounds[2]),
+                        local::playback_density_capped(dy, bounds[3]),
+                    ) == density
+                }
+            };
+            if !same_density {
+                return None;
+            }
+        }
+        let [w, h, ax, ay] = self.quad;
+        let mut draw = draw.clone();
+        let Content::Placed(placed) = &mut draw.content else {
+            return None;
+        };
+        placed.plane = Some(crate::plan::plane_at_origin(
+            fold(&matrix, scale, w, h, ax, ay),
+            origin,
+        ));
+        Some(draw)
+    }
+}
+
 impl FrameGeometry {
+    pub(crate) fn clear_membership(&mut self) {
+        self.memberships.clear();
+        self.orders.clear();
+    }
+
     pub(crate) fn membership<'d>(
         &mut self,
         scope: &mut Scope<'_, 'd>,
         parent: Option<&Node>,
         time: f64,
         blur: bool,
-        compute: impl FnOnce(&mut Scope<'_, 'd>) -> JsResult<Vec<&'d Node>>,
+        early_boundary: impl Fn(&Node, f64) -> bool,
+        compute: impl FnOnce(&mut Scope<'_, 'd>, &mut Vec<&'d Node>) -> JsResult<Vec<&'d Node>>,
     ) -> JsResult<Vec<&'d Node>> {
-        let key = (scope_key(scope, time), parent.map_or(0, address), blur);
-        if let Some(indices) = self.memberships.get(&key) {
-            return Ok(indices.iter().map(|&i| &scope.layers()[i]).collect());
+        let key = (composition_key(scope), parent.map_or(0, address), blur);
+        if let Some(entry) = self.memberships.get_mut(&key)
+            && (entry.time == time.to_bits()
+                || (entry.static_time
+                    && entry
+                        .groups
+                        .iter()
+                        .all(|&(i, before)| early_boundary(&scope.layers()[i], time) == before)))
+        {
+            entry.used = self.build;
+            return Ok(entry.indices.iter().map(|&i| &scope.layers()[i]).collect());
         }
-        let pass = compute(scope)?;
+        let mut groups = Vec::new();
+        let pass = compute(scope, &mut groups)?;
         if let Some(members) = pass
             .iter()
             .map(|layer| scope.comp.layer_position(layer))
             .collect::<Option<Vec<_>>>()
+            && let Some(boundaries) = groups
+                .iter()
+                .map(|layer| {
+                    scope
+                        .comp
+                        .layer_position(layer)
+                        .map(|i| (i, early_boundary(layer, time)))
+                })
+                .collect::<Option<Vec<_>>>()
         {
-            self.memberships.insert(key, members.into());
+            self.memberships.insert(
+                key,
+                Membership {
+                    indices: members.into(),
+                    time: time.to_bits(),
+                    static_time: groups
+                        .iter()
+                        .all(|layer| !has_expression(layer) && time_independent(layer)),
+                    groups: boundaries,
+                    used: self.build,
+                },
+            );
         }
         Ok(pass)
     }
@@ -201,17 +342,54 @@ impl FrameGeometry {
         skip_inactive: bool,
     ) -> JsResult<Vec<&'d Node>> {
         let key = (
-            scope_key(scope, time),
+            composition_key(scope),
             skip_inactive,
             layers.iter().map(|l| address(l)).collect(),
         );
-        let order = match self.orders.entry(key) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(scope.prepare_plane_order(layers, time, skip_inactive)?)
-            }
-        };
-        order.project(scope, layers, time)
+        let active =
+            |layer: &Node| !skip_inactive || !pm_eval::evaluator::outside_layer_span(layer, time);
+        if let Some(entry) = self.orders.get_mut(&key)
+            && (entry.time == time.to_bits()
+                || entry.activity.as_ref().is_some_and(|previous| {
+                    layers
+                        .iter()
+                        .zip(previous)
+                        .all(|(layer, &before)| active(layer) == before)
+                }))
+        {
+            entry.used = self.build;
+            return entry.order.project(scope, layers, time);
+        }
+        let order = scope.prepare_plane_order(layers, time, skip_inactive)?;
+        let comp_key = composition_key(scope);
+        let activity = order
+            .world_layers()
+            .all(|i| {
+                let layer = layers[i];
+                *self
+                    .static_worlds
+                    .entry((comp_key, address(layer)))
+                    .or_insert_with(|| {
+                        closure(scope, layer).is_some_and(|nodes| {
+                            nodes.iter().all(|node| {
+                                node.get("p")
+                                    .is_none_or(|p| !has_expression(p) && !has_keys(p))
+                            })
+                        })
+                    })
+            })
+            .then(|| layers.iter().map(|layer| active(layer)).collect());
+        let projected = order.project(scope, layers, time)?;
+        self.orders.insert(
+            key,
+            OrderEntry {
+                order,
+                time: time.to_bits(),
+                activity,
+                used: self.build,
+            },
+        );
+        Ok(projected)
     }
 }
 
@@ -265,13 +443,14 @@ impl DrawReuse {
         let same_time = same_doc && self.time == Some(time);
         // Frame geometry holds the immutable root so the stored layer
         // addresses stay valid. Retain it only for an unchanged snapshot.
-        let same_snapshot = same_time
+        let same_snapshot = same_doc
             && revision == self.stamp
             && self
                 .geometry
                 .root
                 .as_ref()
                 .is_some_and(|old| same_field(old, root));
+        self.same_snapshot = same_snapshot;
         let same_build = self.build.as_ref() == Some(&build);
         let reusable_time = same_time
             || (!build.final_output
@@ -279,18 +458,19 @@ impl DrawReuse {
         if !same_doc || !same_build || !reusable_time {
             self.passes.clear();
         }
-        if !same_time || !same_build {
-            self.geometry = FrameGeometry::default();
-        }
-        if !same_snapshot || self.geometry.root.is_none() {
+        if !same_snapshot || !same_build || !reusable_time {
             self.geometry = FrameGeometry {
                 root: Some(root.clone()),
                 ..Default::default()
             };
+        } else if !same_time {
+            self.geometry.quads.clear();
         }
-        // Moving the viewer can use the first pose's geometry immediately
-        // on the next frame. Other cold builds can move to another time.
-        self.geometry_active = same_snapshot || camera_preview;
+        self.geometry.build = self.builds;
+        self.geometry_active = (same_snapshot && same_time)
+            || camera_preview
+            || (!build.final_output
+                && (build.read_ahead || build.sampling == crate::sampling::Sampling::Playback));
         self.active = same_doc && reusable_time;
         if !self.active {
             self.stats.cold_builds += 1;
@@ -304,6 +484,12 @@ impl DrawReuse {
     /// Ends a build: entries it did not use go, the rest are valid at its
     /// revision.
     pub(crate) fn end(&mut self) {
+        self.geometry
+            .memberships
+            .retain(|_, entry| entry.used == self.builds);
+        self.geometry
+            .orders
+            .retain(|_, entry| entry.used == self.builds);
         if self.active {
             let build = self.builds;
             for entries in self.passes.values_mut() {
@@ -454,24 +640,25 @@ fn has_expression(n: &Node) -> bool {
 fn time_independent(layer: &Node) -> bool {
     if !matches!(
         crate::js::layer_type(layer).as_str(),
-        "shape" | "text" | "solid" | "group" | "null" | "audio"
+        "shape" | "text" | "solid" | "image" | "group" | "null" | "audio"
     ) || ["timeRemap", "transitionIn", "transitionOut", "mblur"]
         .into_iter()
         .any(|key| node::truthy(layer.get(key)))
     {
         return false;
     }
-    fn has_keys(node: &Node) -> bool {
-        match node.kind() {
-            NodeKind::Object(map) => map.iter().any(|(key, value)| {
-                (key.as_bytes() == b"kf" && node::get(value, b"length").truthy()) || has_keys(value)
-            }),
-            NodeKind::Array(items) => items.iter().any(has_keys),
-            _ => false,
-        }
-    }
     (!node::is_str(layer.get("type"), "text") || crate::text::plain_level1(layer))
         && !has_keys(layer)
+}
+
+fn has_keys(node: &Node) -> bool {
+    match node.kind() {
+        NodeKind::Object(map) => map.iter().any(|(key, value)| {
+            (key.as_bytes() == b"kf" && node::get(value, b"length").truthy()) || has_keys(value)
+        }),
+        NodeKind::Array(items) => items.iter().any(has_keys),
+        _ => false,
+    }
 }
 
 fn stable_span(layer: &Node, before: f64, after: f64, comp_end: f64) -> bool {
@@ -594,15 +781,19 @@ pub(crate) fn draw<'d>(
     ) {
         return plan(scope, b);
     }
+    let simple = simple_layer(layer);
+    if !simple
+        || (b.read_ahead
+            && !b.reuse.as_mut().expect("eligible").layer_traits(scope.comp, &id, layer).static_time)
+    {
+        b.reuse.as_mut().expect("eligible").stats.planned += 1;
+        pm_perf::bump(pm_perf::Counter::DrawReuseMisses);
+        return plan(scope, b);
+    }
     let Ok(plane) = scope.is_3d_layer(layer) else {
         return plan(scope, b);
     };
-    if plane && !group && b.camera_preview() {
-        return plan(scope, b);
-    }
-    let Some(nodes) = closure(scope, layer) else {
-        return plan(scope, b);
-    };
+
     let (camera, camera_dof) = if group || plane {
         let Ok(camera) = scope.projection_camera_3d(time) else {
             return plan(scope, b);
@@ -629,21 +820,37 @@ pub(crate) fn draw<'d>(
     } else {
         None
     };
+    let sequence_or_copy = media.as_ref().is_some_and(|(asset, path)| {
+        b.assets
+            .original(asset)
+            .is_some_and(|original| original != *path)
+            || node::member(node::member(Some(scope.comp.root()), "assets"), asset)
+                .is_some_and(crate::footage::is_sequence)
+    });
     let reuse_across_time = b.interactive_rasters();
     let reuse = b.reuse.as_mut().expect("eligible");
+    let same_snapshot = reuse.same_snapshot;
     let fields = reuse.fields_unchanged(scope);
     let stamp = reuse.stamp;
     let build = reuse.builds;
+    let nodes = if same_snapshot {
+        None
+    } else {
+        closure(scope, layer)
+    };
     let index = scope.layer_index();
     let current = |id: &JsString| match index.strings.get(id) {
         Some(&(i, false)) => scope.layers().get(i),
         _ => None,
     };
     let comp_end = scope.comp.duration();
+    let origin = b.origin;
+    let named_preview = b.camera_preview() && scope.view_camera.is_some();
+    let reuse = b.reuse.as_mut().expect("eligible");
     if fields
         && let Some(entry) = reuse.passes.get_mut(&pass).and_then(|p| p.get_mut(&id))
         && entry.media == media
-        && entry.camera == camera
+        && !sequence_or_copy
         && entry.camera_dof == camera_dof
         && (entry.time.to_bits() == time.to_bits()
             || (reuse_across_time
@@ -656,34 +863,64 @@ pub(crate) fn draw<'d>(
             .shaders
             .iter()
             .all(|key| !crate::shader_layers::translate::native_failed(key))
-        && match &entry.group {
-            Some(old) => Arc::ptr_eq(old, facts),
-            None => {
-                entry.closure.len() == nodes.len()
-                    && entry
-                        .closure
-                        .iter()
-                        .zip(&nodes)
-                        .all(|((id, _), node)| current(id).is_some_and(|n| std::ptr::eq(n, *node)))
-            }
+        && (same_snapshot
+            || match &entry.group {
+                Some(old) => Arc::ptr_eq(old, facts),
+                None => nodes.as_ref().is_some_and(|nodes| {
+                    entry.closure.len() == nodes.len()
+                        && entry.closure.iter().zip(nodes).all(|((id, _), node)| {
+                            current(id).is_some_and(|n| std::ptr::eq(n, *node))
+                        })
+                }),
+            })
+        && (same_snapshot
+            || entry
+                .closure
+                .iter()
+                .all(|(id, old)| current(id).is_some_and(|n| unchanged(n, old, stamp))))
+        && let Some(draws) = if entry.camera == camera {
+            Some(entry.draws.clone())
+        } else if let (Some(projection), Some(camera), Some([draw])) =
+            (entry.projection.as_deref(), camera, entry.draws.as_deref())
+        {
+            projection
+                .project(
+                    draw,
+                    camera,
+                    scope.comp_size(),
+                    (width, height),
+                    scale,
+                    origin,
+                    named_preview,
+                )
+                .map(|d| Some(vec![d]))
+        } else {
+            None
         }
-        && entry
-            .closure
-            .iter()
-            .all(|(id, old)| current(id).is_some_and(|n| unchanged(n, old, stamp)))
     {
         entry.used = build;
         entry.time = time;
         reuse.stats.reused += 1;
         pm_perf::bump(pm_perf::Counter::DrawReuseHits);
-        return Ok(entry.draws.clone());
+        return Ok(draws);
     }
     reuse.stats.planned += 1;
     pm_perf::bump(pm_perf::Counter::DrawReuseMisses);
     // Plan the layer and keep it when it qualifies.
     let failures = b.failures.len();
     let unsupported = b.unsupported.len();
-    let draws = plan(scope, b)?;
+    let record = plane
+        && !group
+        && camera.is_some()
+        && camera_dof.is_none()
+        && reuse_across_time
+        && matches!(ty, "solid" | "image" | "shape" | "text");
+    let old_record = std::mem::replace(&mut b.record_projection, record);
+    let result = plan(scope, b);
+    b.record_projection = old_record;
+    let projection = b.plane_draw.take();
+    b.raster_projection = None;
+    let draws = result?;
     let reported = b.failures.len() != failures || b.unsupported.len() != unsupported;
     let svg = ty == "image"
         && media.as_ref().is_some_and(|(asset, _)| {
@@ -692,14 +929,16 @@ pub(crate) fn draw<'d>(
                 .is_none_or(|f| f.to_string_lossy().eq_ignore_ascii_case("svg"))
         });
     let keep = !reported
+        && !sequence_or_copy
         && !svg
         && (ty != "image" || media.is_some())
-        && keepable_draws(&draws, group)
-        && simple_layer(layer);
+        && keepable_draws(&draws, group);
     let reuse = b.reuse.as_mut().expect("eligible");
     if keep
+        && let Some(nodes) = nodes.or_else(|| closure(scope, layer))
         && let Some((closure, static_time)) =
             dependencies(scope, nodes, group.then_some(facts), &id, reuse)
+        && (!b.read_ahead || static_time)
     {
         reuse.stats.stored += 1;
         reuse.passes.entry(pass).or_default().insert(
@@ -713,6 +952,7 @@ pub(crate) fn draw<'d>(
                 group: group.then(|| facts.clone()),
                 camera,
                 camera_dof,
+                projection: projection.filter(|_| static_time).map(Box::new),
                 media,
                 used: build,
             },
@@ -763,4 +1003,48 @@ fn dependencies<'d>(
         result.push((id.clone(), n.clone()));
     }
     Some((result, static_time))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_plane_order_survives_time_and_camera_changes_until_a_cut() {
+        let doc = pm_model::Document::new(
+            Some(
+                pm_model::json::parse(
+                    r#"{
+                "id":"root","w":256,"h":256,"dur":3,"layers":[
+                    {"id":"a","type":"solid","from":0,"dur":3,"threeD":true,
+                     "p":{"position.z":{"v":30}}},
+                    {"id":"b","type":"solid","from":0,"dur":3,"threeD":true,
+                     "p":{"position.z":{"v":0}}},
+                    {"id":"cut","type":"solid","from":1,"dur":2,"threeD":true,
+                     "p":{"position.z":{"v":-30}}}
+                ]
+            }"#,
+                )
+                .unwrap(),
+            ),
+            1,
+        );
+        let comp = pm_eval::Comp::resolve(&doc, "root").unwrap();
+        let layers: Vec<_> = comp.layers().iter().collect();
+        let mut ev = pm_eval::Evaluator::new();
+        let mut scope = Scope::open(&mut ev, &comp);
+        let mut geometry = FrameGeometry::default();
+        let mut camera = pm_eval::space3d::default_camera_25d(256., 256.);
+        for (time, prepared_at) in [(0., 0.), (0.5, 0.), (1.5, 1.5), (2., 1.5)] {
+            camera.position[0] = time;
+            scope.view_camera = Some(camera);
+            let cached = geometry.order(&mut scope, &layers, time, true).unwrap();
+            let cold = scope.depth_ordered_draw_layers(&layers, time).unwrap();
+            assert!(cached.iter().zip(&cold).all(|(a, b)| std::ptr::eq(*a, *b)));
+            assert_eq!(
+                f64::from_bits(geometry.orders.values().next().unwrap().time),
+                prepared_at,
+            );
+        }
+    }
 }

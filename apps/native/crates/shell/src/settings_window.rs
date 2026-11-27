@@ -154,6 +154,49 @@ fn is_dark(appearance: &NSAppearance) -> bool {
         .is_some_and(|name| &*name == names[1])
 }
 
+define_class!(
+    #[unsafe(super(NSScrollView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSettingsExtensionListScroll"]
+    struct ExtensionListScroll;
+
+    impl ExtensionListScroll {
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            // The list keeps its scroll view for layout even when every row
+            // fits. In that mode the page owns the wheel.
+            if self.hasVerticalScroller() {
+                let clip = self.contentView();
+                let visible = clip.bounds();
+                let document = clip.documentRect();
+                let delta = event.scrollingDeltaY();
+                // The list document is flipped. Allow for clip-view rounding
+                // to a backing pixel when checking the edges.
+                let pixel = self.window().map_or(1., |w| 1. / w.backingScaleFactor());
+                let at_start = visible.origin.y <= document.origin.y + pixel;
+                let at_end = visible.origin.y + visible.size.height + pixel
+                    >= document.origin.y + document.size.height;
+                if !(delta > 0. && at_start || delta < 0. && at_end) {
+                    unsafe { let _: () = msg_send![super(self), scrollWheel: event]; }
+                    return;
+                }
+            }
+            if let Some(parent) = unsafe { self.nextResponder() } {
+                parent.scrollWheel(event);
+            }
+        }
+    }
+);
+
+/// The Extensions list hands wheel events to the Settings page when its
+/// rows fit or it reaches the edge of its virtualized content.
+pub fn extension_list_scroll(mtm: MainThreadMarker) -> Retained<NSScrollView> {
+    let scroll: Retained<ExtensionListScroll> = unsafe {
+        msg_send![super(ExtensionListScroll::alloc(mtm).set_ivars(())), initWithFrame: NSRect::ZERO]
+    };
+    Retained::into_super(scroll)
+}
+
 /// One row of the sidebar.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Section {

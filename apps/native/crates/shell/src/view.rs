@@ -185,6 +185,8 @@ pub struct Editor {
     resize_geometry: Option<Geometry>,
     tab_scrolls: HashMap<String, TabScroll>,
     header_tools_widths: Rc<RefCell<HashMap<String, f32>>>,
+    extension_slot_heights: Rc<RefCell<HashMap<String, f32>>>,
+    hidden_panel_headers: std::collections::HashSet<String>,
     #[cfg(test)]
     rendered_tab_labels: HashMap<(usize, usize), Vec<RenderedTabLabel>>,
     deferred_panel_commands: Vec<String>,
@@ -342,6 +344,8 @@ impl Editor {
             resize_geometry: None,
             tab_scrolls: HashMap::new(),
             header_tools_widths: Rc::default(),
+            extension_slot_heights: Rc::default(),
+            hidden_panel_headers: Default::default(),
             #[cfg(test)]
             rendered_tab_labels: HashMap::new(),
             deferred_panel_commands: Vec::new(),
@@ -2558,6 +2562,12 @@ impl Editor {
     /// The header's window-space rect after column scrolling.
     pub fn panel_header_rect(&self, id: &str) -> Option<Rect> {
         let (dock, group, _) = self.layout.find(id)?;
+        if self
+            .hidden_panel_headers
+            .contains(self.layout.docks[dock].groups[group].active())
+        {
+            return None;
+        }
         self.geometry
             .panels
             .iter()
@@ -3264,13 +3274,77 @@ impl Editor {
         let m = t.metrics;
         let c = t.colors.clone();
         let viewport = w.viewport_size();
-        let top = self
+        let native_top = self
             .host
             .as_ref()
             .map_or(m.toolbar, |h| h.borrow().toolbar_inset());
-        if let Some(home) = self.integration.clone().and_then(|i| i.home(w, cx)) {
-            return self.render_home(home, top, cx).into_any_element();
+        let integration = self.integration.clone();
+        let extension_menus = integration.as_ref().is_some_and(|i| i.has_extension_context_menus(cx));
+        if let Some(host) = &self.host {
+            host.borrow().extension_toolbar_context.set(extension_menus);
         }
+        let slot = |id: &str, w: &mut Window, cx: &mut Context<Self>| {
+            integration
+                .as_ref()
+                .map_or_else(Vec::new, |i| i.extension_slot(id, &t, w, cx))
+        };
+        let toolbar_slots =
+            ["toolbar.leading", "toolbar.center", "toolbar.trailing"].map(|id| slot(id, w, cx));
+        let toolbar_strip = toolbar_slots.iter().any(|zone| !zone.is_empty()).then(|| {
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(native_top))
+                .h(px(m.control))
+                .when(extension_menus, |d| d.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                        if let Some(i) = this.integration.clone() {
+                            i.surface_context_menu("toolbar:context", (e.position.x.into(), e.position.y.into()), cx);
+                        }
+                    }),
+                ))
+                .flex()
+                .items_center()
+                .gap(px(m.gap))
+                .px(px(m.inset))
+                .overflow_hidden()
+                .children(toolbar_slots.into_iter().enumerate().map(
+                    |(index, zone)| {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .items_center()
+                            .when(index == 1, |d| d.justify_center())
+                            .when(index == 2, |d| d.justify_end())
+                            .children(zone)
+                    },
+                ))
+        });
+        let top = native_top
+            + if toolbar_strip.is_some() {
+                m.control
+            } else {
+                0.
+            };
+        if let Some(home) = self.integration.clone().and_then(|i| i.home(w, cx)) {
+            return self
+                .render_home(home, top, cx)
+                .children(toolbar_strip)
+                .into_any_element();
+        }
+        let header_mods = header_mods(
+            self.integration
+                .as_ref()
+                .map_or_else(Vec::new, |i| i.panel_header_mods(cx)),
+        );
+        self.hidden_panel_headers = header_mods
+            .iter()
+            .filter(|(_, patch)| patch.hidden == Some(true))
+            .map(|(id, _)| id.clone())
+            .collect();
         // The toolbar band already separates the docks from the window's top
         // edge; the other three sides keep the dock gap.
         self.dock_bounds = Rect {
@@ -3437,16 +3511,55 @@ impl Editor {
                 .entry(id.clone())
                 .or_insert_with(|| cx.focus_handle().tab_stop(true).tab_index(0));
         }
+        let mut panel_slots = HashMap::new();
+        for p in &self.geometry.panels {
+            let group = &self.layout.docks[p.dock].groups[p.group];
+            let id = group.active();
+            if id.eq_ignore_ascii_case("settings")
+                || (group.collapsed && id != "viewer" && !self.hidden_panel_headers.contains(id))
+            {
+                continue;
+            }
+            let panel_is_native = integration.as_ref().is_some_and(|i| i.native_panel(id, cx));
+            let (top_aliases, bottom_aliases) = panel_slot_aliases(id, panel_is_native);
+            let slots =
+                [("top", top_aliases), ("bottom", bottom_aliases)].map(|(edge, aliases)| {
+                    let key = format!("panel:{id}.{edge}");
+                    let mut items = slot(&key, w, cx);
+                    for alias in aliases {
+                        items.extend(slot(alias, w, cx));
+                    }
+                    let column = slot_column(items, &self.extension_slot_heights, key.clone());
+                    let height = self
+                        .extension_slot_heights
+                        .borrow()
+                        .get(&key)
+                        .copied()
+                        .unwrap_or_default();
+                    (column, height)
+                });
+            panel_slots.insert(id.to_owned(), slots);
+        }
         let viewer = self
             .geometry
             .panels
             .iter()
             .find(|p| self.layout.docks[p.dock].groups[p.group].active() == "viewer")
-            .map(|p| Rect {
-                x: p.rect.x + m.border,
-                y: p.rect.y + m.header,
-                w: (p.rect.w - m.border * 2.).max(0.),
-                h: (p.rect.h - m.header - m.border).max(0.),
+            .map(|p| {
+                let header = if self.hidden_panel_headers.contains("viewer") {
+                    0.
+                } else {
+                    m.header
+                };
+                let [start, end] = panel_slots
+                    .get("viewer")
+                    .map_or([0., 0.], |slots| [slots[0].1, slots[1].1]);
+                Rect {
+                    x: p.rect.x + m.border,
+                    y: p.rect.y + header + start,
+                    w: (p.rect.w - m.border * 2.).max(0.),
+                    h: (p.rect.h - header - start - end - m.border).max(0.),
+                }
             });
         // Studio 3D views split the viewer's body into panes; the first is
         // the main viewer, the host draws the others (3d-studio.md §2).
@@ -3879,19 +3992,60 @@ impl Editor {
             let tabs = group.tabs.clone();
             let active = group.active.min(tabs.len() - 1);
             // Folded to its header (a double-click on the header).
-            let collapsed = group.collapsed && !is_viewer;
+            let hide_header = self.hidden_panel_headers.contains(&id);
+            let header_height = if hide_header { 0. } else { m.header };
+            let collapsed = group.collapsed && !is_viewer && !hide_header;
+            let [(top_slot, top_height), (bottom_slot, bottom_height)] =
+                panel_slots.remove(&id).unwrap_or([(None, 0.), (None, 0.)]);
+            let tab_title = |tab: &str| {
+                header_mods
+                    .get(tab)
+                    .and_then(|patch| patch.title.as_deref())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| panels.title(tab).to_owned())
+            };
+            let tab_decoration = |tab: &str| {
+                let patch = header_mods.get(tab);
+                let icon = patch.and_then(|p| p.icon.as_deref());
+                let badge = patch
+                    .and_then(|p| p.badge.as_deref())
+                    .filter(|b| !b.is_empty());
+                (icon, badge)
+            };
             let label_size = t.typography.title;
             let label_weight = FontWeight(t.typography.medium_weight);
-            let widths: Vec<f32> = tabs
+            let decoration_widths: Vec<f32> = tabs
                 .iter()
                 .map(|tab| {
-                    measure_tab_text(panels.title(tab), label_size, label_weight, w)
+                    let (icon, badge) = tab_decoration(tab);
+                    let icon = if icon.is_some() {
+                        m.symbol_inline + t.space.xs
+                    } else {
+                        0.
+                    };
+                    let badge = badge.map_or(0., |text| {
+                        measure_tab_text(text, t.typography.minimum, label_weight, w)
+                            + t.space.sm * 2.
+                    });
+                    icon + badge
+                })
+                .collect();
+            let widths: Vec<f32> = tabs
+                .iter()
+                .zip(&decoration_widths)
+                .map(|(tab, decoration)| {
+                    measure_tab_text(&tab_title(tab), label_size, label_weight, w)
+                        + decoration
                         + TAB_PADDING
                         + TAB_CLOSE_PADDING
                 })
                 .collect();
             let header_rect = self.geometry.header_rect(&p, &t);
-            let header_offset = header_rect.y - p.rect.y;
+            let header_offset = if hide_header {
+                0.
+            } else {
+                header_rect.y - p.rect.y
+            };
             // Where the panel shows this frame: its place, plus what is left
             // of its travel there. Its tabs and its extension body follow.
             let shown = self.slides.shown(&id, p.rect);
@@ -3914,23 +4068,35 @@ impl Editor {
                 // During push-off a header can extend into the dock gap.
                 // Its body clips separately; the dock still clips both.
                 .when(header_offset <= 0., |p| p.overflow_hidden());
+            let native_body_visible = native_id.is_some() && !collapsed;
             if let Some(native_id) = native_id.filter(|_| !collapsed) {
                 // A native body (an extension's web page) takes the pointer
                 // where it shows, so it stops short of the dividers' grab.
                 let edge = m.border.max(m.splitter_reach);
-                let body = native_body(shown, edge, m.header);
+                let body = native_body(
+                    Rect {
+                        h: (shown.h - bottom_height).max(0.),
+                        ..shown
+                    },
+                    edge,
+                    header_height + top_height,
+                );
                 // The slot already includes the dock scroll. Place the body
                 // at the animated position, then clip it to the viewport
                 // and the travelling sticky header.
                 let clip = body.intersection(above_status);
-                let clip = self.geometry.side_docks.get(&p.dock).map_or(clip, |bounds| {
-                    let mut clip = clip.intersection(*bounds);
-                    let bottom = clip.y + clip.h;
-                    let header_bottom = header_rect.y + header_rect.h + shown.y - p.rect.y;
-                    clip.y = clip.y.max(header_bottom);
-                    clip.h = (bottom - clip.y).max(0.);
-                    clip
-                });
+                let clip = self
+                    .geometry
+                    .side_docks
+                    .get(&p.dock)
+                    .map_or(clip, |bounds| {
+                        let mut clip = clip.intersection(*bounds);
+                        let bottom = clip.y + clip.h;
+                        let header_bottom = shown.y + header_offset + header_height;
+                        clip.y = clip.y.max(header_bottom);
+                        clip.h = (bottom - clip.y).max(0.);
+                        clip
+                    });
                 native_panels.clips.push((native_id.clone(), clip));
                 native_panels.fades.push((native_id.clone(), self.dock_body_fade(p.dock, clip)));
                 native_panels.bodies.push((native_id, body));
@@ -3977,10 +4143,14 @@ impl Editor {
                 .integration
                 .as_ref()
                 .is_some_and(|i| i.paints_own_ground(&id, cx));
+            let custom_title = header_mods.get(&id).is_some_and(|patch| {
+                patch.title.is_some() || patch.badge.is_some() || patch.icon.is_some()
+            });
             let custom = self
                 .integration
                 .as_ref()
-                .and_then(|i| i.header(&id, p.rect, tabs.len() > 1, w, cx));
+                .filter(|_| !hide_header)
+                .and_then(|i| i.header(&id, p.rect, tabs.len() > 1 || custom_title, w, cx));
             let group_name: SharedString = format!("tabs-{}-{}", p.dock, p.group).into();
             let header_id = id.clone();
             let menu_header = id.clone();
@@ -4033,7 +4203,7 @@ impl Editor {
                     }),
                 );
             let multi = tabs.len() > 1;
-            let shell_title = multi || custom.is_none() || id == "scopes";
+            let shell_title = multi || custom.is_none() || id == "scopes" || custom_title;
             if !shell_title {
                 header = header.px(px(0.));
             }
@@ -4110,9 +4280,12 @@ impl Editor {
                             single_width
                         };
                         tab_label(
-                            panels.title(tab),
-                            widths[index] - TAB_PADDING - TAB_CLOSE_PADDING,
-                            room,
+                            &tab_title(tab),
+                            widths[index]
+                                - TAB_PADDING
+                                - TAB_CLOSE_PADDING
+                                - decoration_widths[index],
+                            room - decoration_widths[index],
                             measure_label,
                         )
                     })
@@ -4136,7 +4309,7 @@ impl Editor {
                     };
                     let (label, label_width) = &labels[ti];
                     let inset = insets[ti];
-                    let truncated = label.as_str() != panels.title(tab);
+                    let truncated = label.as_str() != tab_title(tab);
                     let tab_left = span_x;
                     let span_width = if multi { drawn } else { *label_width };
                     spans.push((ti, span_x, span_x + span_width));
@@ -4172,7 +4345,7 @@ impl Editor {
                     let close_id = tab.clone();
                     let closable = layout::closable(tab) && multi;
                     let tab_group: SharedString = format!("tab-{tab}").into();
-                    let title = panels.title(tab).to_string();
+                    let title = tab_title(tab);
                     let mut cell = div()
                         .id(format!("tab-{tab}"))
                         .group(tab_group.clone())
@@ -4226,7 +4399,34 @@ impl Editor {
                         .when(multi, |s| s.w(px(drawn)))
                         .when(!multi, |s| s.max_w(px(drawn)))
                         .when(truncated && !dragging, |s| s.tooltip(tooltip(&t, &title)))
-                        .child(div().ml(px(inset)).flex_none().child(label.clone()));
+                        .child({
+                            let (icon, badge) = tab_decoration(tab);
+                            div()
+                                .ml(px(inset))
+                                .flex_none()
+                                .when(icon.is_some() || badge.is_some(), |d| {
+                                    d.flex().items_center().gap(px(t.space.xs))
+                                })
+                                .children(icon.map(|icon| {
+                                    crate::symbol::symbol(
+                                        icon,
+                                        m.symbol_inline,
+                                        crate::symbol::Weight::Medium,
+                                        c.secondary,
+                                        w,
+                                    )
+                                }))
+                                .child(label.clone())
+                                .children(badge.map(|badge| {
+                                    div()
+                                        .px(px(t.space.xs))
+                                        .rounded(px(m.control_radius))
+                                        .bg(rgb(c.selected_fill))
+                                        .text_color(rgb(c.accent))
+                                        .text_size(px(t.typography.minimum))
+                                        .child(badge.to_owned())
+                                }))
+                        });
                     if closable && !dragging {
                         cell = cell.child(
                             div()
@@ -4423,7 +4623,13 @@ impl Editor {
                 .as_ref()
                 .map(|i| i.panel_header_actions(&id, cx))
                 .unwrap_or_default();
+            let [viewer_left, viewer_right] = if is_viewer && !hide_header {
+                ["viewer.controls.left", "viewer.controls.right"].map(|id| slot(id, w, cx))
+            } else {
+                [vec![], vec![]]
+            };
             let has_custom = custom.is_some();
+            header = header.children(viewer_left);
             if let Some(custom) = custom {
                 header = header.child(
                     div()
@@ -4446,6 +4652,7 @@ impl Editor {
                         .child(custom),
                 );
             }
+            header = header.children(viewer_right);
             if !ext_actions.is_empty() {
                 let mut strip = div()
                     .flex()
@@ -4575,7 +4782,10 @@ impl Editor {
             }
             // Keep the original interactive header and paint it over the body
             // only while pinned. Unscrolled and folded groups keep normal flow.
-            let stuck_header = if header_offset > 0. {
+            let stuck_header = if hide_header {
+                tab_spans.remove(&(p.dock, p.group));
+                None
+            } else if header_offset > 0. {
                 panel = panel.child(div().h(px(m.header)).flex_none());
                 Some(
                     header
@@ -4604,14 +4814,58 @@ impl Editor {
                 let focused = f.contains_focused(w, cx);
                 i.panel_focused(&id, focused, cx);
             }
+            let body_height = (p.rect.h - header_height - top_height - bottom_height).max(0.);
+            // The app's panel callback measures a header-inclusive rect.
+            let body_bounds = Rect {
+                y: p.rect.y + header_height + top_height - m.header,
+                h: body_height + m.header,
+                ..p.rect
+            };
+            let hud = if is_viewer { slot("viewer.hud", w, cx) } else { vec![] };
+            let has_slots = top_slot.is_some() || bottom_slot.is_some() || !hud.is_empty();
             let content = self
                 .integration
                 .as_ref()
-                .and_then(|i| i.panel(&id, p.rect, w, cx));
+                .and_then(|i| i.panel(&id, body_bounds, w, cx));
+            let content = if has_slots {
+                Some(
+                    div()
+                        .w_full()
+                        .h(px((p.rect.h - header_height).max(0.)))
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .children(top_slot)
+                        .child(
+                            div()
+                                .w_full()
+                                .relative()
+                                .flex_1()
+                                .min_h(px(0.))
+                                .overflow_hidden()
+                                .children(content)
+                                .when(!hud.is_empty(), |body| body.child(
+                                    div()
+                                        .absolute()
+                                        .bottom(px(t.space.md))
+                                        .left(px(t.space.md))
+                                        .right(px(t.space.md))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(t.space.xs))
+                                        .children(hud),
+                                )),
+                        )
+                        .children(bottom_slot)
+                        .into_any_element(),
+                )
+            } else {
+                content
+            };
             if let Some(content) = content {
                 if let Some(viewport) = self.geometry.side_docks.get(&p.dock) {
-                    let height = (p.rect.h - m.header).max(0.);
-                    let y = p.rect.y + m.header;
+                    let height = (p.rect.h - header_height).max(0.);
+                    let y = p.rect.y + header_height;
                     let clip_start = header_offset.max(viewport.y - y);
                     let clip_end = height.min(viewport.y + viewport.h - y);
                     // Keep the body's layout origin while the sticky header
@@ -4643,7 +4897,7 @@ impl Editor {
                 } else {
                     panel = panel.child(content);
                 }
-            } else {
+            } else if !native_body_visible {
                 let unknown = format!("No installed extension provides “{id}”.");
                 let loading = self.integration.as_ref().is_some_and(|i| i.panels_loading(cx));
                 let coming = !panels.contains(&id) && self.awaiting_panels && self.integration.is_some();
@@ -5099,7 +5353,15 @@ impl Editor {
         if matches!(&self.gesture, Some(Gesture::Area(d)) if d.moved) {
             root = root.child(div().absolute().size_full().cursor(CursorStyle::Crosshair));
         }
-        let workspace = workspace::record_name(&self.record).to_owned();
+        let (status_items_list, status_mods) = self
+            .integration
+            .as_ref()
+            .map_or_else(Default::default, |i| i.status_bar_extensions(cx));
+        let workspace = status_segment(
+            &status_mods,
+            "workspace",
+            workspace::record_name(&self.record).to_owned(),
+        );
         // Status bar (language §2): quiet facts. Left: document facts (or a
         // message); right: the workspace pop-up.
         let left = self
@@ -5113,7 +5375,90 @@ impl Editor {
         } else {
             left
         };
-        root = root.child(Self::titlebar_band(top, self.tokens.colors.window));
+        let left = status_segment(&status_mods, "state", left);
+        let offline = status_segment(
+            &status_mods,
+            "offline",
+            self.integration
+                .as_ref()
+                .map_or_else(String::new, |i| i.status_alert(cx)),
+        );
+        let dimensions = status_segment(
+            &status_mods,
+            "dimensions",
+            self.integration
+                .as_ref()
+                .map_or_else(String::new, |i| i.status_trailing(cx)),
+        );
+        let mut has_center = false;
+        let mut status_zones = [
+            ("left", "statusBar.left"),
+            ("center", "statusBar.center"),
+            ("right", "statusBar.right"),
+        ]
+            .map(|(side, slot_id)| {
+                let slots = slot(slot_id, w, cx);
+                let items = status_items(&status_items_list, side);
+                if slots.is_empty() && items.is_empty() {
+                    return None;
+                }
+                has_center |= side == "center";
+                Some(div()
+                    .flex()
+                    .items_center()
+                    .gap(px(m.gap))
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .children(items.into_iter().map(|item| {
+                        let color = match item.tone.as_str() {
+                            "accent" => c.accent,
+                            "warning" => c.warning,
+                            "danger" => c.danger,
+                            _ => c.muted,
+                        };
+                        let command = item.command.clone();
+                        div()
+                            .id(SharedString::from(format!("status-{}", item.command)))
+                            .flex()
+                            .items_center()
+                            .gap(px(t.space.xs))
+                            .flex_none()
+                            .text_color(rgb(color))
+                            .rounded(px(m.control_radius))
+                            .when(item.clickable, |d| {
+                                d.role(Role::Button)
+                                    .tab_index(0)
+                                    .hover_style(|s| s.bg(rgb(c.hover)))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.command(
+                                            Command {
+                                                name: command.clone(),
+                                                args: vec![],
+                                                token: None,
+                                            },
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                            })
+                            .when_some(item.tooltip.as_ref(), |d, tip| d.tooltip(tooltip(&t, tip)))
+                            .children(item.icon.as_ref().map(|icon| {
+                                crate::symbol::symbol(
+                                    icon,
+                                    m.symbol_inline,
+                                    crate::symbol::Weight::Medium,
+                                    color,
+                                    w,
+                                )
+                            }))
+                            .child(item.text.clone())
+                    }))
+                    .children(slots))
+            })
+            .into_iter();
+        root = root
+            .child(Self::titlebar_band(native_top, self.tokens.colors.window))
+            .children(toolbar_strip);
         if let Some(toast) = self.integration.as_ref().and_then(|i| i.action_toast(cx)) {
             root = root.child(toast);
         }
@@ -5125,23 +5470,45 @@ impl Editor {
                 h: m.status,
             })
             .id("status-bar")
+            .when(extension_menus, |d| d.on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                    if let Some(i) = this.integration.clone() {
+                        i.surface_context_menu("statusBar:context", (e.position.x.into(), e.position.y.into()), cx);
+                    }
+                }),
+            ))
             .accessibility_id("shell.status")
             .role(Role::Status)
             .aria_label("Status")
-            .aria_value(left.clone())
+            .aria_value(left.clone().unwrap_or_default())
             .flex()
             .items_center()
             .gap(px(m.inset))
             .px(px(m.inset + m.gap))
             .text_size(px(t.typography.minimum))
             .text_color(rgb(c.muted))
-            .child(div().flex_1().min_w(px(0.)).truncate().child(left))
-            .children(
-                self.integration
-                    .as_ref()
-                    .map(|i| i.status_alert(cx))
-                    .filter(|s| !s.is_empty())
-                    .map(|alert| {
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .items_center()
+                    .gap(px(m.gap))
+                    .children(left.map(|text| div().truncate().child(text)))
+                    .children(status_zones.next().flatten()),
+            )
+            .children(status_zones.next().flatten())
+            .child(
+                div()
+                    .when(has_center, |d| d.flex_1())
+                    .min_w(px(0.))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(m.gap))
+                    .children(status_zones.next().flatten())
+                    .children(offline.filter(|s| !s.is_empty()).map(|alert| {
                         div()
                             .id("status-alert")
                             .accessibility_id("shell.status.alert")
@@ -5161,14 +5528,8 @@ impl Editor {
                                 }
                             }))
                             .child(alert)
-                    }),
-            )
-            .children(
-                self.integration
-                    .as_ref()
-                    .map(|i| i.status_trailing(cx))
-                    .filter(|s| !s.is_empty())
-                    .map(|facts| {
+                    }))
+                    .children(dimensions.filter(|s| !s.is_empty()).map(|facts| {
                         div()
                             .flex_none()
                             .font_features(FontFeatures(std::sync::Arc::new(vec![(
@@ -5176,36 +5537,36 @@ impl Editor {
                                 1,
                             )])))
                             .child(facts)
-                    }),
-            )
-            .child(
-                div()
-                    .id("status-workspace")
-                    .track_focus(&self.workspace_focus)
-                    .tab_index(2000)
-                    .on_click(
-                        cx.listener(|this, e: &ClickEvent, _, _| this.workspace_menu(e.position())),
-                    )
-                    .role(Role::Button)
-                    .aria_label(format!("Workspace: {workspace}"))
-                    .flex()
-                    .items_center()
-                    .gap(px(m.border * 2.))
-                    .px(px(m.gap))
-                    .h(px(m.hit))
-                    .rounded(px(m.control_radius))
-                    // A control among the bar's quiet facts: the primary
-                    // ink, so it never reads as a disabled one.
-                    .text_color(rgb(c.text))
-                    .hover_style(|s| s.bg(rgb(c.hover)))
-                    .child(workspace.to_string())
-                    .child(crate::symbol::symbol(
-                        "chevron.up.chevron.down",
-                        m.symbol_inline - 2.,
-                        crate::symbol::Weight::Medium,
-                        c.muted,
-                        w,
-                    )),
+                    }))
+                    .children(workspace.map(|workspace| {
+                        div()
+                            .id("status-workspace")
+                            .track_focus(&self.workspace_focus)
+                            .tab_index(2000)
+                            .on_click(cx.listener(|this, e: &ClickEvent, _, _| {
+                                this.workspace_menu(e.position())
+                            }))
+                            .role(Role::Button)
+                            .aria_label(format!("Workspace: {workspace}"))
+                            .flex()
+                            .items_center()
+                            .gap(px(m.border * 2.))
+                            .px(px(m.gap))
+                            .h(px(m.hit))
+                            .rounded(px(m.control_radius))
+                            // A control among the bar's quiet facts: the primary
+                            // ink, so it never reads as a disabled one.
+                            .text_color(rgb(c.text))
+                            .hover_style(|s| s.bg(rgb(c.hover)))
+                            .child(workspace.to_string())
+                            .child(crate::symbol::symbol(
+                                "chevron.up.chevron.down",
+                                m.symbol_inline - 2.,
+                                crate::symbol::Weight::Medium,
+                                c.muted,
+                                w,
+                            ))
+                    })),
             ),
         )
         .into_any_element()
@@ -9074,6 +9435,221 @@ mod library_capture_tests {
 #[cfg(all(test, target_os = "macos"))]
 #[path = "dock_render_tests.rs"]
 mod dock_render_tests;
-#[cfg(all(test, target_os = "macos"))]
-#[path = "dock_drag_capture_tests.rs"]
-mod dock_drag_capture_tests;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionStatusBarItem {
+    pub id: String,
+    pub side: String,
+    pub order: i32,
+    pub text: String,
+    pub icon: Option<String>,
+    pub tooltip: Option<String>,
+    pub tone: String,
+    pub clickable: bool,
+    pub command: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExtensionStatusBarMod {
+    pub target: String,
+    pub hidden: Option<bool>,
+    pub text: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PanelHeaderMod {
+    pub panel_id: String,
+    pub title: Option<String>,
+    pub icon: Option<String>,
+    pub badge: Option<String>,
+    pub hidden: Option<bool>,
+}
+
+fn status_segment(mods: &[ExtensionStatusBarMod], target: &str, default: String) -> Option<String> {
+    let mut hidden = false;
+    let mut text = None;
+    for patch in mods.iter().filter(|patch| patch.target == target) {
+        hidden = patch.hidden.unwrap_or(hidden);
+        text = patch.text.as_ref().or(text);
+    }
+    (!hidden).then(|| text.cloned().unwrap_or(default))
+}
+
+fn status_items<'a>(
+    items: &'a [ExtensionStatusBarItem],
+    side: &str,
+) -> Vec<&'a ExtensionStatusBarItem> {
+    let mut items: Vec<_> = items.iter().filter(|item| item.side == side).collect();
+    items.sort_by_key(|item| item.order);
+    items
+}
+
+fn header_mods(patches: Vec<PanelHeaderMod>) -> HashMap<String, PanelHeaderMod> {
+    let mut mods: HashMap<String, PanelHeaderMod> = HashMap::new();
+    for patch in patches {
+        let id = &patch.panel_id;
+        if id.eq_ignore_ascii_case("settings") {
+            continue;
+        }
+        if let Some(old) = mods.get_mut(id) {
+            old.title = patch.title.or(old.title.take());
+            old.icon = patch.icon.or(old.icon.take());
+            old.badge = patch.badge.or(old.badge.take());
+            old.hidden = patch.hidden.or(old.hidden);
+        } else {
+            mods.insert(id.clone(), patch);
+        }
+    }
+    mods
+}
+
+fn panel_slot_aliases(
+    id: &str,
+    native: bool,
+) -> (&'static [&'static str], &'static [&'static str]) {
+    // GPUI bodies mount the original slots themselves. A native replacement
+    // needs the shell to host the equivalent slots outside its native view.
+    match id {
+        "inspector" if native => (
+            &["inspector.top", "inspector.header"],
+            &["inspector.bottom"],
+        ),
+        "assets" if native => (&["assets.top", "assets.toolbar"], &["assets.bottom"]),
+        "agent" if native => (&["agent.top", "agent.toolbar"], &["agent.bottom"]),
+        "timeline" if native => (
+            &["timeline.top", "timeline.header", "timeline.toolbar"],
+            &["timeline.bottom", "timeline.footer"],
+        ),
+        "inspector" => (&["inspector.header"], &[]),
+        "assets" => (&["assets.top"], &["assets.bottom"]),
+        "fxbrowser" => (&["effects.top"], &["effects.bottom"]),
+        "layer-effects" => (&["layerEffects.top"], &["layerEffects.bottom"]),
+        "agent" => (&["agent.top"], &["agent.bottom"]),
+        "easing" => (&["easing.top"], &["easing.bottom"]),
+        "color" => (&["color.top"], &["color.bottom"]),
+        "timeline" => (&["timeline.top", "timeline.header"], &["timeline.bottom"]),
+        "viewer" => (&["viewer.top"], &["viewer.bottom"]),
+        _ => (&[], &[]),
+    }
+}
+
+fn slot_column(
+    items: Vec<AnyElement>,
+    heights: &Rc<RefCell<HashMap<String, f32>>>,
+    id: String,
+) -> Option<Div> {
+    if items.is_empty() {
+        heights.borrow_mut().remove(&id);
+        return None;
+    }
+    let heights = heights.clone();
+    Some(
+        div()
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .child(div().w_full().flex().flex_col().children(items))
+            .on_children_prepainted(move |bounds, w, _| {
+                let height = bounds
+                    .first()
+                    .map_or(0., |bounds| f32::from(bounds.size.height));
+                let mut heights = heights.borrow_mut();
+                if (heights.get(&id).copied().unwrap_or_default() - height).abs() > 0.5 {
+                    heights.insert(id.clone(), height);
+                    w.on_next_frame(|w, _| w.refresh());
+                }
+            }),
+    )
+}
+
+#[cfg(test)]
+mod extension_chrome_tests {
+    use super::*;
+
+    #[test]
+    fn status_items_keep_registration_order_for_ties_and_clear() {
+        let item = |id: &str, side: &str, order| ExtensionStatusBarItem {
+            id: id.into(),
+            side: side.into(),
+            order,
+            text: id.into(),
+            icon: None,
+            tooltip: None,
+            tone: "default".into(),
+            clickable: false,
+            command: String::new(),
+        };
+        let items = vec![
+            item("first", "left", 0),
+            item("second", "left", 0),
+            item("center", "center", -3),
+            item("before", "left", -1),
+        ];
+        assert_eq!(
+            status_items(&items, "left")
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["before", "first", "second"]
+        );
+        assert_eq!(status_items(&items, "center")[0].id, "center");
+        assert!(status_items(&[], "left").is_empty());
+
+        let mods = [
+            ExtensionStatusBarMod {
+                target: "offline".into(),
+                hidden: Some(true),
+                text: None,
+            },
+            ExtensionStatusBarMod {
+                target: "state".into(),
+                hidden: None,
+                text: Some("Ready".into()),
+            },
+        ];
+        assert_eq!(status_segment(&mods, "offline", "Offline".into()), None);
+        assert_eq!(
+            status_segment(&mods, "state", "Saved".into()).as_deref(),
+            Some("Ready")
+        );
+        assert_eq!(
+            status_segment(&[], "offline", "Offline".into()).as_deref(),
+            Some("Offline")
+        );
+        assert_eq!(
+            status_segment(&[], "state", "Saved".into()).as_deref(),
+            Some("Saved")
+        );
+    }
+
+    #[test]
+    fn panel_header_mods_merge_and_clear_with_settings_protected() {
+        let mods = header_mods(vec![
+            PanelHeaderMod {
+                panel_id: "inspector".into(),
+                title: Some("Properties".into()),
+                icon: Some("slider.horizontal.3".into()),
+                ..Default::default()
+            },
+            PanelHeaderMod {
+                panel_id: "inspector".into(),
+                badge: Some("New".into()),
+                hidden: Some(true),
+                ..Default::default()
+            },
+            PanelHeaderMod {
+                panel_id: "Settings".into(),
+                hidden: Some(true),
+                ..Default::default()
+            },
+        ]);
+        let inspector = &mods["inspector"];
+        assert_eq!(inspector.title.as_deref(), Some("Properties"));
+        assert_eq!(inspector.icon.as_deref(), Some("slider.horizontal.3"));
+        assert_eq!(inspector.badge.as_deref(), Some("New"));
+        assert_eq!(inspector.hidden, Some(true));
+        assert_eq!(mods.len(), 1);
+        assert!(header_mods(vec![]).is_empty());
+    }
+}

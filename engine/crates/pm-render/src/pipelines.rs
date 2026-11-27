@@ -84,6 +84,10 @@ pub struct SourceUniform {
     /// An HDR source's tone mapping into an SDR project: x the
     /// `pm_color::cst::TONE_MAPPING` index, y Highlight Desaturation.
     pub tone: [f32; 4],
+    /// Raw YUV normalization: sample maximum, luma offset and divisor,
+    /// chroma offset. The next vector holds the chroma divisor.
+    pub codes: [f32; 4],
+    pub chroma_divisor: [f32; 4],
 }
 
 /// The bytes of a plain `repr(C)` value.
@@ -483,6 +487,7 @@ impl Pipelines {
                     size_of::<SourceUniform>() as u64,
                 ),
                 storage(format),
+                tex(4),
             ]
         };
         let source_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

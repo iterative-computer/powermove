@@ -20,7 +20,7 @@
 //! own shader cache keeps compiled functions per app bundle (wgpu exposes no
 //! binary archive on Metal).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Instant;
 
@@ -279,9 +279,9 @@ impl Prewarm {
 /// The definitions a document's layers name: effects (`fx[].type`),
 /// transitions (`transitionIn` and `transitionOut`) and extension layers
 /// (`d.definition`), in the root composition and every `comps` entry, in
-/// document order without repeats. A hint for what to build first; what a
+/// approximate timeline order without repeats. A hint for what to build first; what a
 /// frame draws is decided by the plan.
-pub(crate) fn document_definitions(doc: &pm_model::Document) -> Vec<Key> {
+pub(crate) fn document_definitions(doc: &pm_model::Document, effects: &super::Effects) -> Vec<Key> {
     use pm_eval::node;
     let root = doc.root();
     let mut lists = vec![node::member(root, "layers")];
@@ -292,35 +292,85 @@ pub(crate) fn document_definitions(doc: &pm_model::Document) -> Vec<Key> {
                 .map(|(_, comp)| node::member(comp.node(), "layers")),
         );
     }
-    let mut out: Vec<Key> = Vec::new();
-    let mut push = |kind: DefinitionKind, id: Option<&pm_model::Node>| {
-        let Some(id) = node::string(id).map(|s| s.to_string_lossy()) else {
-            return;
-        };
-        if id.is_empty() {
-            return;
+    let mut layers: Vec<_> = lists
+        .into_iter()
+        .filter_map(node::array)
+        .flatten()
+        .collect();
+    layers
+        .sort_by(|a, b| node::to_number(a.get("from")).total_cmp(&node::to_number(b.get("from"))));
+    let mut out = Vec::new();
+    let mut saved = SavedEffects::default();
+    for layer in layers {
+        for fx in node::array(layer.get("fx")).unwrap_or_default() {
+            if !matches!(
+                fx.get("on").map(pm_model::Node::kind),
+                Some(pm_model::NodeKind::Bool(false))
+            ) {
+                saved.push(effects, fx, &mut out);
+            }
         }
-        let key = (kind, DefinitionId::from(id.as_str()));
-        if !out.contains(&key) {
-            out.push(key);
-        }
-    };
-    for layer in lists.into_iter().filter_map(node::array).flatten() {
-        for fx in node::array(node::member(Some(layer), "fx")).unwrap_or_default() {
-            push(DefinitionKind::Effect, node::member(Some(fx), "type"));
-        }
-        for edge in ["transitionIn", "transitionOut"] {
-            push(
-                DefinitionKind::Transition,
-                node::member(node::member(Some(layer), edge), "type"),
-            );
-        }
-        if node::is_str(node::member(Some(layer), "type"), "extension") {
-            push(
-                DefinitionKind::Layer,
-                node::member(node::member(Some(layer), "d"), "definition"),
-            );
-        }
+        push_other_programs(layer, &mut out);
     }
     out
+}
+
+/// Resolve each authored revision once per scan. Program ids are also the
+/// ids the foreground plan uses for legacy revisions and extension overrides.
+#[derive(Default)]
+pub(crate) struct SavedEffects<'a>(HashSet<(&'a str, Option<u64>)>);
+
+impl<'a> SavedEffects<'a> {
+    pub(crate) fn push(
+        &mut self,
+        effects: &super::Effects,
+        fx: &'a pm_model::Node,
+        out: &mut Vec<Key>,
+    ) {
+        use pm_eval::node;
+        let Some(id) = node::string(fx.get("type")).and_then(|s| s.as_str()) else {
+            return;
+        };
+        let version = fx.get("version");
+        let number = if node::is_nullish(version) {
+            None
+        } else if let Some(n) = node::number(version) {
+            Some(n.to_bits())
+        } else {
+            return;
+        };
+        if self.0.insert((id, number))
+            && let Ok(key) = effects.saved_key(id, version)
+        {
+            push_program(out, DefinitionKind::Effect, &key);
+        }
+    }
+}
+
+pub(crate) fn push_other_programs(layer: &pm_model::Node, out: &mut Vec<Key>) {
+    use pm_eval::node;
+    let mut push = |kind, node| {
+        if let Some(id) = node::string(node).and_then(|id| id.as_str()) {
+            push_program(out, kind, id);
+        }
+    };
+    for edge in ["transitionIn", "transitionOut"] {
+        push(
+            DefinitionKind::Transition,
+            node::member(layer.get(edge), "type"),
+        );
+    }
+    if node::is_str(layer.get("type"), "extension") {
+        push(
+            DefinitionKind::Layer,
+            node::member(layer.get("d"), "definition"),
+        );
+    }
+}
+
+fn push_program(out: &mut Vec<Key>, kind: DefinitionKind, id: &str) {
+    let key = (kind, DefinitionId::from(id));
+    if !id.is_empty() && !out.contains(&key) {
+        out.push(key);
+    }
 }

@@ -2,7 +2,7 @@
 //! extensions live, the shipped built-in sources, and the isolated check that
 //! compiles and activates staged code before it is promoted. Runs on MCP
 //! workers, never on the main thread.
-use pm_builtins::{BUILTIN_PANELS, Builtins};
+use pm_builtins::{BUILTIN_PANELS, Builtins, is_protected_surface};
 use pm_compat_runner::{CompatRunner, manifest};
 use pm_mcp::{effect::compile_program, extensions::ExtensionHost};
 use pm_protocol::definitions::DefinitionSnapshot;
@@ -148,7 +148,7 @@ impl ExtensionHost for AppExtensions {
         pm_builtins::builtin_sources(&self.profile.join("builtin-extensions")).ok()
     }
     fn manifest(&self, raw: &Value) -> Result<Value, String> {
-        manifest::parse(raw)
+        parse_manifest(raw)
     }
     fn check(&self, dir: &Path, manifest: &Value) -> Result<(), String> {
         check(dir, manifest)
@@ -173,8 +173,27 @@ fn settle(ticket: Ticket<Evaluation>) -> Result<(), String> {
         .map(drop)
         .map_err(|e| e.to_string())
 }
+fn validate_replaces(manifest: &Value) -> Result<(), String> {
+    if manifest["replaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(is_protected_surface)
+    {
+        return Err("Settings cannot be replaced by extensions".into());
+    }
+    Ok(())
+}
+
+fn parse_manifest(raw: &Value) -> Result<Value, String> {
+    validate_replaces(raw)?;
+    manifest::parse(raw)
+}
+
 /// The built-in a fork draws in place of, if any.
 pub fn replaced_panel(manifest: &Value) -> Option<&'static str> {
+    validate_replaces(manifest).ok()?;
     let replaces = manifest["replaces"].as_array()?;
     BUILTIN_PANELS
         .iter()
@@ -188,7 +207,7 @@ pub fn replaced_panel(manifest: &Value) -> Option<&'static str> {
 /// (`viewer`, `effects-basic`) are left to the loader. Without this, a guide
 /// that needs another extension reads `requires …` though both are present.
 pub fn check_with_dependencies(dir: &Path, raw: &Value, roots: &[PathBuf]) -> Result<(), String> {
-    let manifest = manifest::parse(raw)?;
+    let manifest = parse_manifest(raw)?;
     let api = manifest["apiVersion"].as_u64().unwrap_or(1);
     let depends = |m: &Value| -> Vec<String> {
         m["dependsOn"]
@@ -331,6 +350,7 @@ fn activate(
     manifest: &Value,
     collect_effects: bool,
 ) -> Result<Vec<DefinitionSnapshot>, String> {
+    validate_replaces(manifest)?;
     let api = manifest["apiVersion"].as_u64().unwrap_or(1);
     let entry = manifest["entry"].as_str().unwrap_or("index.ts");
     let runner = CompatRunner::new(&pm_compat_runner::initial()).map_err(|e| e.to_string())?;
@@ -398,3 +418,23 @@ fn activate(
 #[cfg(test)]
 #[path = "extension_authoring_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn settings_cannot_be_declared_as_a_replacement() {
+    let mut raw = serde_json::json!({
+        "id": "custom-fork",
+        "name": "Custom Fork",
+        "version": "1.0.0",
+        "apiVersion": 4,
+        "entry": "index.ts",
+        "replaces": ["viewer"],
+    });
+    assert_eq!(replaced_panel(&parse_manifest(&raw).unwrap()), Some("viewer"));
+    raw["replaces"] = serde_json::json!(["viewer", "SeTtInGs"]);
+    assert_eq!(
+        parse_manifest(&raw).unwrap_err(),
+        "Settings cannot be replaced by extensions"
+    );
+    assert_eq!(replaced_panel(&raw), None);
+}

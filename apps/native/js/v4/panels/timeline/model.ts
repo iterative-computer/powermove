@@ -137,6 +137,8 @@ export interface TimelineFrame {
   /** The timeline panel holds the keyboard; absent counts as yes. */
   focused?: boolean;
   mode: Mode;
+  showTypeBadges?: boolean;
+  toolbarDensity?: "compact" | "comfortable";
   view: View;
   playing: boolean;
   snapping: boolean;

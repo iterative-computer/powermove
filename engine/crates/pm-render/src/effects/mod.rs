@@ -768,13 +768,7 @@ impl Effects {
         format: wgpu::TextureFormat,
         first: &[(DefinitionKind, DefinitionId)],
     ) -> usize {
-        let done = self.prewarm.take();
-        self.absorb(done);
-        let mut order: Vec<(DefinitionKind, DefinitionId)> = first
-            .iter()
-            .filter(|k| self.entries.contains_key(*k))
-            .cloned()
-            .collect();
+        let mut order = first.to_vec();
         for key in self.entries.keys() {
             let user = self
                 .get(key.0, key.1.as_str())
@@ -783,9 +777,20 @@ impl Effects {
                 order.push(key.clone());
             }
         }
+        self.prewarm_selected(device, format, &order)
+    }
+
+    pub(crate) fn prewarm_selected(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        order: &[prewarm::Key],
+    ) -> usize {
+        let done = self.prewarm.take();
+        self.absorb(done);
         let mut queued = 0;
         for key in order {
-            let Some(entry) = self.entries.get(&key) else {
+            let Some(entry) = self.entries.get(key) else {
                 continue;
             };
             let (Status::Ready, None, Some(prepared)) =

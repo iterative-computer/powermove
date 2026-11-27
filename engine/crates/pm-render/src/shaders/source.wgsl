@@ -1,5 +1,5 @@
 // Source conversion (plan sections 9 and 13): a decoded frame or image,
-// already normalized by pm-gpu's decode-in pass, to premultiplied working
+// with raw progressive YUV or normalized planes, to premultiplied working
 // values at the source's size.
 //
 // - Y′CbCr: siting-aware chroma upsampling, exact at co-sited samples
@@ -20,7 +20,8 @@
 // with the working storage format.
 
 struct Params {
-    // kind (0 RGB, 1 Y′CbCr, 2 packed RGB), transfer, working (0 Standard, 1 linear), alpha plan.
+    // kind (0 RGB, 1 normalized Y′CbCr, 2 packed RGB, 3 biplanar, 4 planar),
+    // transfer, working (0 Standard, 1 linear), alpha plan.
     a: vec4<u32>,
     // chroma factors x, y; horizontal and vertical filters (0 none, 1 linear, 2 Catmull-Rom, 3 Lanczos-3).
     b: vec4<u32>,
@@ -45,6 +46,8 @@ struct Params {
     // the method (1, BT.2390 per channel, the default), y its Highlight
     // Desaturation.
     tone: vec4<f32>,
+    codes: vec4<f32>,
+    chroma_divisor: vec4<f32>,
 };
 
 @group(0) @binding(0) var luma: texture_2d<f32>;
@@ -52,10 +55,20 @@ struct Params {
 @group(0) @binding(2) var<uniform> P: Params;
 @group(0) @binding(3) var out: texture_storage_2d<OUT_FORMAT, write>;
 
+@group(0) @binding(4) var cr_plane: texture_2d<f32>;
+
 fn chroma_at(i: i32, j: i32) -> vec2<f32> {
     let w = i32(P.c.x);
     let h = i32(P.c.y);
-    return textureLoad(chroma, vec2<i32>(clamp(i, 0, w - 1), clamp(j, 0, h - 1)), 0).rg;
+    let xy = vec2<i32>(clamp(i, 0, w - 1), clamp(j, 0, h - 1));
+    var c = textureLoad(chroma, xy, 0).rg;
+    if (P.a.x >= 3u) {
+        if (P.a.x == 4u) {
+            c.y = textureLoad(cr_plane, xy, 0).r;
+        }
+        c = (round(c * P.codes.x) - vec2<f32>(P.codes.w)) / P.chroma_divisor.x;
+    }
+    return c;
 }
 
 fn catmull_rom(t: f32) -> vec4<f32> {
@@ -247,8 +260,11 @@ fn bt2020_cl_rgb(ycc: vec3<f32>) -> vec3<f32> {
 // One source pixel in the source's own RGB(A) encoding: YCbCr through its
 // matrix, normalized integer codes restored.
 fn decoded(p: vec2<u32>) -> vec4<f32> {
-    let v = textureLoad(luma, vec2<i32>(p), 0);
-    if (P.a.x == 1u) {
+    var v = textureLoad(luma, vec2<i32>(p), 0);
+    if (P.a.x >= 3u) {
+        v.r = (round(v.r * P.codes.x) - P.codes.y) / P.codes.z;
+    }
+    if (P.a.x == 1u || P.a.x >= 3u) {
         let cbcr = chroma_sample(p.x, p.y);
         let ycc = vec3<f32>(v.r, cbcr.x, cbcr.y);
         if (P.hdr.y == 1.0) { return vec4<f32>(bt2020_cl_rgb(ycc), v.a); }

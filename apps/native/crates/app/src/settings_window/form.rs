@@ -896,7 +896,7 @@ struct VirtualList {
 
 impl VirtualList {
     fn new(mtm: objc2::MainThreadMarker, sender: async_channel::Sender<(usize, usize)>) -> Self {
-        let scroll = NSScrollView::new(mtm);
+        let scroll = pm_shell::settings_window::extension_list_scroll(mtm);
         scroll.setDrawsBackground(false);
         scroll.setHasVerticalScroller(true);
         scroll.setAutohidesScrollers(true);

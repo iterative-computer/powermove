@@ -2463,7 +2463,8 @@ impl Engine {
                 }
                 trace.lock().unwrap().render_start = now();
                 let cpu_start = crate::trace::thread_cpu_ms();
-                let work = trace.lock().unwrap().count_work.then(pm_perf::snapshot);
+                let count_work = trace.lock().unwrap().count_work;
+                let work = count_work.then(pm_perf::snapshot);
                 pm_render::media::note_reads();
                 pm_perf::stall::stall(pm_perf::stall::Stage::Render);
                 let rendered = self.renderer.render_into(
@@ -2487,6 +2488,13 @@ impl Engine {
                         }
                     }
                     t.images_over = self.renderer.image_over_budget();
+                }
+                let effect_program_us = self.renderer.take_effect_program_build_us();
+                if count_work && effect_program_us > 0 {
+                    eprintln!(
+                        "PM_EFFECT_BUILD ticks={} us={effect_program_us}",
+                        time.get(),
+                    );
                 }
                 self.renderer.set_scrub(false);
                 self.renderer.set_playback(None);

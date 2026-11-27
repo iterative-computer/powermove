@@ -1607,6 +1607,8 @@ impl Render for PanelLibrary {
                     ),
             )
         });
+        let [top_slots, bottom_slots] = ["panelLibrary.top", "panelLibrary.bottom"]
+            .map(|id| crate::builtins::window_slot(self.editor.as_ref(), id, &t, window, cx));
         let content = div()
             .flex_1()
             .min_w(px(0.))
@@ -1614,7 +1616,9 @@ impl Render for PanelLibrary {
             .flex()
             .flex_col()
             .child(header)
-            .child(body);
+            .children(top_slots)
+            .child(body)
+            .children(bottom_slots);
         div()
             .size_full()
             .id("panel-library-root")

@@ -42,28 +42,46 @@ pub fn density<'d>(
     scale: (f64, f64),
     bounds: [f64; 4],
 ) -> JsResult<(f64, f64)> {
+    let offset = scope.size_anchor_offset(layer, time)?;
+    if !scope.is_3d_layer(layer)? {
+        return Ok(cap_density(None, scale, bounds));
+    }
+    let matrix = scope.plane_matrix(layer, time, false)?;
+    Ok(density_from_matrix(&matrix, offset, scale, bounds))
+}
+
+pub(crate) fn density_from_matrix(
+    matrix: &super::Plane,
+    offset: pm_eval::anchor::Offset,
+    scale: (f64, f64),
+    bounds: [f64; 4],
+) -> (f64, f64) {
     let [x, y, w, h] = bounds;
     let (w, h) = (w.max(1e-9), h.max(1e-9));
-    let offset = scope.size_anchor_offset(layer, time)?;
-    let corner = match super::projected(
-        scope,
-        layer,
-        time,
-        scale,
-        w,
-        h,
-        -x - offset.x,
-        -y - offset.y,
-    )? {
-        Some(plane) => super::corner_density(&plane).map(|(du, dv)| (du / w, dv / h)),
-        None => None,
-    };
+    let quad = super::fold(matrix, scale, w, h, -x - offset.x, -y - offset.y);
+    let corner = super::corner_density(&quad).map(|(du, dv)| (du / w, dv / h));
+    cap_density(corner, scale, bounds)
+}
+
+fn cap_density(corner: Option<(f64, f64)>, scale: (f64, f64), bounds: [f64; 4]) -> (f64, f64) {
+    let [_, _, w, h] = bounds;
     let (du, dv) = corner.unwrap_or(scale);
     let cap = |d: f64, s: f64, size: f64| {
         let d = if d.is_finite() { d.max(s) } else { s };
         d.min(MAX_RASTER / size.max(1.0)).max(1e-6)
     };
-    Ok((cap(du, scale.0, w), cap(dv, scale.1, h)))
+    (cap(du, scale.0, w), cap(dv, scale.1, h))
+}
+
+/// The maximum projected pixels per local unit along each axis of the
+/// content box. The homography already includes the layer and camera.
+pub(crate) fn plane_density(plane: &super::Plane, bounds: [f64; 4]) -> Option<(f64, f64)> {
+    let [x, y, w, h] = bounds;
+    let (w, h) = (w.max(1e-9), h.max(1e-9));
+    let quad = super::fold(plane, (1., 1.), w, h, -x, -y);
+    super::corner_density(&quad)
+        .map(|(du, dv)| (du / w, dv / h))
+        .filter(|(du, dv)| du.is_finite() && dv.is_finite())
 }
 
 /// `density` raised to the next quarter octave (2^(k/4)), within

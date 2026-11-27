@@ -343,6 +343,9 @@ pub struct DecodeService {
     /// Most recently displayed streams, not background preparation. Bounded
     /// metadata lets a clip being shown displace older idle decoders first.
     displayed: Mutex<VecDeque<SessionKey>>,
+    /// The last submitted frame's display instances, plus any already read
+    /// by the frame being recorded. One service belongs to one renderer.
+    active_display: Mutex<std::collections::HashSet<SessionKey>>,
     /// Paused: the Display sessions of the clips under the playhead, kept
     /// open (their decoder only) under a zero decoder share so Play
     /// continues their run ([`DecodeService::keep_idle`]).
@@ -469,7 +472,11 @@ impl SessionGuard<'_> {
         if self.service.decoders_over() {
             self.service.fit_older_than(self.key);
             if self.service.decoders_over() {
-                s.clear_window();
+                if self.service.active(self.key) {
+                    s.shed_window();
+                } else {
+                    s.clear_window();
+                }
             }
         }
         f
@@ -619,15 +626,14 @@ impl Drop for SessionGuard<'_> {
             // PM_FIX_KEEP_SESSION: over the share, a session gives back its
             // window but stays open as its key's one idle session; cold
             // sources and idle release close it.
-            // The renderer still holds this frame and the previous output
-            // while a display session returns. Give only the most recently
-            // requested display decoder one idle slot until the next lease
-            // fit, after those transient references can be released. Closing
-            // it here makes every frame reopen and seek the same clip.
-            // Zero shares and the next fit still enforce the normal lease.
-            let hot = !zero
-                && self.key.purpose == DecodePurpose::Display
-                && svc.displayed.lock().unwrap().front() == Some(&self.key);
+            // Display frames and the GPU can still hold decoded buffers
+            // when a worker returns. Defer closing these decoder slots to
+            // the full lease fit after their one-frame windows are shed.
+            let active = !zero && svc.active(self.key);
+            let hot = active
+                || (!zero
+                    && self.key.purpose == DecodePurpose::Display
+                    && svc.displayed.lock().unwrap().front() == Some(&self.key));
             let keep = (hot
                 || super::diag::knob("PM_FIX_KEEP_SESSION") == Some(2)
                 || super::diag::knob("PM_FIX_KEEP_SESSION") == Some(1)
@@ -642,7 +648,11 @@ impl Drop for SessionGuard<'_> {
                 svc.fit_older_than(self.key);
             }
             if zero || svc.decoders_over() {
-                s.clear_window();
+                if active {
+                    s.shed_window();
+                } else {
+                    s.clear_window();
+                }
                 // Returned window buffers are free pool storage now. Release
                 // those before deciding the decoder itself cannot fit: closing
                 // a warm decoder to reclaim reusable free buffers forces the
@@ -652,7 +662,12 @@ impl Drop for SessionGuard<'_> {
                     drop(s);
                     svc.open_sessions.fetch_sub(1, Ordering::Relaxed);
                     super::diag::bump(&super::diag::SESSIONS_CLOSED_OVER_SHARE, 1);
-                    svc.fit_decoders();
+                    // A retiring lookahead or older clip cannot push out
+                    // a newer display decoder. It will be fitted when the
+                    // presenter gives its transitory frame references back.
+                    if !zero {
+                        svc.fit_older_than(self.key);
+                    }
                     return;
                 }
             }
@@ -712,6 +727,7 @@ impl DecodeService {
             input_opens: AtomicU64::new(0),
             lease: Mutex::new(MediaLease::UNLIMITED),
             displayed: Mutex::new(VecDeque::new()),
+            active_display: Mutex::new(Default::default()),
             kept: Mutex::new(HashSet::new()),
         }
     }
@@ -730,6 +746,50 @@ impl DecodeService {
         }
         displayed.push_front(key);
         displayed.truncate(32);
+    }
+
+    /// Protect a display instance while the frame is being recorded. The
+    /// previous frame's instances stay protected while this set is built.
+    pub fn note_active_display(&self, source: u64, instance: InstanceId) {
+        self.note_display(source, instance);
+        self.active_display.lock().unwrap().insert(SessionKey {
+            source,
+            instance,
+            purpose: DecodePurpose::Display,
+        });
+    }
+
+    /// Publish the display instances read by the completed render.
+    pub fn set_active_display(&self, instances: impl IntoIterator<Item = (u64, InstanceId)>) {
+        let mut active = self.active_display.lock().unwrap();
+        active.clear();
+        active.extend(instances.into_iter().map(|(source, instance)| SessionKey {
+            source,
+            instance,
+            purpose: DecodePurpose::Display,
+        }));
+    }
+
+    fn active(&self, key: SessionKey) -> bool {
+        self.active_display.lock().unwrap().contains(&key)
+    }
+
+    /// Closes one display instance without invalidating the shared source
+    /// frames used by other instances or the source viewer.
+    pub fn release_display_instance(&self, source: u64, instance: InstanceId) {
+        let key = SessionKey {
+            source,
+            instance,
+            purpose: DecodePurpose::Display,
+        };
+        self.active_display.lock().unwrap().remove(&key);
+        self.displayed.lock().unwrap().retain(|k| *k != key);
+        if let Some(list) = self.idle.lock().unwrap().remove(&key) {
+            self.open_sessions
+                .fetch_sub(list.len() as u64, Ordering::Relaxed);
+            super::diag::bump(&super::diag::SESSIONS_RELEASED, list.len() as u64);
+        }
+        self.trim_free();
     }
 
     fn fit_older_than(&self, key: SessionKey) {
@@ -1007,11 +1067,14 @@ impl DecodeService {
                 .position(|k| k == key)
                 .unwrap_or(usize::MAX)
         };
+        let active = self.active_display.lock().unwrap().clone();
+        let fitting_return = before.is_some();
         let before = before.map(|key| rank(&key));
         let eligible = |key: &SessionKey| before.is_none_or(|current| rank(key) > current);
-        if self.decoders_over() {
+        let zero = self.lease.lock().unwrap().decoders == 0;
+        if zero || self.decoders_over() {
             for (key, sessions) in idle.iter_mut() {
-                if eligible(key) {
+                if eligible(key) && (zero || !active.contains(key)) {
                     for s in sessions {
                         s.clear_window();
                     }
@@ -1019,11 +1082,24 @@ impl DecodeService {
             }
         }
         self.trim_free();
+        if !zero && self.decoders_over() {
+            for (key, sessions) in idle.iter_mut() {
+                if active.contains(key) {
+                    for s in sessions {
+                        s.shed_window();
+                    }
+                }
+            }
+            self.trim_free();
+        }
         // A zero share closes every idle session: the state VideoToolbox
         // keeps per session is not measurable, so nothing else frees it.
-        let zero = self.lease.lock().unwrap().decoders == 0;
         let kept = self.kept.lock().unwrap().clone();
-        let eligible = |key: &SessionKey| eligible(key) && !(zero && kept.contains(key));
+        let eligible = |key: &SessionKey| {
+            eligible(key)
+                && !(zero && kept.contains(key))
+                && !(fitting_return && !zero && active.contains(key))
+        };
         // PM_FIX_KEEP_SESSION=2: over the share, idle sessions keep only
         // their decoder (windows and free pool memory go above); only a zero
         // share (idle release, project close) closes them.
@@ -1032,7 +1108,7 @@ impl DecodeService {
             let key = idle
                 .iter()
                 .filter(|(key, list)| !list.is_empty() && eligible(key))
-                .max_by_key(|(key, _)| rank(key))
+                .max_by_key(|(key, _)| (!active.contains(key), rank(key)))
                 .map(|(key, _)| *key);
             let Some(s) = key.and_then(|key| idle.get_mut(&key).and_then(|list| list.pop())) else {
                 break;
@@ -1139,4 +1215,69 @@ fn scrub_clock_ms() -> u64 {
         .get_or_init(std::time::Instant::now)
         .elapsed()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod active_display_tests {
+    use super::*;
+
+    #[test]
+    fn fitting_a_return_sheds_all_active_windows_before_closing_any_display() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/vp9-opus.webm");
+        let src = MediaSource::open(&path).unwrap();
+        let svc = DecodeService::new(ServiceConfig {
+            cache_bytes: 0,
+            pool_free_bytes: 0,
+            ..Default::default()
+        });
+        for instance in 1..=3 {
+            svc.note_active_display(src.id, instance);
+            let mut session = svc
+                .session_with(
+                    &src,
+                    instance,
+                    DecodePurpose::Display,
+                    Some(Backend::Ffmpeg),
+                )
+                .unwrap();
+            for n in 0..4 {
+                session.frame(n).unwrap();
+            }
+        }
+        let windows = || {
+            svc.idle
+                .lock()
+                .unwrap()
+                .values()
+                .flatten()
+                .map(|s| s.window_frames().count())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(windows().len(), 3);
+        assert!(windows().iter().all(|count| *count > 1));
+        let before = svc.usage().decoders;
+
+        let latest = SessionKey {
+            source: src.id,
+            instance: 3,
+            purpose: DecodePurpose::Display,
+        };
+        *svc.lease.lock().unwrap() = MediaLease {
+            frame_cache: 0,
+            decoders: 1,
+        };
+        svc.fit_older_than(latest);
+        assert_eq!(windows(), vec![1; 3]);
+        assert!(svc.usage().decoders < before);
+
+        svc.set_active_display([(src.id, 3)]);
+        svc.fit_older_than(latest);
+        assert_eq!(svc.usage().sessions, 1);
+        svc.apply_lease(MediaLease {
+            frame_cache: 0,
+            decoders: 0,
+        });
+        assert_eq!(svc.usage().sessions, 0);
+    }
 }

@@ -22,9 +22,10 @@
 //! | Nested `begin`/`commit` depth | The kernel's open entry (`crate::tx`); [`transact`](crate::DocumentStore::transact) takes the whole command list |
 //! | `packHistory` (`projectHistory.<id>` dictionary) | [`HistorySnapshot::to_saved_packed`] (content-interned records) |
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use pm_model::canonical::canonicalize_patches;
+use pm_model::json::JsonSlice;
 use pm_model::ops::{Op, ops_to_value};
 use pm_model::patch::{Patch, PathPart};
 use pm_model::{JsString, Map, Value};
@@ -48,8 +49,9 @@ pub struct ExternalRef {
     pub cleanup: bool,
 }
 
-/// Immutable canonical JSON, compressed only when that saves space. No decoded
-/// cache: a scan or save must not permanently expand the entire undo stack.
+/// Immutable JSON, compressed only when that saves space. Operation lists
+/// are canonical and retained file history keeps validated source slices.
+/// A scan or save must not permanently expand the undo stack.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactJson {
     data: Arc<[u8]>,
@@ -60,7 +62,13 @@ pub struct CompactJson {
     /// a scan for media records passes over the others undecoded.
     media: bool,
     exact: Option<Arc<Value>>,
-    entries: Option<Arc<[CompactJson]>>,
+    parts: Option<CompactParts>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum CompactParts {
+    Object(Arc<[(JsString, CompactJson)]>),
+    Array(Arc<[CompactJson]>),
 }
 impl CompactJson {
     pub fn new(value: &Value) -> Self {
@@ -86,45 +94,72 @@ impl CompactJson {
         }
         let entries = pm_model::parallel::map(entries.len(), |i| Self::new(&entries[i]));
         let mut stored = Self::new(&Value::Object(metadata));
-        stored.entries = Some(entries.into());
+        stored.attach(vec![("entries".into(), Self::array(entries))]);
         stored
     }
+
+    fn array(items: Vec<Self>) -> Self {
+        let mut stored = Self::text("[]".into());
+        stored.parts = Some(CompactParts::Array(items.into()));
+        stored
+    }
+
+    fn attach(&mut self, members: Vec<(JsString, Self)>) {
+        self.parts = Some(CompactParts::Object(members.into()));
+    }
+
     fn text(text: String) -> Self {
-        let len = text.len();
         let old_3d = text.contains("powermove.3d.");
         let media = text.contains("\"storageKey\"") || text.contains("\"fingerprint\"");
-        let packed = zstd::bulk::compress(text.as_bytes(), 1).expect("history compression");
+        Self::store(text.as_bytes(), old_3d, media)
+    }
+
+    fn retained_slice(slice: JsonSlice<'_>) -> Self {
+        // Only the imported operation lists use the content flags. Raw
+        // retention also keeps signed zero and overflowing numbers intact.
+        Self::store(slice.as_str().as_bytes(), false, false)
+    }
+
+    fn store(bytes: &[u8], old_3d: bool, media: bool) -> Self {
+        let len = bytes.len();
+        let packed = zstd::bulk::compress(bytes, 1).expect("history compression");
         let compressed = packed.len() < len;
         let data = if compressed {
-            packed
+            packed.into()
         } else {
-            text.into_bytes()
+            bytes.into()
         };
         Self {
-            data: data.into(),
+            data,
             compressed,
             len,
             old_3d,
             media,
             exact: None,
-            entries: None,
+            parts: None,
         }
     }
+
     pub fn value(&self) -> Value {
-        if let Some(value) = &self.exact {
-            return (**value).clone();
+        if let Some(CompactParts::Array(items)) = &self.parts {
+            return Value::Array(items.iter().map(Self::value).collect());
         }
-        let bytes = if self.compressed {
-            zstd::bulk::decompress(&self.data, self.len).expect("internal history bytes")
+        let mut value = if let Some(value) = &self.exact {
+            (**value).clone()
+        } else if self.compressed {
+            let bytes =
+                zstd::bulk::decompress(&self.data, self.len).expect("internal history bytes");
+            pm_model::json::parse_file_text(&bytes).expect("internal history JSON")
         } else {
-            self.data.to_vec()
+            pm_model::json::parse_file_text(&self.data).expect("internal history JSON")
         };
-        let mut value = pm_model::json::parse_file_text(&bytes).expect("canonical history JSON");
-        if let Some(entries) = &self.entries {
-            value.as_object_mut().unwrap().insert(
-                "entries",
-                Value::Array(entries.iter().map(Self::value).collect()),
-            );
+        if let Some(CompactParts::Object(members)) = &self.parts {
+            for (key, member) in members.iter() {
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(key.clone(), member.value());
+            }
         }
         value
     }
@@ -1242,6 +1277,16 @@ pub(crate) fn unpack(value: &Value) -> Option<Value> {
     let records = map.get("records")?.as_array()?;
     let history = map.get("history")?.as_object()?;
     let entries = history.get("entries")?.as_array()?;
+    let new_entries = entries
+        .iter()
+        .map(|entry| unpack_entry(entry.clone(), |i| records.get(i).cloned()))
+        .collect::<Option<Vec<_>>>()?;
+    let mut out = history.clone();
+    out.insert("entries", Value::Array(new_entries));
+    Some(Value::Object(out))
+}
+
+fn unpack_entry(mut entry: Value, record: impl Fn(usize) -> Option<Value>) -> Option<Value> {
     let unpack_patch = |item: &Value| -> Option<Value> {
         let item = item.as_object()?;
         let patch = item.get("patch")?.as_object()?;
@@ -1258,26 +1303,24 @@ pub(crate) fn unpack(value: &Value) -> Option<Value> {
             .map(|r| {
                 let n = r.as_f64()?;
                 (n.fract() == 0.0 && n >= 0.0).then_some(())?;
-                records.get(n as usize).cloned()
+                record(n as usize)
             })
             .collect();
         let mut out = patch.clone();
         out.insert("value", Value::Array(values?));
         Some(Value::Object(out))
     };
-    let mut new_entries = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let mut e = entry.as_object()?.clone();
-        for side in ["forward", "backward"] {
-            let list: Option<Vec<Value>> =
-                e.get(side)?.as_array()?.iter().map(unpack_patch).collect();
-            e.insert(side, Value::Array(list?));
-        }
-        new_entries.push(Value::Object(e));
+    let fields = entry.as_object_mut()?;
+    for side in ["forward", "backward"] {
+        let list: Option<Vec<Value>> = fields
+            .get(side)?
+            .as_array()?
+            .iter()
+            .map(unpack_patch)
+            .collect();
+        fields.insert(side, Value::Array(list?));
     }
-    let mut out = history.clone();
-    out.insert("entries", Value::Array(new_entries));
-    Some(Value::Object(out))
+    Some(entry)
 }
 
 impl History {
@@ -1303,30 +1346,67 @@ impl History {
             saved
         };
         let map = source.as_object().ok_or("history is not an object")?;
-        if map.get("version") != Some(&Value::Number(1.0)) {
-            return Err("history version is not 1".into());
-        }
         let entries = map
             .get("entries")
             .and_then(Value::as_array)
-            .ok_or("history has no entries list")?;
-        if entries.len() > MAX_ENTRIES {
-            return Err(format!("history has more than {MAX_ENTRIES} entries"));
+            .map(Vec::as_slice);
+        let import = SavedImport::new(map, entries.map(<[Value]>::len))?;
+        let entries = entries.expect("validated entries");
+        let parsed =
+            pm_model::parallel::map(entries.len(), |i| import.entry(&entries[i], open_comp));
+        Self::assemble_saved(import.cursor, parsed)
+    }
+
+    /// Import and retain a validated history with one decoded entry at a
+    /// time. The retained copy includes unknown fields and rejected entries.
+    pub(crate) fn from_saved_json(
+        raw: JsonSlice<'_>,
+        open_comp: Option<&str>,
+    ) -> (CompactJson, Option<Self>) {
+        let Some(members) = raw.members() else {
+            return (CompactJson::retained_slice(raw), None);
+        };
+        let mut members: SavedMembers<'_> = members.into_iter().collect();
+        let format = members
+            .get(&JsString::from("format"))
+            .copied()
+            .map(JsonSlice::parse);
+        if format.as_ref().and_then(Value::as_str) != Some(DICTIONARY_FORMAT) {
+            return load_saved_entries(members, open_comp, SavedEntries::Plain, Vec::new());
         }
-        let index = map
-            .get("index")
-            .and_then(Value::as_f64)
-            .ok_or("history has no index")?;
-        if index.fract() != 0.0 || index < -1.0 || index >= entries.len() as f64 {
-            return Err("history index is out of range".into());
+
+        let records = take_array(&mut members, "records");
+        let nested = take_object(&mut members, "history");
+        let dictionary_valid = members
+            .get(&JsString::from("version"))
+            .map(|value| value.parse())
+            == Some(Value::Number(1.0));
+        let mut parts = Vec::new();
+        if let Some(records) = &records {
+            let stored = records
+                .iter()
+                .copied()
+                .map(CompactJson::retained_slice)
+                .collect();
+            parts.push(("records".into(), CompactJson::array(stored)));
         }
-        let root_relative = map.get("paths").and_then(Value::as_str) != Some("composition");
-        // Entries parse and are measured on several threads (measuring
-        // serializes every patch: most of a large history's import, on the
-        // path to a project's first frame); records are made in order.
-        let parsed = pm_model::parallel::map(entries.len(), |i| {
-            import_entry(&entries[i], root_relative, open_comp)
+        let imported = nested.and_then(|nested| {
+            let source = records
+                .as_deref()
+                .filter(|_| dictionary_valid)
+                .map_or(SavedEntries::RetainOnly, SavedEntries::Dictionary);
+            let (stored, imported) = load_saved_entries(nested, open_comp, source, Vec::new());
+            parts.push(("history".into(), stored));
+            imported
         });
+        let (retained, _) = load_saved_entries(members, open_comp, SavedEntries::RetainOnly, parts);
+        (retained, imported)
+    }
+
+    fn assemble_saved(
+        cursor: usize,
+        parsed: impl IntoIterator<Item = Result<ImportedEntry, String>>,
+    ) -> Result<Self, String> {
         let mut history = History::new();
         for entry in parsed {
             let (label, forward, backward, bytes) = entry?;
@@ -1349,7 +1429,7 @@ impl History {
             });
             history.total_bytes += bytes;
         }
-        history.cursor = (index + 1.0) as usize;
+        history.cursor = cursor;
         // Reopening under a smaller budget drops distant redo first.
         while history.total_bytes > history.max_bytes && history.entries.len() > history.cursor {
             let removed = history.entries.pop().expect("non-empty");
@@ -1358,6 +1438,116 @@ impl History {
         history.trim();
         Ok(history)
     }
+}
+
+type ImportedEntry = (String, StoredOps, StoredOps, usize);
+type SavedMembers<'a> = BTreeMap<JsString, JsonSlice<'a>>;
+
+struct SavedImport {
+    cursor: usize,
+    root_relative: bool,
+}
+
+impl SavedImport {
+    fn new(metadata: &Map, count: Option<usize>) -> Result<Self, String> {
+        if metadata.get("version") != Some(&Value::Number(1.0)) {
+            return Err("history version is not 1".into());
+        }
+        let count = count.ok_or("history has no entries list")?;
+        if count > MAX_ENTRIES {
+            return Err(format!("history has more than {MAX_ENTRIES} entries"));
+        }
+        let index = metadata
+            .get("index")
+            .and_then(Value::as_f64)
+            .ok_or("history has no index")?;
+        if index.fract() != 0.0 || index < -1.0 || index >= count as f64 {
+            return Err("history index is out of range".into());
+        }
+        Ok(Self {
+            cursor: (index + 1.0) as usize,
+            root_relative: metadata.get("paths").and_then(Value::as_str) != Some("composition"),
+        })
+    }
+
+    fn entry(&self, entry: &Value, open_comp: Option<&str>) -> Result<ImportedEntry, String> {
+        import_entry(entry, self.root_relative, open_comp)
+    }
+}
+
+fn take_array<'a>(members: &mut SavedMembers<'a>, key: &str) -> Option<Vec<JsonSlice<'a>>> {
+    let key = JsString::from(key);
+    let items = members.get(&key)?.items()?;
+    members.remove(&key);
+    Some(items)
+}
+
+fn take_object<'a>(members: &mut SavedMembers<'a>, key: &str) -> Option<SavedMembers<'a>> {
+    let key = JsString::from(key);
+    let object = members.get(&key)?.members()?;
+    members.remove(&key);
+    Some(object.into_iter().collect())
+}
+
+enum SavedEntries<'a> {
+    Plain,
+    Dictionary(&'a [JsonSlice<'a>]),
+    RetainOnly,
+}
+
+fn load_saved_entries(
+    mut members: SavedMembers<'_>,
+    open_comp: Option<&str>,
+    source: SavedEntries<'_>,
+    mut parts: Vec<(JsString, CompactJson)>,
+) -> (CompactJson, Option<History>) {
+    let entries = take_array(&mut members, "entries");
+    let mut metadata = Map::new();
+    for (key, value) in members {
+        metadata.insert(key, value.parse());
+    }
+    let import = if matches!(source, SavedEntries::RetainOnly) {
+        None
+    } else {
+        SavedImport::new(&metadata, entries.as_ref().map(Vec::len)).ok()
+    };
+    let mut retained = CompactJson::new(&Value::Object(metadata));
+    let mut history = None;
+    if let Some(entries) = entries {
+        let (compact, imported) = pm_model::parallel::join(
+            || {
+                entries
+                    .iter()
+                    .copied()
+                    .map(CompactJson::retained_slice)
+                    .collect()
+            },
+            || {
+                let import = import?;
+                let parsed = entries.iter().map(|slice| {
+                    let entry = slice.parse();
+                    match source {
+                        SavedEntries::Plain => import.entry(&entry, open_comp),
+                        SavedEntries::Dictionary(records) => {
+                            unpack_entry(entry, |i| records.get(i).map(|r| r.parse()))
+                                .ok_or_else(|| "invalid history dictionary".into())
+                                .and_then(|entry| import.entry(&entry, open_comp))
+                        }
+                        SavedEntries::RetainOnly => {
+                            unreachable!("history is retained without import")
+                        }
+                    }
+                });
+                History::assemble_saved(import.cursor, parsed).ok()
+            },
+        );
+        parts.push(("entries".into(), CompactJson::array(compact)));
+        history = imported;
+    }
+    if !parts.is_empty() {
+        retained.attach(parts);
+    }
+    (retained, history)
 }
 
 /// How many entries `History::import` keeps of a saved history with these
@@ -1485,7 +1675,7 @@ fn import_entry(
     entry: &Value,
     root_relative: bool,
     open_comp: Option<&str>,
-) -> Result<(String, StoredOps, StoredOps, usize), String> {
+) -> Result<ImportedEntry, String> {
     let e = entry
         .as_object()
         .ok_or("a history entry is not an object")?;

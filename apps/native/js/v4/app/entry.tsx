@@ -40,18 +40,28 @@ import type {
   Overlays,
   PanelHeader,
   PanelHeaderAction,
+  PanelHeaderPatch,
   Shell,
   SlotId,
   Slots,
+  StatusBar,
+  StatusBarItem,
+  StatusBarPatch,
+  StatusBarTarget,
   Storage,
   Themes,
   Timeline,
   Toolbar,
+  ToolbarAddItem,
   ToolbarItem,
+  ToolbarMenuItem,
+  ToolbarPatch,
+  ToolbarTarget,
   ToolDefinition,
   ToolKeyEvent,
   ToolPointerEvent,
   Tools,
+  Ui,
   Workspace,
 } from "../src/builtin";
 import { mount as layerEffects } from "../panels/effect-controls/mount";
@@ -80,12 +90,21 @@ const CAPABILITIES: readonly Capability[] = [
   "transitions",
   "layers",
   "toolbar",
+  "toolbar.modify",
+  "toolbar.contributeAddItem",
   "panelHeader",
+  "panelHeader.modify",
   "menuBar",
+  "statusBar",
+  "statusBar.contribute",
+  "statusBar.modify",
+  "ui",
+  "ui.surfaces",
   "tools",
   "slots",
   "events",
   "workspace",
+  "workspace.setLayout",
   "dialogs",
   "fs",
   "storage",
@@ -276,10 +295,23 @@ const menuProviders: {
   items: (ctx: Record<string, Json>) => MenuItem[] | Promise<MenuItem[]>;
 }[] = [];
 let menuRuns = new Map<string, () => unknown>();
+function isProtectedSettingsSurface(id: string): boolean {
+  const lower = id.trim().toLowerCase();
+  return (
+    lower === "settings" ||
+    lower.startsWith("settings.") ||
+    lower.startsWith("settings:") ||
+    lower === "panel:settings" ||
+    lower.startsWith("panel:settings.") ||
+    lower.startsWith("panel:settings:")
+  );
+}
 const menuApi: Menus = {
   contribute(location, items) {
     if (typeof location !== "string" || typeof items !== "function")
       throw new Error("A menu contribution needs a location and a function");
+    if (isProtectedSettingsSurface(location))
+      throw new Error("Extensions cannot modify the Settings UI surface");
     const entry = { location, items };
     menuProviders.push(entry);
     return () => {
@@ -289,6 +321,7 @@ const menuApi: Menus = {
   },
 };
 async function gatherMenu(location: string, ctx: Record<string, Json>) {
+  if (isProtectedSettingsSurface(location)) return [];
   menuRuns = new Map();
   let serial = 0;
   const lower = (item: MenuItem): Json =>
@@ -323,35 +356,125 @@ async function gatherMenu(location: string, ctx: Record<string, Json>) {
 
 // ---- Layer 1: Toolbar, Panel Header, Menu Bar --------------------------------
 
-const toolbarItems = new Map<string, ToolbarItem>();
-const publishToolbar = () =>
-  native(
-    "toolbar.set",
-    [...toolbarItems.values()].map((item) => ({
-      id: item.id,
-      label: item.label,
-      icon: item.icon ?? null,
-      tooltip: item.tooltip ?? item.label,
-      active: !!item.active,
-      badge: item.badge ?? null,
-    })),
+function contributeChrome<K, T>(
+  entries: Map<K, T>,
+  id: K,
+  entry: T,
+  publish: () => void,
+): () => void {
+  const previous = entries.get(id);
+  entries.set(id, entry);
+  try {
+    publish();
+  } catch (error) {
+    if (previous === undefined) entries.delete(id);
+    else entries.set(id, previous);
+    throw error;
+  }
+  return () => {
+    if (entries.get(id) !== entry) return;
+    entries.delete(id);
+    publish();
+  };
+}
+
+function modifyChrome<K extends string, P extends object>(
+  entries: Map<K, P>,
+  operation: string,
+  targetField: string,
+  target: K,
+  patch: P,
+): () => void {
+  return contributeChrome(entries, target, { ...patch }, () =>
+    native(
+      operation,
+      [...entries].map(([id, fields]) => ({ ...fields, [targetField]: id })),
+    ),
   );
+}
+
+const toolbarItems = new Map<
+  string,
+  {
+    descriptor: object;
+    onClick?: () => unknown;
+    menuRuns: Map<string, () => unknown>;
+  }
+>();
+const toolbarMods = new Map<ToolbarTarget, ToolbarPatch>();
+const toolbarAddItems = new Map<string, ToolbarAddItem>();
+let toolbarMenuSerial = 0;
+
+function lowerToolbarItem({ onClick, menu, ...descriptor }: ToolbarItem) {
+  const menuRuns = new Map<string, () => unknown>();
+  const lower = ({ run, submenu, ...item }: ToolbarMenuItem): object => {
+    let actionKey: string | undefined;
+    if (typeof run === "function" && !descriptor.disabled && !item.disabled && !item.separator) {
+      actionKey = `toolbar-menu-${++toolbarMenuSerial}`;
+      menuRuns.set(actionKey, run);
+    }
+    return { ...item, actionKey, submenu: submenu?.map(lower) };
+  };
+  return {
+    descriptor: {
+      ...descriptor,
+      icon: descriptor.icon ?? null,
+      tooltip: descriptor.tooltip ?? descriptor.label,
+      active: !!descriptor.active,
+      badge: descriptor.badge ?? null,
+      menu: menu?.map(lower),
+    },
+    onClick: descriptor.disabled ? undefined : onClick,
+    menuRuns,
+  };
+}
+
 const toolbarApi: Toolbar = {
   contribute(item) {
-    if (!item || typeof item.id !== "string" || !item.id || typeof item.label !== "string")
-      throw new Error("A toolbar item needs an id and a label");
-    if (typeof item.onClick !== "function")
-      throw new Error("A toolbar item needs an onClick handler");
-    toolbarItems.set(item.id, item);
-    publishToolbar();
-    return () => {
-      if (toolbarItems.get(item.id) === item) {
-        toolbarItems.delete(item.id);
-        publishToolbar();
-      }
-    };
+    if (typeof item?.onClick !== "function" && !Array.isArray(item?.menu))
+      throw new Error("A toolbar item needs an onClick handler or a menu");
+    return contributeChrome(toolbarItems, item.id, lowerToolbarItem(item), () =>
+      native(
+        "toolbar.set",
+        [...toolbarItems.values()].map((item) => item.descriptor),
+      ),
+    );
+  },
+  modify(target, patch) {
+    return modifyChrome(toolbarMods, "toolbar.modify.set", "target", target, patch);
+  },
+  contributeAddItem(item) {
+    if (typeof item?.onClick !== "function")
+      throw new Error("An Add menu item needs an onClick handler");
+    return contributeChrome(toolbarAddItems, item.id, { ...item }, () =>
+      native(
+        "toolbar.addMenu.set",
+        [...toolbarAddItems.values()].map(({ onClick, ...item }) => item),
+      ),
+    );
   },
 };
+
+const statusBarItems = new Map<string, StatusBarItem>();
+const statusBarMods = new Map<StatusBarTarget, StatusBarPatch>();
+const statusBarApi: StatusBar = {
+  contribute(item) {
+    return contributeChrome(statusBarItems, item.id, { ...item }, () =>
+      native(
+        "statusBar.set",
+        [...statusBarItems.values()].map(({ onClick, ...item }) => ({
+          ...item,
+          clickable: item.clickable ?? typeof onClick === "function",
+        })),
+      ),
+    );
+  },
+  modify(target, patch) {
+    return modifyChrome(statusBarMods, "statusBar.modify.set", "target", target, patch);
+  },
+};
+
+const uiApi: Ui = { surfaces: () => native("ui.surfaces") };
 
 const panelHeaderItems = new Map<
   string,
@@ -370,6 +493,7 @@ const publishPanelHeaders = () =>
       active: !!action.active,
     })),
   );
+const panelHeaderMods = new Map<string, PanelHeaderPatch>();
 const panelHeaderApi: PanelHeader = {
   contribute(panelId, action) {
     if (typeof panelId !== "string" || !panelId)
@@ -377,15 +501,15 @@ const panelHeaderApi: PanelHeader = {
     if (!action || typeof action.id !== "string" || !action.id || typeof action.onClick !== "function")
       throw new Error("A panel header action needs an id and an onClick handler");
     const key = `${panelId}:${action.id}`;
-    const entry = { panelId, action };
-    panelHeaderItems.set(key, entry);
-    publishPanelHeaders();
-    return () => {
-      if (panelHeaderItems.get(key) === entry) {
-        panelHeaderItems.delete(key);
-        publishPanelHeaders();
-      }
-    };
+    return contributeChrome(
+      panelHeaderItems,
+      key,
+      { panelId, action },
+      publishPanelHeaders,
+    );
+  },
+  modify(panelId, patch) {
+    return modifyChrome(panelHeaderMods, "panelHeader.modify.set", "panelId", panelId, patch);
   },
 };
 
@@ -504,6 +628,7 @@ const publishTools = () =>
       icon: t.icon ?? null,
       shortcut: t.shortcut ?? null,
       cursor: t.cursor ?? null,
+      showInToolbar: t.showInToolbar,
     })),
   );
 
@@ -559,6 +684,7 @@ function slotsFor(env: { rootOptions: any }): Slots {
   const contribute = (slot: SlotId, component: () => unknown) => {
     if (typeof slot !== "string" || !slot || typeof component !== "function")
       throw new Error("slots.contribute needs a slot id and a component");
+    native("slot.validate", { slot });
     const prev = slotRoots.get(slot);
     if (prev) {
       slotRoots.delete(slot);
@@ -636,6 +762,8 @@ const workspaceApi: Workspace = {
   focusPanel: (id) => platform("ext.workspace.focusPanel", { id }),
   togglePanel: (id) => platform("ext.workspace.togglePanel", { id }),
   getLayout: () => platform("ext.workspace.getLayout", {}),
+  setLayout: (layout) =>
+    platform("ext.workspace.runCommand", { name: "workspaceSetLayout", args: [layout] }),
   runCommand: (name, args = []) =>
     platform("ext.workspace.runCommand", { name, args }),
   notify: (message) => platform("ext.workspace.notify", { message }),
@@ -762,6 +890,8 @@ async function mountExtension(
     overlays,
     timeline: timelineApi,
     toolbar: toolbarApi,
+    statusBar: statusBarApi,
+    ui: uiApi,
     panelHeader: panelHeaderApi,
     menuBar: menuBarApi,
     tools: toolsApi,
@@ -835,6 +965,8 @@ async function mountExtension(
     overlays,
     timeline: timelineApi,
     toolbar: toolbarApi,
+    statusBar: statusBarApi,
+    ui: uiApi,
     panelHeader: panelHeaderApi,
     menuBar: menuBarApi,
     tools: toolsApi,
@@ -860,7 +992,19 @@ async function mountExtension(
 
 (globalThis as any).__pmBuiltin = {
   mount,
-  mountExtension,
+  async mountExtension(...args: Parameters<typeof mountExtension>) {
+    try {
+      return await mountExtension(...args);
+    } catch (error) {
+      // An ordinary activation exception can leave the V8 realm alive.
+      try {
+        native("extension.activationFailed");
+      } catch {
+        // Preserve the original error if the realm can no longer call the host.
+      }
+      throw error;
+    }
+  },
   hot() {
     for (const dispose of hot.disposers) dispose(hot.data);
     return JSON.stringify(hot.data);
@@ -929,7 +1073,31 @@ async function mountExtension(
   async runToolbar(id: string) {
     const item = toolbarItems.get(id);
     if (!item) throw new Error(`No toolbar item ${id}`);
+    await item.onClick?.();
+    await settle();
+    return true;
+  },
+  async runToolbarMenu(key: string) {
+    for (const { menuRuns } of toolbarItems.values()) {
+      const run = menuRuns.get(key);
+      if (!run) continue;
+      await run();
+      await settle();
+      return true;
+    }
+    throw new Error("This toolbar menu item is gone");
+  },
+  async runToolbarAddItem(id: string) {
+    const item = toolbarAddItems.get(id);
+    if (!item) throw new Error(`No Add menu item ${id}`);
     await item.onClick();
+    await settle();
+    return true;
+  },
+  async runStatusBar(id: string) {
+    const item = statusBarItems.get(id);
+    if (!item) throw new Error(`No status bar item ${id}`);
+    if (item.clickable !== false) await item.onClick?.();
     await settle();
     return true;
   },

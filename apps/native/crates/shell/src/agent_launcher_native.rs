@@ -29,6 +29,7 @@ fn timer(
 pub(super) struct State {
     model: RefCell<Launcher>,
     tokens: RefCell<Tokens>,
+    toolbar_mod: RefCell<Option<ExtensionToolbarMod>>,
     target: Retained<Target>,
     presence_visible: Cell<bool>,
     hover: RefCell<Option<Retained<NSTimer>>>,
@@ -106,7 +107,7 @@ impl AgentButton {
         tokens: Tokens,
     ) -> Retained<Self> {
         let b: Retained<Self> = unsafe {
-            msg_send![super(Self::alloc(mtm).set_ivars(State { model:RefCell::new(Launcher::default()), tokens:RefCell::new(tokens), target, presence_visible:Cell::new(false), hover:RefCell::new(None), popover:RefCell::new(None), task_refresh:RefCell::new(None) })), initWithFrame:NSRect::new(NSPoint::ZERO,NSSize::new(32.,28.))]
+            msg_send![super(Self::alloc(mtm).set_ivars(State { model:RefCell::new(Launcher::default()), tokens:RefCell::new(tokens), toolbar_mod:RefCell::default(), target, presence_visible:Cell::new(false), hover:RefCell::new(None), popover:RefCell::new(None), task_refresh:RefCell::new(None) })), initWithFrame:NSRect::new(NSPoint::ZERO,NSSize::new(32.,28.))]
         };
         unsafe {
             b.setTarget(Some(&b));
@@ -137,6 +138,12 @@ impl AgentButton {
             self.paint();
         }
     }
+    pub(super) fn set_toolbar_mod(&self, patch: Option<ExtensionToolbarMod>) {
+        if *self.ivars().toolbar_mod.borrow() != patch {
+            self.ivars().toolbar_mod.replace(patch);
+            self.paint();
+        }
+    }
     pub(super) fn publish(&self, snapshot: Snapshot, tokens: Tokens) {
         let state = self.ivars();
         let old = state.model.borrow();
@@ -151,7 +158,6 @@ impl AgentButton {
         model.update(snapshot, animation_now());
         let close_menu = model.snapshot.panel_open || model.running_count() == 0;
         let tone_changed = old_tone != model.toolbar_tone(state.presence_visible.get());
-        let label = NSString::from_str(&model.tooltip(now()));
         drop(model);
         if close_menu {
             self.dismiss();
@@ -160,25 +166,29 @@ impl AgentButton {
         }
         if tone_changed || tokens_changed {
             self.paint();
+        } else {
+            self.update_help();
         }
-        self.setToolTip(Some(&label));
-        self.setAccessibilityLabel(Some(&label));
     }
     fn paint(&self) {
         let state = self.ivars();
         let model = state.model.borrow();
         let tone = model.toolbar_tone(state.presence_visible.get());
-        let mark = image(tone, &state.tokens.borrow());
+        drop(model);
+        let tokens = state.tokens.borrow();
+        let patch = state.toolbar_mod.borrow();
+        let mark = patch.as_ref().and_then(|patch| patch.icon.as_deref())
+            .and_then(|icon| extension_toolbar_image(icon, "Agent", &tokens))
+            .unwrap_or_else(|| image(tone, &tokens));
         let image_size_changed = self.image().is_none_or(|old| old.size() != mark.size());
         self.setImage(Some(&mark));
-        let title = if tone == Tone::Attention {
-            "Needs your answer"
-        } else {
-            ""
-        };
+        let default = if tone == Tone::Attention { "Needs your answer" } else { "" };
+        let title = toolbar_caption(patch.as_ref(), || {
+            if default.is_empty() { "Agent".into() } else { default.into() }
+        }).unwrap_or_else(|| default.to_owned());
         let title_changed = self.title().to_string() != title;
         if title_changed {
-            self.setTitle(&NSString::from_str(title));
+            self.setTitle(&NSString::from_str(&title));
         }
         self.setImagePosition(if title.is_empty() {
             NSCellImagePosition::ImageOnly
@@ -189,9 +199,16 @@ impl AgentButton {
             self.sizeToFit();
         }
 
-        let label = NSString::from_str(&model.tooltip(now()));
-        self.setToolTip(Some(&label));
-        self.setAccessibilityLabel(Some(&label));
+        self.update_help();
+    }
+    fn update_help(&self) {
+        let state = self.ivars();
+        let patch = state.toolbar_mod.borrow();
+        let default = state.model.borrow().tooltip(now());
+        let tip = patch.as_ref().and_then(|patch| patch.tooltip.as_deref()).unwrap_or(&default);
+        let label = patch.as_ref().and_then(|patch| patch.label.as_deref()).unwrap_or(tip);
+        self.setToolTip(Some(&NSString::from_str(tip)));
+        self.setAccessibilityLabel(Some(&NSString::from_str(label)));
     }
     fn refresh_tasks(&self) -> bool {
         let Some(pop) = self

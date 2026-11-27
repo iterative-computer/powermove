@@ -14,12 +14,14 @@ use pm_design::{
 use std::{rc::Rc, time::Instant};
 
 pub type OnAction = Rc<dyn Fn(&str, &mut App)>;
+pub type ExtensionSlot = Rc<dyn Fn(&str, &Tokens, &mut Window, &mut App) -> Vec<AnyElement>>;
 
 pub struct WelcomeView {
     motion: Motion<u64>,
     pub tokens: Tokens,
     pub frame: Frame,
     on_action: OnAction,
+    extension_slot: Option<ExtensionSlot>,
     focus: FocusHandle,
     opened: Instant,
     /// When the animation last started, in seconds since the view opened.
@@ -69,6 +71,11 @@ pub struct WelcomeView {
     list_scroll: ScrollHandle,
 }
 impl WelcomeView {
+    pub fn set_extension_slot(&mut self, render: ExtensionSlot, cx: &mut Context<Self>) {
+        self.extension_slot = Some(render);
+        cx.notify();
+    }
+
     fn motion(&mut self) -> &mut Motion<u64> {
         &mut self.motion
     }
@@ -78,6 +85,7 @@ impl WelcomeView {
             tokens,
             frame,
             on_action,
+            extension_slot: None,
             focus: cx.focus_handle(),
             opened: Instant::now(),
             started: 0.,
@@ -1010,6 +1018,10 @@ impl WelcomeView {
             // The mark at one height on every step; the step under it.
             .pt(px(wt().logo_top))
             .child(column);
+        let [top_slots, bottom_slots] = ["welcome.top", "welcome.bottom"].map(|id| {
+            self.extension_slot.as_ref()
+                .map_or_else(Vec::new, |render| render(id, &t, window, cx))
+        });
         let right = div()
             .absolute()
             .top_0()
@@ -1017,7 +1029,15 @@ impl WelcomeView {
             .right_0()
             .left(px(wt().half))
             .overflow_hidden()
-            .children(frame.preview.as_deref().and_then(|id| preview(id, window)));
+            .children(frame.preview.as_deref().and_then(|id| preview(id, window)))
+            .when(!top_slots.is_empty(), |d| {
+                d.child(div().absolute().top(px(t.metrics.titlebar)).left_0().right_0()
+                    .flex().flex_col().children(top_slots))
+            })
+            .when(!bottom_slots.is_empty(), |d| {
+                d.child(div().absolute().bottom_0().left_0().right_0()
+                    .flex().flex_col().children(bottom_slots))
+            });
         div()
             .id("welcome")
             .role(Role::Group)
