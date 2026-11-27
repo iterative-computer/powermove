@@ -2176,6 +2176,28 @@ test("with Aero the model part opens the picker: the rail (Aero, Claude Code, Co
   expect(actions.at(-1)).toEqual({ type: "openSettings" });
   root.dispose();
 });
+test("the pill never shows a model id: a saved model the catalogue doesn't list reads by its last listed, built-in or readable name", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.settings.provider = "aero";
+  p.snapshot.catalog = harnessCatalog([["pm/anthropic/claude-opus-5-9", "Claude Opus 5.9 Preview"]], []);
+  p.snapshot.settings.model = "pm/anthropic/claude-opus-5-9";
+  await root.render(<AgentView publication={structuredClone(p)} menu={async () => null} send={() => {}} />);
+  expect(byId(root, "agent-model").props.label).toBe("Model, Claude Opus 5.9 Preview");
+  // The catalogue is gone (signed out, a 401): the names stay.
+  for (const [model, name] of [
+    ["pm/anthropic/claude-opus-5-9", "Claude Opus 5.9 Preview"],
+    ["pm/anthropic/claude-opus-5-5", "Claude Opus 5.5"],
+    ["pm/openai/gpt-6.2-sol", "GPT-6.2 Sol"],
+    ["pm/mistral/le-chat-2-1", "Le Chat 2.1"],
+  ]) {
+    p.snapshot.catalog = harnessCatalog([], []);
+    p.snapshot.settings.model = model!;
+    await root.render(<AgentView publication={structuredClone(p)} menu={async () => null} send={() => {}} />);
+    expect(byId(root, "agent-model").props.label).toBe(`Model, ${name}`);
+  }
+  root.dispose();
+});
 test("the effort part opens the reasoning menu: the model's levels in order, ✓ on the one in use; a level closes it and the pill reads it at once, never the old one", async () => {
   const { root } = mount();
   const actions: Action[] = [];

@@ -722,10 +722,49 @@ function unwrap(raw: string): string {
     return text;
   }
 }
+/** Built-in names for the models Powermove offers, by id without its
+ *  `pm/<provider>/` prefix. */
+const KNOWN_MODELS: Record<string, string> = {
+  "claude-opus-5-5": "Claude Opus 5.5",
+  "claude-sonnet-5-5": "Claude Sonnet 5.5",
+  "claude-haiku-5-5": "Claude Haiku 5.5",
+  "claude-fable-5-2": "Claude Fable 5.2",
+  "gpt-6.2-sol": "GPT-6.2 Sol",
+  "gpt-6.1-sol": "GPT-6.1 Sol",
+  "gpt-6-sol": "GPT-6 Sol",
+  "gpt-6-luna": "GPT-6 Luna",
+  "gemini-3-pro": "Gemini 3 Pro",
+  "gemini-3-flash": "Gemini 3 Flash",
+};
+/** How a model the catalogue doesn't list is named: a built-in name, else
+ *  its id made readable
+ *  (`pm/anthropic/claude-opus-5-5` → "Claude Opus 5.5"); never a `pm/` or
+ *  provider prefix. */
+export function modelDisplayName(id: string): string {
+  const bare = (id.startsWith("pm/") ? id.slice(3) : id).split("/").pop() ?? id;
+  const key = bare.toLowerCase().replace(/(\d)\.(\d)/g, "$1-$2");
+  const known = KNOWN_MODELS[bare.toLowerCase()] ?? KNOWN_MODELS[key];
+  if (known) return known;
+  const words = bare.split(/[-_\s]+/).filter(Boolean);
+  if (!id.includes("/") || words.length === 0) return bare;
+  const out: string[] = [];
+  for (const word of words) {
+    const last = out[out.length - 1];
+    // Version digits join with dots ("5-5" → "5.5").
+    if (/^\d+$/.test(word) && last && /^\d+(\.\d+)*$/.test(last)) out[out.length - 1] = `${last}.${word}`;
+    else out.push(/^gpt$/i.test(word) ? "GPT" : word.charAt(0).toUpperCase() + word.slice(1));
+  }
+  // "GPT 6.2 Sol" reads as OpenAI writes it: "GPT-6.2 Sol".
+  return out.join(" ").replace(/^GPT (\d)/, "GPT-$1");
+}
+/** Error text with every catalogue id (`pm/<provider>/<model>`) named. */
+export function nameModels(text: string): string {
+  return text.replace(/\bpm\/[a-z0-9-]+\/[A-Za-z0-9._-]*[A-Za-z0-9]/g, (id) => modelDisplayName(id));
+}
 /** Diagnostics stay available; nobody has to decipher a transport log. */
 export function presentError(raw: string): ErrorPresentation {
   const details = raw.trim();
-  const text = unwrap(details);
+  const text = nameModels(unwrap(details));
   const result = (title: string, message: string) => ({
     title,
     message,
