@@ -3,7 +3,8 @@ import { and, desc, eq, ilike, isNotNull, or, sql, type SQL } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/pg-core';
 import { Admin, ApiError, type AdminAccount, type AdminExtension, type AdminGrant, type AdminLogEntry, type AdminPublisher } from '@powermove/registry/wire';
 import type { Env } from '../env';
-import { admins, extensions, installs, moderationLog, publishers, releases, repos } from '../db/schema';
+import { admins, aeroBlocks, extensions, installs, moderationLog, publishers, releases, repos } from '../db/schema';
+import { aeroOverview } from '../billing/analytics';
 import { user, session, account as authAccount } from '../db/auth-schema';
 import { listing } from './repo-management';
 import { requireAdmin, requireSession } from './session';
@@ -259,4 +260,15 @@ export const adminRoutes = new Hono<Env>()
           : null,
       })),
     });
+  })
+  .get('/aero/overview', async (c) => c.json(Admin.AeroOverview.Res.parse(await aeroOverview(c.var.data.db, c.env))))
+  .delete('/aero/blocks/:userId', async (c) => {
+    const s = requireSession(c);
+    const userId = c.req.param('userId');
+    await c.var.data.tx(async (tx) => {
+      const removed = await tx.delete(aeroBlocks).where(eq(aeroBlocks.userId, userId)).returning({ userId: aeroBlocks.userId });
+      if (!removed.length) throw new ApiError({ error: 'not_found' });
+      await tx.insert(moderationLog).values({ userId, action: 'unblock_aero', reason: '', actor: s.userId });
+    });
+    return c.body(null, 204);
   });

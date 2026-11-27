@@ -24,7 +24,8 @@ import type { LanguageModelUsage, TextStreamPart, ToolSet } from 'ai';
 import type { Data } from '../db/client';
 import { aeroBlocks, creditLedger } from '../db/schema';
 import { lockBalance, periodBalance, spendingPeriod } from '../billing/ledger';
-import { type AeroModel, type Metered, PRICE_VERSION, ceilingRates, cost, modelById } from './catalogue';
+import { type AeroModel, CREDIT_NANO_USD, type Metered, PRICE_VERSION, ceilingRates, cost, modelById } from './catalogue';
+import type { Emit } from '../telemetry';
 import type { Fetch } from './providers';
 import { imageTokens } from './images';
 import { V2Error } from '../v2-error';
@@ -142,6 +143,8 @@ export interface MeterOptions {
   requestedMax: number | undefined;
   /** The most Aero may spend across all accounts in a UTC day, in nano-USD. */
   globalDailyNano: number;
+  /** Server analytics (telemetry.ts): best-effort, never blocking. */
+  emit?: Emit;
   fetch?: Fetch;
 }
 
@@ -251,6 +254,7 @@ export class Meter {
         .where(and(inArray(creditLedger.kind, ['spend', 'hold']), sql`${creditLedger.createdAt} >= date_trunc('day', clock_timestamp() at time zone 'UTC') at time zone 'UTC'`)) as [{ today: string }];
       if (Number(today) + hold > this.options.globalDailyNano) {
         console.error('aero global daily ceiling reached', Number(today), hold, this.options.globalDailyNano);
+        this.options.emit?.('aero_ceiling_reached', userId, { today_usd: Number(today) / 1e9, hold_usd: hold / 1e9, ceiling_usd: this.options.globalDailyNano / 1e9, model: model.id });
         throw new V2Error(503, 'capacity_exhausted', 3600);
       }
       const claimed = await tx.insert(creditLedger).values({
@@ -309,13 +313,13 @@ export class Meter {
     await this.reserving;
     if (!this.held) return;
     await this.saving;
-    await settleStored(this.options.store, this.options.data);
+    await settleStored(this.options.store, this.options.data, this.options.emit);
   }
 }
 
 /** Settles a call from what its object stored: the live stream's end, or the alarm after the object died. Throws
     when the database write fails; the caller retries later. */
-export async function settleStored(store: CallStore, data: Data): Promise<'settled' | 'none'> {
+export async function settleStored(store: CallStore, data: Data, emit?: Emit): Promise<'settled' | 'none'> {
   const call = await store.get<Call>('call');
   if (!call) {
     // Killed between its intent and its record: if its hold committed, it is billed in full.
@@ -340,7 +344,8 @@ export async function settleStored(store: CallStore, data: Data): Promise<'settl
     if (price.nanoUsd > call.holdNano) {
       // The circuit breaker: a bound that didn't hold stops the account until someone reviews it.
       console.error('aero spend over its hold: account blocked for review', call.key, price.nanoUsd, call.holdNano);
-      await data.db.insert(aeroBlocks).values({ userId: call.userId, reason: `spend ${price.nanoUsd} over hold ${call.holdNano}`, key: call.key }).onConflictDoNothing();
+      const blocked = await data.db.insert(aeroBlocks).values({ userId: call.userId, reason: `spend ${price.nanoUsd} over hold ${call.holdNano}`, key: call.key }).onConflictDoNothing().returning({ userId: aeroBlocks.userId });
+      if (blocked.length) emit?.('aero_blocked', call.userId, { model: call.model, cost_usd: price.nanoUsd / 1e9, hold_usd: call.holdNano / 1e9 });
     }
     settlement = { source: 'reported', usage, nanoUsd: Math.min(price.nanoUsd, call.holdNano), fresh: price.fresh, estimated: false };
   } else if (stage === 'refused' || stage === 'cancelled') {
@@ -350,7 +355,18 @@ export async function settleStored(store: CallStore, data: Data): Promise<'settl
   }
   const attempts = (await store.get<number>('attempts')) ?? 0;
   await store.put({ attempts: attempts + 1 });
-  await writeSpend(data, call, settlement);
+  const wrote = await writeSpend(data, call, settlement);
+  // Once per call: only the write that turned the hold into its spend reports it. Usage facts only, no content.
+  if (wrote && emit) {
+    const u = settlement.usage;
+    emit('aero_call_settled', call.userId, {
+      model: call.model, provider: model.provider, usage_source: settlement.source, estimated: settlement.estimated,
+      input_tokens: u.input, fresh_input_tokens: settlement.fresh, cache_read_tokens: u.cacheRead, cache_write_tokens: u.cacheWrite,
+      cache_write_long_tokens: u.cacheWriteLong, output_tokens: u.output, reasoning_tokens: u.reasoning,
+      cache_hit_ratio: u.input > 0 ? u.cacheRead / u.input : 0, cost_usd: settlement.nanoUsd / 1e9, credits: settlement.nanoUsd / CREDIT_NANO_USD,
+      duration_ms: call.dispatchedAt ? Date.now() - call.dispatchedAt : null,
+    });
+  }
   await store.deleteAlarm();
   await store.deleteAll();
   return 'settled';
@@ -358,7 +374,7 @@ export async function settleStored(store: CallStore, data: Data): Promise<'settl
 
 /** The hold becomes the spend in one conditional update (only a hold changes; a settled row stays as it is),
     retried with backoff. */
-async function writeSpend(data: Data, call: Call, s: Settlement) {
+async function writeSpend(data: Data, call: Call, s: Settlement): Promise<boolean> {
   let lastError: unknown;
   for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
     try {
@@ -368,7 +384,7 @@ async function writeSpend(data: Data, call: Call, s: Settlement) {
         cacheWriteLongTokens: s.usage.cacheWriteLong, outputTokens: s.usage.output, reasoningTokens: s.usage.reasoning,
       }).where(and(eq(creditLedger.idempotencyKey, call.key), eq(creditLedger.userId, call.userId), eq(creditLedger.kind, 'hold'))).returning({ id: creditLedger.id });
       if (updated.length === 0) console.info('aero spend already settled', call.key);
-      return;
+      return updated.length > 0;
     } catch (error) {
       lastError = error;
       await new Promise(resolve => setTimeout(resolve, 100 * 2 ** attempt));

@@ -1,5 +1,7 @@
 # Local development: production.ts refuses to serve with any development setting when ENVIRONMENT=production.
 ENVIRONMENT=development
+# PostHog events go only from production; POSTHOG_LOCAL=1 sends them from here too (to wrangler.jsonc's project).
+# POSTHOG_LOCAL=1
 LOCAL_POSTGRES=1
 DATABASE_URL=postgres://powermove:powermove@localhost:54329/powermove
 BETTER_AUTH_SECRET=local-development-secret-32-characters-long

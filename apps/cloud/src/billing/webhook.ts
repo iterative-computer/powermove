@@ -5,6 +5,7 @@ import { checkoutSessions, stripeCustomers, stripeEvents, subscriptions } from '
 import { grantedFor, lockBalance, recordGrant, reverseInvoice } from './ledger';
 import { planById, planForPrice } from './plans';
 import { idOf, invoiceSubscriptionId, stripeClient, subscriptionPeriod } from './stripe';
+import type { Emit } from '../telemetry';
 
 /* Trust: an account owns a Stripe customer only through the `stripe_customers` row the Worker wrote when it created
    that customer. client_reference_id, metadata and lookup keys are never trusted for ownership or plans. A plan is
@@ -23,14 +24,19 @@ const LIVE = ['active', 'trialing', 'past_due', 'unpaid', 'paused'];
 type Apply = (tx: Db) => Promise<string | null | void>;
 
 /** Processes a verified event once. Returns false for a replay of an event already processed. */
-export async function processEvent(data: Data, env: CloudflareBindings, event: Stripe.Event): Promise<boolean> {
-  const apply = HANDLED.has(event.type) ? await prepare(env, data.db, event) : null;
+/** Analytics events an event's changes produce, sent only once its transaction has committed. */
+type Pending = Array<{ event: string; userId: string; properties: Record<string, unknown> }>;
+
+export async function processEvent(data: Data, env: CloudflareBindings, event: Stripe.Event, emit?: Emit): Promise<boolean> {
+  const pending: Pending = [];
+  const apply = HANDLED.has(event.type) ? await prepare(env, data.db, event, pending) : null;
   const result = await data.tx(async (tx) => {
     const fresh = await tx.insert(stripeEvents).values({ id: event.id, type: event.type }).onConflictDoNothing().returning({ id: stripeEvents.id });
     if (fresh.length === 0) return { processed: false, userId: null };
     const userId = apply ? await apply(tx) : null;
     return { processed: true, userId: userId ?? null };
   });
+  if (result.processed) for (const item of pending) emit?.(item.event, item.userId, item.properties);
   if (result.userId) await reconcile(data, env, result.userId);
   return result.processed;
 }
@@ -62,7 +68,7 @@ async function invoiceOfCharge(env: CloudflareBindings, charge: Stripe.Charge): 
   return invoiceId ? { invoiceId, customerId: idOf(charge.customer as string | { id: string } | null) } : null;
 }
 
-async function prepare(env: CloudflareBindings, db: Db, event: Stripe.Event): Promise<Apply | null> {
+async function prepare(env: CloudflareBindings, db: Db, event: Stripe.Event, pending: Pending): Promise<Apply | null> {
   const at = new Date(event.created * 1000);
   switch (event.type) {
     case 'checkout.session.completed':
@@ -74,13 +80,13 @@ async function prepare(env: CloudflareBindings, db: Db, event: Stripe.Event): Pr
       // Read the subscription now: Checkout's events can arrive in any order, and this one is enough to go active.
       const sub = await stripeClient(env).subscriptions.retrieve(subscriptionId);
       if (idOf(sub.customer) !== customerId) return clear;
-      return async (tx) => { await clear(tx); return upsertSubscription(tx, env, sub, at); };
+      return async (tx) => { await clear(tx); return upsertSubscription(tx, env, sub, at, pending); };
     }
     case 'customer.subscription.created':
     case 'customer.subscription.updated':
     case 'customer.subscription.deleted': {
       const sub = event.data.object;
-      return async (tx) => upsertSubscription(tx, env, sub, at);
+      return async (tx) => upsertSubscription(tx, env, sub, at, pending);
     }
     case 'invoice.paid': {
       const invoice = event.data.object;
@@ -90,7 +96,7 @@ async function prepare(env: CloudflareBindings, db: Db, event: Stripe.Event): Pr
       const sub = await stripeClient(env).subscriptions.retrieve(subscriptionId);
       if (idOf(sub.customer) !== idOf(invoice.customer)) return null;
       return async (tx) => {
-        const userId = await upsertSubscription(tx, env, sub, at);
+        const userId = await upsertSubscription(tx, env, sub, at, pending);
         if (!userId) return null;
         // A grant only for a paid invoice that took money, from its line for the exact Aerolite price on this
         // subscription; the credits and the period come from that line, never from the subscription's plan now.
@@ -109,38 +115,40 @@ async function prepare(env: CloudflareBindings, db: Db, event: Stripe.Event): Pr
       const subscriptionId = invoiceSubscriptionId(event.data.object);
       if (!subscriptionId) return null;
       return async (tx) => {
-        await tx.update(subscriptions).set({ status: 'past_due', updatedAt: new Date() })
-          .where(and(eq(subscriptions.id, subscriptionId), inArray(subscriptions.status, ['active', 'trialing'])));
+        const changed = await tx.update(subscriptions).set({ status: 'past_due', updatedAt: new Date() })
+          .where(and(eq(subscriptions.id, subscriptionId), inArray(subscriptions.status, ['active', 'trialing']))).returning({ userId: subscriptions.userId });
+        const [row] = changed.length ? changed : await tx.select({ userId: subscriptions.userId }).from(subscriptions).where(eq(subscriptions.id, subscriptionId)).limit(1);
+        if (row) pending.push({ event: 'payment_failed', userId: row.userId, properties: { subscription_id: subscriptionId, amount_due_cents: event.data.object.amount_due ?? null } });
       };
     }
     case 'invoice.voided':
     case 'invoice.marked_uncollectible': {
       const invoice = event.data.object;
       if (!invoice.id) return null;
-      return async (tx) => reverse(tx, invoice.id!, idOf(invoice.customer), event);
+      return async (tx) => reverse(tx, invoice.id!, idOf(invoice.customer), event, pending);
     }
     case 'charge.refunded': {
       const found = await invoiceOfCharge(env, event.data.object);
       if (!found) return null;
-      return async (tx) => reverse(tx, found.invoiceId, found.customerId, event);
+      return async (tx) => reverse(tx, found.invoiceId, found.customerId, event, pending);
     }
     case 'charge.dispute.created': {
       const chargeId = idOf(event.data.object.charge as string | { id: string });
       if (!chargeId) return null;
       const found = await invoiceOfCharge(env, await stripeClient(env).charges.retrieve(chargeId));
       if (!found) return null;
-      return async (tx) => reverse(tx, found.invoiceId, found.customerId, event);
+      return async (tx) => reverse(tx, found.invoiceId, found.customerId, event, pending);
     }
     default:
       return null;
   }
 }
 
-async function reverse(tx: Db, invoiceId: string, customerId: string | null, event: Stripe.Event) {
+async function reverse(tx: Db, invoiceId: string, customerId: string | null, event: Stripe.Event, pending: Pending) {
   const userId = await ownerOf(tx, customerId);
   if (!userId) return null;
   await lockBalance(tx, userId);
-  await reverseInvoice(tx, { invoiceId, userId, reason: event.type, eventId: event.id });
+  if (await reverseInvoice(tx, { invoiceId, userId, reason: event.type, eventId: event.id })) pending.push({ event: 'credits_reversed', userId, properties: { reason: event.type, invoice_id: invoiceId } });
   return null;
 }
 
@@ -179,14 +187,14 @@ export async function reconcile(data: Data, env: CloudflareBindings, userId: str
 
 /** Writes Stripe's view of a subscription unless a newer one is already stored. Only a customer the Worker created
     for an account, and only the exact configured prices; anything else is skipped. Returns the account. */
-async function upsertSubscription(tx: Db, env: CloudflareBindings, sub: Stripe.Subscription, at: Date): Promise<string | null> {
+async function upsertSubscription(tx: Db, env: CloudflareBindings, sub: Stripe.Subscription, at: Date, pending: Pending): Promise<string | null> {
   const customerId = idOf(sub.customer);
   const item = sub.items?.data?.find(entry => planForPrice(env, entry.price));
   const plan = item ? planForPrice(env, item.price) : null;
   const userId = await ownerOf(tx, customerId);
   if (!customerId || !item || !plan || !userId) return null;
   // A stored subscription never changes hands.
-  const [existing] = await tx.select({ userId: subscriptions.userId, customer: subscriptions.stripeCustomerId }).from(subscriptions).where(eq(subscriptions.id, sub.id)).limit(1);
+  const [existing] = await tx.select({ userId: subscriptions.userId, customer: subscriptions.stripeCustomerId, status: subscriptions.status, cancelAtPeriodEnd: subscriptions.cancelAtPeriodEnd, stripeUpdatedAt: subscriptions.stripeUpdatedAt }).from(subscriptions).where(eq(subscriptions.id, sub.id)).limit(1);
   if (existing && (existing.userId !== userId || existing.customer !== customerId)) return null;
   // A period change waits for any request being admitted against the old one (and the other way round).
   await lockBalance(tx, userId);
@@ -196,6 +204,14 @@ async function upsertSubscription(tx: Db, env: CloudflareBindings, sub: Stripe.S
     currentPeriodStart: period.start, currentPeriodEnd: period.end, cancelAtPeriodEnd: sub.cancel_at_period_end || sub.cancel_at != null,
     stripeUpdatedAt: at, updatedAt: new Date(),
   };
+  // What changed, for analytics (only a change newer than the stored one counts).
+  if (!existing || existing.stripeUpdatedAt <= at) {
+    const paid = (status: string | undefined) => status === 'active' || status === 'trialing';
+    const props = { subscription_id: sub.id, plan: plan.id, status: sub.status };
+    if (paid(sub.status) && !paid(existing?.status)) pending.push({ event: 'subscription_started', userId, properties: { ...props, mrr_cents: plan.priceCents } });
+    if (sub.status === 'canceled' && existing && existing.status !== 'canceled') pending.push({ event: 'subscription_canceled', userId, properties: { ...props, when: 'ended' } });
+    else if (values.cancelAtPeriodEnd && existing && !existing.cancelAtPeriodEnd) pending.push({ event: 'subscription_canceled', userId, properties: { ...props, when: 'at_period_end' } });
+  }
   await tx.insert(subscriptions).values(values).onConflictDoUpdate({
     target: subscriptions.id,
     set: { ...values, id: undefined, userId: undefined, createdAt: undefined },

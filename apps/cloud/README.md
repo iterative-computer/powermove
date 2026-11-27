@@ -252,6 +252,10 @@ while any development setting is present or a required one is missing
    (and `STRIPE_PRICE_AERO`) as the live price ids `stripe:setup --live`
    printed, `AERO_GLOBAL_DAILY_USD` (default 50) and `EMAIL_DAILY_LIMIT`
    (default 150, under the 200-message mail quota).
+   `POSTHOG_KEY` is the desktop app's public PostHog project key
+   (`apps/native/crates/telemetry`); set it with `wrangler secret put POSTHOG_KEY`
+   (kept out of the repo only because the secret scanner can't tell a public key
+   from a private one). Without it the Worker sends no PostHog events.
 3. **Unset everywhere** (secrets and vars): `DEV_LOG_OTP`, `OTP_SENDER`,
    `GOOGLE_DISCOVERY_URL`, `LOCAL_POSTGRES`, `STRIPE_API_BASE`,
    `AERO_OPENAI_BASE_URL`, `AERO_ANTHROPIC_BASE_URL`. `wrangler secret list`

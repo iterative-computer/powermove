@@ -1,4 +1,9 @@
 interface CloudflareBindings {
+  /** PostHog (the desktop app's project): host and public project key. See telemetry.ts. */
+  POSTHOG_HOST?: string;
+  POSTHOG_KEY?: string;
+  /** '1' lets a non-production Worker send PostHog events. */
+  POSTHOG_LOCAL?: string;
   /** 'production' on the deployed Worker (wrangler.jsonc); 'development' locally (.dev.vars). See production.ts. */
   ENVIRONMENT?: string;
   DATABASE_URL: string;
