@@ -380,3 +380,93 @@ fn the_primary_button_never_moves_between_frames() {
         }
     });
 }
+
+/// The account step's Continue with Google stands under the email and its
+/// note, Continue's width, above the actions: with it or without it, the
+/// field, the note and Continue stay where they were.
+#[test]
+fn continue_with_google_moves_nothing_on_the_account_step() {
+    use pm_shell::welcome::{SignIn, SignInStage};
+    let account = |google: bool| {
+        let mut buttons = vec![
+            Button::new("continue", "Continue"),
+            Button::new("not_now", "Not now"),
+        ];
+        if google {
+            buttons.push(Button::new("google", "Continue with Google"));
+        }
+        Frame {
+            surface: "S109".into(),
+            title: "Create your account".into(),
+            line: "Your account remembers the extensions you install on each Mac, and lets you publish your own on the Store.".into(),
+            note: Some("Already have an account? Use the same email.".into()),
+            sign_in: Some(SignIn {
+                stage: SignInStage::Email,
+                ..SignIn::default()
+            }),
+            buttons,
+            default: Some("continue".into()),
+            back: Some("Back to Timeline Choice".into()),
+            ..Frame::default()
+        }
+    };
+    objc2::rc::autoreleasepool(|_| {
+        let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+        let m = tokens.metrics;
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(
+                gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                    .with_automatic_optical_sizing(),
+            ),
+            Arc::new(()),
+            || {
+                Some(Box::new(
+                    gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                ))
+            },
+        );
+        let window_size = size(px(m.welcome_width), px(m.welcome_height));
+        let mut laid = vec![];
+        for google in [false, true] {
+            let frame = account(google);
+            let window = cx
+                .open_window(window_size, |_, cx| {
+                    cx.new(|cx| {
+                        let mut view =
+                            WelcomeView::new(tokens.clone(), frame, Rc::new(|_, _| {}), cx);
+                        view.stage = true;
+                        view.ground = true;
+                        view.clock = Some(1.);
+                        view
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+            if let Ok(dir) = std::env::var("PM_WELCOME_CAPTURE") {
+                std::fs::create_dir_all(&dir).unwrap();
+                let image = cx.capture_screenshot(window.into()).unwrap();
+                image
+                    .save(format!("{dir}/account-google-{google}.png"))
+                    .unwrap();
+            }
+            let bounds = |id: &str| cx.debug_bounds(window.into(), id).unwrap();
+            let (field, primary, links, button) = (
+                bounds("welcome-sign-in").expect("the email"),
+                bounds("welcome-primary").expect("Continue"),
+                bounds("welcome-links").expect("the links"),
+                bounds("welcome-google-row"),
+            );
+            assert_eq!(button.is_some(), google);
+            // The links row is as wide as before: Google is not one of them.
+            if let Some(button) = button {
+                assert!(button.top() >= field.bottom(), "{button:?} over {field:?}");
+                assert!(
+                    button.bottom() <= primary.top(),
+                    "{button:?} on {primary:?}"
+                );
+            }
+            laid.push((field, primary, links));
+        }
+        assert_eq!(laid[0], laid[1], "something moved for the Google button");
+    });
+}

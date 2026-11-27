@@ -152,6 +152,9 @@ pub enum Message {
     /// The code was checked: the account's email, or the error code
     /// (`api:unauthorized` wrong, `api:gone` expired, `network`).
     Verified(Result<String, String>),
+    /// Google's return link signed the account in (its email), or why not
+    /// (the sentence for the step's error line).
+    Google(Result<String, String>),
     Finished(Finished),
     /// The waiting original app has gone; the copy can start.
     ElectronClosed,
@@ -229,6 +232,13 @@ pub enum Effect {
     /// The action `id` after a while (the signed-in check's pause, Resend's
     /// countdown).
     After(Duration, &'static str),
+    /// The account step's Continue with Google: the registry's page in the
+    /// browser, finished by the `powermove://auth` return link (the sign-in
+    /// sheet's own, `cloud::sign_in_with_google`).
+    Google,
+    /// Back from the browser: a late return link finds nothing waiting
+    /// (`cloud::cancel_google`).
+    CancelGoogle,
     /// Bring in the recent work the person asked for, before the library opens.
     BringIn,
     /// Open without it: the request is withdrawn.
@@ -547,6 +557,7 @@ impl Flow {
             }
             Message::CodeSent(result) => self.code_sent(result),
             Message::Verified(result) => self.verified(result),
+            Message::Google(result) => self.google_returned(result),
             Message::Account(provider, line) => {
                 match line {
                     Some(line) => self.accounts.insert(provider.name().into(), line),
@@ -787,6 +798,26 @@ impl Flow {
                 self.onboarding.as_mut().map(|o| o.advance());
                 return none;
             }
+            // Continue with Google: the step waits on the browser.
+            (SignInStage::Email, "google") => {
+                if s.busy {
+                    return none;
+                }
+                s.stage = SignInStage::Browser;
+                s.error = None;
+                return Some(vec![Effect::Google]);
+            }
+            // Back from the browser: the email again, as it was typed.
+            (SignInStage::Browser, "back" | "escape") => {
+                s.stage = SignInStage::Email;
+                return Some(vec![Effect::CancelGoogle]);
+            }
+            (SignInStage::Browser, "not_now") => {
+                s.stage = SignInStage::Email;
+                self.onboarding.as_mut().map(|o| o.advance());
+                return Some(vec![Effect::CancelGoogle]);
+            }
+            (SignInStage::Browser, _) => return none,
             _ => {}
         }
         // The email and the code, as everywhere the sign-in shows.
@@ -810,6 +841,26 @@ impl Flow {
             self.powermove = Some(self.sign_in.email.clone());
         }
         effects.into_iter().map(Effect::from).collect()
+    }
+    /// Google's return link, as a checked code arrives: "You’re in", then
+    /// the agent step; or the email again with the sheet's sentence.
+    fn google_returned(&mut self, result: Result<String, String>) -> Vec<Effect> {
+        // Back from the browser meanwhile: not wanted.
+        if self.sign_in.stage != SignInStage::Browser {
+            return vec![];
+        }
+        match result {
+            Ok(email) => {
+                self.sign_in.stage = SignInStage::Code;
+                self.sign_in.busy = true;
+                self.verified(Ok(email))
+            }
+            Err(message) => {
+                self.sign_in.stage = SignInStage::Email;
+                self.sign_in.error = Some((message, None));
+                vec![]
+            }
+        }
     }
     fn onboarding_action(&mut self, id: &str) -> Vec<Effect> {
         if self.onboarding.as_ref().map(|o| o.step) == Some(Onboard::Account)
@@ -1135,7 +1186,12 @@ fn sign_in_frame(s: &SignInFlow, powermove: Option<&str>, frame: &mut Frame) {
                 "Check your email".to_owned(),
                 format!("We sent a 6-digit code to {}.", s.email.trim()),
             ),
-            SignInStage::Done | SignInStage::Handle | SignInStage::Browser => (
+            // The sign-in sheet's words.
+            SignInStage::Browser => (
+                "Continue in your browser".to_owned(),
+                "Finish with Google, then come back here.".to_owned(),
+            ),
+            SignInStage::Done | SignInStage::Handle => (
                 "You’re in".to_owned(),
                 format!("Signed in as {}.", s.email),
             ),
@@ -1147,14 +1203,23 @@ fn sign_in_frame(s: &SignInFlow, powermove: Option<&str>, frame: &mut Frame) {
             .then(|| "Already have an account? Use the same email.".into());
         frame.error = s.error.as_ref().map(|(message, _)| message.clone());
         frame.busy = s.busy;
+        let browser = s.stage == SignInStage::Browser;
         frame.buttons = vec![
             Button {
                 // Clickable while it spins: a second press does nothing.
-                enabled: ready || s.busy,
+                // Waiting on the browser, it stays where it is, unpressable.
+                enabled: (ready || s.busy) && !browser,
                 ..Button::new("continue", "Continue")
             },
             Button::new("not_now", "Not now"),
         ];
+        // The sheet's other way in, under the email (`welcome_view`).
+        if s.stage == SignInStage::Email {
+            frame.buttons.push(Button {
+                enabled: !s.busy,
+                ..Button::new("google", "Continue with Google")
+            });
+        }
         frame.default = Some("continue".into());
         frame.sign_in = Some(s.frame());
     }
@@ -1983,6 +2048,17 @@ impl Driver {
                         let _ = tx.try_send(Message::Verified(result));
                     });
                 }
+                Effect::Google => {
+                    let tx = self.tx.clone();
+                    let started = crate::cloud::sign_in_with_google(cx, move |result, _| {
+                        let _ = tx.try_send(Message::Google(result));
+                    });
+                    // The browser could not open: the step says so.
+                    if let Err(message) = started {
+                        let _ = self.tx.try_send(Message::Google(Err(message)));
+                    }
+                }
+                Effect::CancelGoogle => crate::cloud::cancel_google(cx),
                 Effect::After(wait, id) => {
                     let driver = self.clone();
                     cx.spawn(async move |cx| {
