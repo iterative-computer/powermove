@@ -1,5 +1,7 @@
 # Beta readiness preparation — cloud beta2
 
+> **Superseded (2026-11-27).** Releases and updates now follow [release.md](release.md): Sparkle 2's standard updater for V2, V1's electron-updater for V1 → V2. `pm-update-policy`, `pm-distribution` and `update-config.json` described below were removed.
+
 ## Beta3 implementation preparation
 
 The historical beta2 gaps below are superseded in these owned paths:

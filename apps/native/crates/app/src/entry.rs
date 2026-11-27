@@ -411,7 +411,7 @@ pub fn register(controller: &Entity<Controller>, window: AnyWindowHandle, cx: &m
         entries.ready = true;
         cx.defer(|cx| {
             let packaged = crate::platform::bundle_id().as_deref()
-                == Some(pm_update_policy::update_distribution::PRODUCTION_ID);
+                == Some(crate::updates::PRODUCTION_ID);
             let _ = EntryQueue::register(packaged, false, &mut Hook { cx });
             drain(cx);
         });
