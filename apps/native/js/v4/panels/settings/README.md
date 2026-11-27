@@ -67,7 +67,7 @@ and the full-height scroller still need the owning host implementation.
 | 7 VoiceOver         | Semantic labels/groups, selected state, help descriptors and search announcements                                             | Host help projection, virtual count/row navigation, real VoiceOver                                 |
 | 8 Appearance        | All supplied visuals refer to pm-design; system behaviors delegated                                                           | Materials, contrast cards/borders and reduced-motion scroll verification                           |
 | 9 Copy              | Spec copy only; data labels supplied by models                                                                                | Missing-copy questions below                                                                       |
-| 10 Don't            | No Done/Apply, editor gear, checkbox/switch substitution, orange selection, or web export                                     | Opus review of the integrated window                                                               |
+| 10 Don't            | No Done/Apply, editor gear, checkbox/switch substitution, orange selection, or web export                                     | design review of the integrated window                                                               |
 
 ## DESIGN-TODO(opus)
 
@@ -147,7 +147,7 @@ No performance certification follows from bounded row-count tests. Verify native
 light/dark, contrast/transparency/motion variants, real controls, AppKit text/IME,
 clipboard/dictation, AX help and counts, keyboard isolation/focus, 60k scroller and
 VoiceOver navigation, actual service persistence/Undo/archive/Keychain, lifecycle
-fencing, no main-thread JS wait, and Opus screenshots/sign-off on macOS.
+fencing, no main-thread JS wait, and design screenshots/sign-off on macOS.
 
 ## Linux merge validation — 2026-11-01
 
@@ -172,7 +172,7 @@ introduced by this panel.
   against the locked validator dependencies; it does not modify shared sources.
 
 These are merge/build results. They do not resolve the service/host API gaps or
-replace macOS verification and Opus review listed above.
+replace macOS verification and design review listed above.
 
 ## Frozen-contract adoption — 2026-11-01
 
@@ -207,7 +207,7 @@ intent/scope exact; N7/N8 retain asynchronous native planning.
    enqueueing key events. Do not suppress plain `f`, `w` or comma text entry merely
    to implement Command equivalents, and do not wait on JS on the main thread.
 
-The seven DESIGN-TODO(opus) items and macOS/Opus acceptance gates above remain
+The seven DESIGN-TODO(opus) items and macOS and design acceptance gates above remain
 open. No visual decision or frozen-contract change is introduced by this update.
 
 ### Frozen-base validation
@@ -228,4 +228,4 @@ panel dependency, crate or frozen API change was needed.
 Spec coverage and the seven design TODOs above remain unchanged. Profile controls
 additionally require the explicit native profile adapter; the ordinary extension
 host cannot act as a substitute. macOS visual, keyboard, service integration and
-Opus review remain acceptance gates.
+design review remain acceptance gates.

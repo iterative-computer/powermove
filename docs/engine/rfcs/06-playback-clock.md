@@ -117,4 +117,4 @@ variants; each is a version bump.
    Phase 3b with J/K/L and audio scrub.
 3. Whether a device change should pause playback or continue on the new
    device with a new epoch. The contract allows both; the Audio lane picks
-   with Jude.
+   with the owner.

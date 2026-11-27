@@ -102,7 +102,7 @@ restarts.
     snapshot, background and generation workers remain at utility QoS.
     No engine-owned job
     thread enters Darwin's background state (S8: no GPU effect, and slower
-    reaction to signals). The private `setGPUPriority:` is not used (Jude's decision,
+    reaction to signals). The private `setGPUPriority:` is not used (the owner's decision,
     S8 recommendation 11). External encoder processes are outside this
     thread-level QoS control.
 

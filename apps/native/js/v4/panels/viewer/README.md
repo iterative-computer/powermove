@@ -4,7 +4,7 @@ Status: **partial implementation; not application cutover or visual acceptance**
 The supported chrome uses the existing UI-kit entry directly, as ui-kit.md permits
 until the compiler/export owner reconciles `powermove/ui`. No new component,
 visual token, display string, shortcut registry, document store or compatibility
-provider is introduced. All visual output remains provisional until Opus review.
+provider is introduced. All visual output remains provisional until design review.
 The shared owner decisions (266 pt layer column, agent popover/pin, Effects,
 no web-animation export) are unchanged; none adds a viewer control.
 
@@ -22,7 +22,7 @@ Source: `docs/native/design/panels/viewer-chrome.md`, shared `panels/README.md`,
 | §4 Interactions                                 | Every zoom/resolution menu choice dispatches once to the existing Rust model; source Back and Open callbacks; real kernel ack path tested; native pop-up adapter normalizes Fit/Actual/action sentinels | Native NSMenu and gesture/drag/drop/tool/text routing; no new JS keymap or guessed gesture classifier                                                                                                |
 | §5 Keyboard/focus                               | Accepted-tree Tab order: Back (source), zoom, resolution, canvas; no hidden pop-up stops with no project or in Focus/FullScreen                                                                         | Application arbitration of all w1-keymap bindings; Escape drag/text/source/deselect order; system focus rings, Focus overlay focus restoration                                                       |
 | §6 VoiceOver                                    | Real AccessKit group/button/ComboBox roles, canvas value, labels and focus order asserted in light/dark                                                                                                 | Layer custom rotor, AXLayoutItem/custom nudge actions, source slider/time semantics, complete real-window AX graft                                                                                   |
-| §7 Appearance                                   | Existing pm-design references only, no literal visual measurements/colours/type/radii/motion; validator checks both schemes                                                                             | Token and recipe gaps below; native accessibility setting changes and Opus review                                                                                                                    |
+| §7 Appearance                                   | Existing pm-design references only, no literal visual measurements/colours/type/radii/motion; validator checks both schemes                                                                             | Token and recipe gaps below; native accessibility setting changes and design review                                                                                                                    |
 | §8 Copy                                         | Implemented empty, source-leading, zoom and resolution copy is exact; no new visible strings; continuous adaptive scale is never mislabelled Half/Quarter                                               | Auto subtitle, banners, recovery, locked-layer tooltip and source transport await their APIs                                                                                                         |
 | §9 Don't                                        | No viewer title, new guide/grid/safe-area toggles, custom AppKit control copies or animated menu zoom; no old consumers removed                                                                         | Visual compliance of native renderer requires macOS proof                                                                                                                                            |
 
@@ -111,7 +111,7 @@ provided diagnostic callback with no lane-authored user copy.
    Reuse model input/command candidates after shell extension-priority arbitration;
    don't reproduce Chromium wheel heuristics or duplicate a keymap in this panel.
 7. Retire no v1–3 provider or old viewer consumer until the synchronous closure,
-   source/render/tool, accessibility and Opus gates pass (C-MATRIX, N4/N6/prune).
+   source/render/tool, accessibility and design pass (C-MATRIX, N4/N6/prune).
 
 ## DESIGN-TODO(opus)
 
@@ -147,7 +147,7 @@ The list below is kept for history.
 | Keep revision/selection/viewport tickets in Rust, send bounded chrome facts                                                          | N1/N7 scalability and honest stale rejection; preserve 64-bit identity |
 | Copy and validate publications; preserve good state and authored UTF-16 names                                                        | N3 exact text; N4 no data loss                                         |
 | Worker transport only; test-only Rust wire binaries/Node VM; browser-target panel has no Node/DOM globals                            | N8 no UI-thread JS waits and no Node/Chromium in app                   |
-| Use kit components and existing tokens; neutral placeholders for missing recipes and explicit questions for missing design decisions | Opus ownership; N1 correctness; N3 no guessed look or copy             |
+| Use kit components and existing tokens; neutral placeholders for missing recipes and explicit questions for missing design decisions | design ownership; N1 correctness; N3 no guessed look or copy             |
 | Native classified gesture intent and shell arbitration stay with their owners                                                        | N3 quirk policy; N6 overrides and claim/decline contract               |
 | Remove no implementation, extension, profile data or compatibility route                                                             | N4/N6 and prune-only-after-last-consumer                               |
 
@@ -186,7 +186,7 @@ macOS must verify native placement, fixed widths and menu behavior, real source
 seek/playback/pointer capture, classified gestures/shortcuts/IME, retained GPU
 frames/EDR and geometry at 1×/2×, real VoiceOver traversal/rotor/actions, all
 accessibility appearances, lifecycle/selection fencing and no main-thread JS
-waits. Native screenshots, keyboard/AX evidence and Opus approval remain required.
+waits. Native screenshots, keyboard/AX evidence and design approval remain required.
 
 ## Merge-ready verification — 2026-11-01
 
@@ -218,7 +218,7 @@ bun run build
 # All pass.
 ```
 
-The five design TODOs, seven API gaps and macOS/Opus gates above remain open.
+The five design TODOs, seven API gaps and macOS and design gates above remain open.
 Headless merge readiness is not full viewer parity or application cutover.
 
 ## Frozen-contract follow-up — 2026-11-01
@@ -253,14 +253,14 @@ paths or invent renderer behavior in panel metadata:
 - **API request A6:** provide native classified gesture events and the application
   tool/drop/text/IME routing needed to consume the existing model behaviors.
 
-The §1–9 coverage table, D1–D5 design questions and macOS/Opus gates are unchanged.
+The §1–9 coverage table, D1–D5 design questions and macOS and design gates are unchanged.
 
 Frozen-base verification reran the exact commands in the preceding Merge-ready
 verification section: **61 viewer-model + 95 surface Rust tests passed; 204 Bun
 tests passed, including 32 viewer tests and 23 snapshots; no failures or skipped
 tests**. Strict Clippy, rustfmt, both TypeScript checks, viewer Prettier and browser
 build pass. Headless API compatibility is verified; native rendering, application
-bindings and the existing macOS/Opus acceptance gates remain open.
+bindings and the existing macOS and design acceptance gates remain open.
 
 The final merge-ready refresh also merges native-engine's distribution update at
 `6d1e3bf3faefe715f28277afd7bd17b6304bbddd`, a descendant of the frozen contract.

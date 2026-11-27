@@ -3,7 +3,7 @@
 Wave 4 implementation of panel id `inspector`, title `Properties`.
 Design source: `docs/native/design/panels/inspector.md` and its shared README.
 **This is a tested panel and model adapter, not a production activation or full
-spec-parity claim.** Visual output remains provisional until Opus review.
+spec-parity claim.** Visual output remains provisional until design review.
 
 ## Entry and authority
 
@@ -173,8 +173,7 @@ outside-commit as one undo, §7 gradient/eyedropper services, scroll memory,
 contributed remote-DOM sections and per-project disclosure persistence. Exercise
 VoiceOver through the real window subtree and all accessibility appearances.
 Measure real 60k-selection responsiveness, playback cadence, exact pause and no
-UI-thread JS waits. Capture the review checklist's screenshots and obtain Opus
-review. None of these gates is self-certified by this Linux lane.
+UI-thread JS waits. Capture the review checklist's screenshots and obtain design. None of these gates is self-certified by this Linux lane.
 
 ## Merge verification (2026-11-01)
 

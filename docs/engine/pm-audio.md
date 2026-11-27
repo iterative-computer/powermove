@@ -141,7 +141,7 @@ order cost the stream once plus a pre-roll per block.
 Long coarse sources (`pm-audio/tests/sources.rs`
 `long_coarse_timebase_sources_decode_in_linear_time`, 10 minutes, release build, the
 lane's `SourceCache`; the earlier code decoded every block from sample 0). Measured
-2026-10-14 on Jude's Mac under `nice -n 15` with other lanes building (load average
+2026-10-14 on the reference Mac under `nice -n 15` with other lanes building (load average
 about 8); wall times move with load (an earlier run under heavier load measured
 3.2 to 4.0 ms per Opus block and 1.7 s in total), the packet counts do not:
 
@@ -646,7 +646,7 @@ consumers ◀───────────── ClockSlot ◀── clock s
 - **Device changes** (open question 3): playback continues on the new device with a new
   epoch, re-anchored from what is heard. The default output's id and latency are polled
   once a second (the latency converted at the new device's nominal rate); a host that
-  owns the device passes its own watch. This choice awaits Jude's sign-off. Known limit:
+  owns the device passes its own watch. This choice awaits the owner's sign-off. Known limit:
   `cpal` opens the default output through an AUHAL that follows the system default and
   resamples internally when the new device's rate differs from the stream's; that
   converter's latency is not in the clock (the stream keeps its original rate).
@@ -1487,7 +1487,7 @@ outside Git under `/tmp/ne-w5/audioa7-r10`.
 
 ## Gaps
 
-- **J/K/L keys** need Jude's sign-off. Powermove's keymap is After Effects's, where J and K
+- **J/K/L keys** need the owner's sign-off. Powermove's keymap is After Effects's, where J and K
   step between timeline events and L reveals audio levels, so J, K, and L shuttle only
   while the new engine plays (ahead of those bindings, declining otherwise); Control-J
   starts backward playback from a pause and Control-Shift-Space plays around. The

@@ -262,7 +262,7 @@ No UI, colour, metric or layout value is implemented in this crate. The AppKit
 adapter must use system sheet/alert placement and controls, `pm-design` tokens
 for custom content, and the app AccentColor; only the isolated Allow button is
 the accent default. Linux tests validate the output contract, not an AppKit
-implementation. All resulting visual output remains provisional until Opus review.
+implementation. All resulting visual output remains provisional until design review.
 
 **Missing metadata (design re-review 2026-11-01).** Older admitted records can
 lack a signed display name or host publisher display name, and manifests may
@@ -412,7 +412,7 @@ Must verify on macOS / integrate in other owned lanes:
   labels/details, orange Allow default, safe Full Access Return/Escape behavior,
   VoiceOver and unchanged AX identifiers. Verify stale dismissal/re-request and
   Settings switches/revocation with kernel actor tickets; no main-thread I/O.
-  Obtain Opus review of all rendered output and the missing-metadata TODO above.
+  Obtain design review of all rendered output and the missing-metadata TODO above.
 
 - Wire this policy into `pm-compat-host`/remote DOM and the kernel actor; use
   async tickets and a confined Store V8 helper with signed sandbox entitlements.

@@ -1,7 +1,7 @@
 # v4 native UI kit — package 13
 
 Status: **component/wire/native-description implementation tested on Linux;
-AppKit/GPUI rendering, host integration and Opus visual approval pending**.
+AppKit/GPUI rendering, host integration and design approval pending**.
 Governing design: [language.md](design/language.md), [tokens.md](design/tokens.md),
 review-checklist.md and
 [editor-mockup-v3.html](design/editor-mockup-v3.html). Protocol: [v4-api.md](v4-api.md).
@@ -97,7 +97,7 @@ item below; ordinary inspector scrolling cannot accidentally edit values.
 
 The strict primitive contract is retained: anchor fixtures create `anchored`,
 matching the JSX components, instead of putting `anchor` on a `div`. No recipe,
-token, visual property or Opus interaction decision changed. JSX declarations
+token, visual property or design interaction decision changed. JSX declarations
 explicitly enumerate the kit's accessibility and semantic markers. Component
 options/value callbacks override primitive event signatures rather than
 intersecting incompatible types; boolean list selection stays boolean.
@@ -106,7 +106,7 @@ Plain `bun test` now builds the standalone native examples and runs native
 conformance instead of failing for a missing environment variable. Current
 combined counts and freeze gates are in v4-eval.md. The older kit-only
 counts below remain historical evidence. New design TODOs: **none**; the existing
-Opus F1–F7 follow-ups and rendering-review gate remain unchanged.
+Design F1–F7 follow-ups and rendering-review gate remain unchanged.
 
 ## Validation and tests
 
@@ -209,7 +209,7 @@ actual padded hit rectangles at 1×/2×. Prove no UI-thread JS waits.
 Review gate: **pending, cannot self-certify**. Native light/dark 2× screenshots,
 Increase Contrast/Reduce Transparency/Reduce Motion captures, before/after pairs,
 all changed interaction states, keyboard walkthrough, VoiceOver/AX evidence,
-contrast spot checks and Opus sign-off are still required by the design review
+contrast spot checks and design sign-off are still required by the design review
 checklist. All visual output is provisional until that review.
 
 ## UI kit part 2 — additive panel kit (2026-11-01)
@@ -351,6 +351,6 @@ colour picker/NSColorSampler/gradient keyboard and AX subtrees, native menu
 measurement and key equivalents, Settings form alignment and regular switches,
 actual hit rectangles, wheel/trackpad units and momentum, focus preservation,
 Focus/full-screen idle fade and banner placement. Supply light/dark and all
-accessibility-variant captures and VoiceOver evidence for Opus review. All visual
+accessibility-variant captures and VoiceOver evidence for design review. All visual
 output remains provisional; this Linux implementation is not native visual
 acceptance or a renderer integration claim.

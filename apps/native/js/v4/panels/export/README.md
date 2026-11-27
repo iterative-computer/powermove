@@ -5,7 +5,7 @@ or visual approval**. Source design: `docs/native/design/panels/export-sheet.md`
 §§1–9 and `panels/README.md` (including all four owner decisions). Behaviour
 oracle: shipped v1.2.0 export-defaults.ts/exporter.ts; W069/B424–445/B504/A264.
 No old panel, extension or user state was removed. All visual output remains
-provisional until Opus review.
+provisional until design review.
 
 `index.tsx` exports `mountExportPanel`, `ExportSheet`, `ExportButton`, and the
 inspectable `ExportModel`. The host supplies the existing v4 `HostClient`, native
@@ -32,7 +32,7 @@ the trait implementation using pm-kernel, pm-promedia jobs and engine-service.
 | §4 States               | Wire snapshots for empty, selected, disabled, custom error, capabilities, choosing, all progress/failure/terminal phases; hover/focus tree invariance                                                            | System hover/focus painting and disabled-format subtitle rendering; loading, drag/drop, multi-select, 60k rows are N/A per spec                              |
 | §5 Keyboard/focus       | Both export shortcuts after shell arbitration; kind arrows; Return/default; preset Return isolation; Esc settings-only; ⌘. progress; native validator asserts depth-first focus order including conditional Save | Shell registry/menu hookup, initial focus resolution to selected radio, native focus restore/trap and input-driver/IME walkthrough                           |
 | §6 VoiceOver            | Real AccessKit dialog/radio/control roles, selected state, exact labels, numeric units/progress; full descendant counts                                                                                          | Row help, progress value description/ETA, polite summary and done/failed announcements are requests in metadata; kit does not project them yet               |
-| §7 Appearance           | Only existing pm-design tokens in actual styles; 16 scheme/accessibility combinations validate; no scan animation                                                                                                | Exact sheet/card/footer/preview layout, appearance captures, contrast and Opus approval on Mac                                                               |
+| §7 Appearance           | Only existing pm-design tokens in actual styles; 16 scheme/accessibility combinations validate; no scan animation                                                                                                | Exact sheet/card/footer/preview layout, appearance captures, contrast and design approval on Mac                                                               |
 | §§8–9 Copy/don't        | Spec copy; no Code/web choice; no fake preparation percentage; system-placement SheetAnchor; destination before engine work                                                                                      | Real system segmented/pop-up/checkbox/push controls and one default accent require renderer integration                                                      |
 
 The test-only wire inspector is a native workspace member. It replays real atomic
@@ -140,7 +140,7 @@ macOS gate: implement the APIs above, then exercise real destinations, ProRes/
 H.264/VP9/PNG/PMV delivery (including captions/audio/alpha and originals), cancel
 and retry resource cleanup, concurrent editing/export, native sheets/control
 metrics, keyboard/IME, full VoiceOver/help/announcements, light/dark and all
-accessibility settings, 1×/2× hit rectangles, no UI-thread JS waits and Opus review.
+accessibility settings, 1×/2× hit rectangles, no UI-thread JS waits and design review.
 
 ## Linux evidence — 2026-11-01
 

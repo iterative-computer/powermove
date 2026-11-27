@@ -86,9 +86,9 @@ lane and profile launches never use the public feed (`crates/app/src/updates.rs`
 Ad-hoc signing on a dev bundle with a loopback feed, a throwaway key in a temporary folder:
 
 ```sh
-source ~/Developer/pm-durable/env-native.sh
+source engine/env.sh
 eval "$(apps/native/packaging/release-inputs.sh /private/tmp/pm-release/inputs | sed 's/^/export /')"
-PM_CARGO="slot cargo" apps/native/packaging/release.sh build
+apps/native/packaging/release.sh build
 export PM_RELEASE_VERSION=2.0.0 PM_RELEASE_CHANNEL=dev PM_RELEASE_ADHOC=1 \
   PM_SPARKLE_FEED=http://127.0.0.1:8765/appcast.xml PM_SPARKLE_PUBLIC_KEY=<throwaway public key>
 apps/native/packaging/release.sh app /private/tmp/pm-release/app.noindex

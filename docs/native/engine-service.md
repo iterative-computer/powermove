@@ -191,7 +191,7 @@ latency, 60-second zero-drop/headroom soaks, popouts and physical mixed-display
 moves. Take the shared GUI lock for every on-screen batch. S3/S3b measurements
 are prior evidence, not measurements of this service. The required machines,
 corpora, paired Electron comparisons, repetitions, orchestrator verification and
-Opus review remain outstanding. No P1/colour/performance gate is declared passed.
+design review remain outstanding. No P1/colour/performance gate is declared passed.
 
 ## Slice 2 (2026-11-01)
 

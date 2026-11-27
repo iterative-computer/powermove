@@ -338,7 +338,7 @@ measured.
 | H.264 High | MP4 or MOV | `420v` | VideoToolbox, VBR at the tier | no | AAC in MP4, PCM in MOV |
 | HEVC Main / Main10 | MP4 or MOV | `420v` / `x420` (10-bit, MSB-aligned) | VideoToolbox, VBR at the tier | 8-bit only | |
 | HEVC with alpha | MOV | `v0a8`, codec type `muxa` | VideoToolbox, average bit rate (its encoder accepts VBR and fails every frame, -12912) | straight or premultiplied (`almo` box's mode byte: 0 straight, 2 premultiplied) | depth 32 |
-| WebM VP9 / VP8 | WebM | `yuv420p` / `yuva420p` | libvpx through `pm_media`'s FFmpeg bindings (today's realtime settings: deadline realtime, VP9 cpu-used 7, row-mt and tile columns) | yes (`alpha_mode` tag) | Opus at 48 kHz; frame-exact; the export's colour tags |
+| WebM VP9 / VP8 | WebM | `yuv420p` / `yuva420p` | libvpx through `pm_media`'s FFmpeg bindings (today's realtime settings: deadline realtime, VP9 cpu-used 7, row-mt and tile columns) | yes (`alpha_mode` tag) | design at 48 kHz; frame-exact; the export's colour tags |
 | PNG sequence / still | folder of `<name>_00000.png` (≥ 5 digits) / file | RGBA8 or RGBA16, straight alpha | `png` crate | yes | `sRGB` chunk plus `cICP` (1-13-0, or 1-1-0 with "Rec.709 image"), full range; verified lossless |
 
 `ExportSpec::input_format()` picks the input from codec and alpha.
@@ -705,11 +705,11 @@ the project/session lane's responsibility, not an encoder format.
 | No check-then-rename overwrite race | N4: filesystems without hard links use atomic no-replace rename (`renameat2` on Linux, `renamex_np` on macOS); unavailable operations fail safely. |
 | Exact range sampling is shared | N3/N7: `schedule::FrameSchedule` takes authored in/out ticks and an exact rational export rate. The macOS job renderer delegates to it. Frame counts retain the authored positive half-up count rule; tick/sample conversion uses ties-to-even. Nonzero in points and adjacent audio intervals are preserved. |
 | Keep quantization independent of codec builds | N3: PCM16 uses deterministic index/channel TPDF, PCM24 rounds once, and float PCM preserves samples. A macOS-only test compares these portable bytes with the engine's native quantizer. |
-| Do not recreate browser artifacts in the new backend | N2/N3 and quirk policy: software WebM preserves authored alpha and normal encoder priming/padding metadata. It does not copy Chromium's alpha loss, untrimmed Opus tail, timestamp-zero VPX submission, or legacy EBML omissions. Historical macOS WebM consumers remain; no old implementation is pruned while they use it. |
+| Do not recreate browser artifacts in the new backend | N2/N3 and quirk policy: software WebM preserves authored alpha and normal encoder priming/padding metadata. It does not copy Chromium's alpha loss, untrimmed design tail, timestamp-zero VPX submission, or legacy EBML omissions. Historical macOS WebM consumers remain; no old implementation is pruned while they use it. |
 
 No panel, copy, visual token, layout, or interaction was designed or changed.
 There are no new `DESIGN-TODO(opus)` placeholders in this lane. All future visual
-exposure of these options still belongs to Opus and requires design review.
+exposure of these options still requires design review.
 
 ### Software path and verification
 
@@ -818,7 +818,7 @@ outputs against v1.2.0 authored scenes and audio; exercise nonzero work ranges,
 custom sizes, working depths, motion blur/captions, queue/agent cancellation and
 long exports; verify archive recovery and atomic moves on APFS/exFAT; perform
 calibrated HDR/mastering and quiet paired performance gates. No claim here
-substitutes for those tests or for Opus's eventual design review.
+substitutes for those tests or for the eventual design review.
 
 
 ### macOS integration replay (base Apple M5, 2026-11-01)

@@ -10,7 +10,7 @@ introduces no override for them.
 **Status: headless implementation, not production/visual acceptance.** The entry
 exports `ProjectPanel`, `ProjectView`, `ProjectService` and `projectPanel` identity.
 The app does not yet register/mount this entry. All visual output is provisional
-until Opus review. The neutral primitive slots below do not implement missing
+until design review. The neutral primitive slots below do not implement missing
 native painting merely by declaring props.
 
 ## Architecture and integration
@@ -95,7 +95,7 @@ v1–3 API is introduced.
 | §4 interactions   | Pointer/keyboard/model dispatch, exact model menus, preview/locate/download/import requests, atomic folder edits, guarded delete confirmation, move and kernel Undo/Redo tested                                                                                                                      | AppKit menus/alerts/pickers, Finder, viewer, import/archive/task workers and actual native completion handling                                                              |
 | §5 keyboard/focus | Header → search → crumbs → one grid stop → Delete order asserted; hover actions not Tab stops; Escape, F2/IME guard, model wrap/Return/Space wired                                                                                                                                                   | Grid-row Up/Down differs from tagged model; native shortcut modifier admission, focus requests, rename select-all and capture/autoscroll require host                       |
 | §6 VoiceOver      | Real AccessKit cells, selected states, full count, labels/units, applicable custom actions and stale-action guards                                                                                                                                                                                   | App window grafting, native announcements, traversal/scroll to unmounted rows and real VoiceOver walkthrough                                                                |
-| §7 appearance     | Known pm-design token references; no literal visual values; no invented kit component                                                                                                                                                                                                                | Missing tokens/paint recipes, native light/dark/accessibility captures and Opus approval                                                                                    |
+| §7 appearance     | Known pm-design token references; no literal visual values; no invented kit component                                                                                                                                                                                                                | Missing tokens/paint recipes, native light/dark/accessibility captures and design approval                                                                                    |
 | §8 copy           | Spec strings/menu grouping and tagged formatting; missing states never acquire invented copy                                                                                                                                                                                                         | Transport/unknown-state design questions below; announcements need actual completion callbacks                                                                              |
 | §9 constraints    | No import progress UI, list/sort controls, glass, filesystem deletion, browser/Node runtime dependency or replacement/removal of old consumers                                                                                                                                                       | Production integration remains necessary; these headless checks do not certify the application                                                                              |
 
@@ -206,7 +206,7 @@ reason to change the frozen surface contract (N3/N7/N8; design ownership).
 
 ## Design review follow-ups — 2026-11-01
 
-Both Opus TODO answers are implemented. Unknown readiness keeps a neutral
+Both design TODO answers are implemented. Unknown readiness keeps a neutral
 poster well, known metadata only, no status word/capsule and Delete only; it
 cannot drag or activate. After two seconds of observed Unknown, presentation
 uses Loading without changing model readiness. The monotonic clock resets by
@@ -254,4 +254,4 @@ and native Delete alert/drag image/marquee-autoscroll integration are still
 external host work (review F1/F7). Verify AppKit text shaping, poster leases,
 composition letterboxing/background, determinate rings, focus/selection under
 Increase Contrast, two-second readiness and VoiceOver announcements on macOS.
-All visual output remains provisional until Opus review.
+All visual output remains provisional until design review.

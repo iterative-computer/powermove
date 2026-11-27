@@ -199,7 +199,7 @@ in the order is part of the contract.
 3. Whether user exports started while an agent export runs should be
    allowed to overtake it when the user explicitly asks ("Render now").
    Section 17 puts agent exports ahead of user batch jobs; an explicit user
-   override is not in the plan and would need Jude's decision.
+   override is not in the plan and would need the owner's decision.
 4. Whether `ExportSettings` should carry start timecode, reel name, file
    name tokens, and the overwrite policy (section 17, "Comfort"). Today the
    overwrite policy is in contract 14's destination request and the rest

@@ -4055,7 +4055,7 @@ private installed-corpus conformance. The generator never reads an installation.
 are not specified in the review. Current stable ids remain the neutral names;
 no display-name copy has been invented. The fully specified per-edition
 contrast checks are implemented. All visual output remains provisional until
-Opus reviews real macOS evidence.
+Design reviews real macOS evidence.
 
 **Still required outside these owned paths:** wire kernel-resolved native token
 and appearance snapshots into worker generation and production remote-DOM
