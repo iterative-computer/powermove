@@ -1270,10 +1270,11 @@ pub(crate) fn step_frame(
                     },
                     // On a plan the row keeps the Free row's lines (the
                     // tag beside the name, the detail under it), so buying
-                    // here moves nothing; the plan's name stands at the end.
+                    // here moves nothing; the plan's name stands at the end,
+                    // so the detail leaves it out and fits beside it.
                     (AeroPlan::On(plan), Some(_)) => Choice {
                         badge: Some("Recommended".into()),
-                        detail: Some(format!("Runs on {plan}, Powermove's inference.")),
+                        detail: Some("Runs on Powermove's inference.".into()),
                         pill: None,
                         status: Some(plan.clone()),
                         ..agent("aero", "Aero", "", "powermove", "chatgpt")
@@ -2411,7 +2412,7 @@ mod step_frame_tests {
         // Buying here moves nothing: the row keeps its detail line.
         assert_eq!(
             frame.choices[0].detail.as_deref(),
-            Some("Runs on Aerolite, Powermove's inference.")
+            Some("Runs on Powermove's inference.")
         );
     }
 
