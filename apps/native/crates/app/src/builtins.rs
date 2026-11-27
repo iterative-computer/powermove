@@ -2772,6 +2772,9 @@ impl Controller {
             // and Settings › Storage what both folders take now.
             self.refresh_waiting_folders(cx);
             self.refresh_storage(cx);
+            // Settings › Account shows the plan and credits as they are now:
+            // an Aero turn since the last read spent some.
+            cx.defer(crate::cloud::refresh_billing);
             // Settings is a window of its own, one for the app (PM-375): an
             // open one comes forward on the page asked for; one another
             // editor hosts closes, and this editor's opens in its place.

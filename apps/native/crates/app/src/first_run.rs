@@ -1268,9 +1268,12 @@ pub(crate) fn step_frame(
                         status: None,
                         ..agent("aero", "Aero", "", "powermove", "chatgpt")
                     },
+                    // On a plan the row keeps the Free row's lines (the
+                    // tag beside the name, the detail under it), so buying
+                    // here moves nothing; the plan's name stands at the end.
                     (AeroPlan::On(plan), Some(_)) => Choice {
                         badge: Some("Recommended".into()),
-                        detail: None,
+                        detail: Some(format!("Runs on {plan}, Powermove's inference.")),
                         pill: None,
                         status: Some(plan.clone()),
                         ..agent("aero", "Aero", "", "powermove", "chatgpt")
@@ -2405,6 +2408,11 @@ mod step_frame_tests {
         );
         assert_eq!(frame.choices[0].pill, None);
         assert_eq!(frame.choices[0].status.as_deref(), Some("Aerolite"));
+        // Buying here moves nothing: the row keeps its detail line.
+        assert_eq!(
+            frame.choices[0].detail.as_deref(),
+            Some("Runs on Aerolite, Powermove's inference.")
+        );
     }
 
     /// The speech step lists every model in the catalogue, in its order,
