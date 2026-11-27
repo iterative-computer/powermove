@@ -794,6 +794,9 @@ struct Billed {
     state: Option<Result<Option<Billing>, ()>>,
     /// Checkout or the Portal is open in the browser.
     waiting: Option<&'static str>,
+    /// The page that is open: a repeat click opens it again, never a second
+    /// Checkout.
+    page: Option<String>,
     /// The last Subscribe or Manage Billing that failed, in words.
     error: Option<String>,
     read_at: Option<std::time::Instant>,
@@ -1490,6 +1493,7 @@ pub fn refresh_billing(cx: &mut App) {
                     // A plan bought: the wait for Checkout is over.
                     if billing.subscribed() && cloud.billing.waiting == Some("checkout") {
                         cloud.billing.waiting = None;
+                        cloud.billing.page = None;
                     }
                     cloud.billing.state = Some(Ok(Some(billing)));
                 }
@@ -1537,7 +1541,15 @@ fn open_billing_page(page: &'static str, plan: Option<String>, cx: &mut App) {
         return;
     }
     let cloud = cx.global_mut::<Cloud>();
+    // One click, one Checkout: a request in flight takes no other, and a
+    // page already open is opened again rather than made anew.
     if cloud.busy || !cloud.signed_in {
+        return;
+    }
+    if cloud.billing.waiting == Some(page)
+        && let Some(url) = cloud.billing.page.clone()
+    {
+        crate::platform::open_url(&url);
         return;
     }
     cloud.busy = true;
@@ -1558,6 +1570,7 @@ fn open_billing_page(page: &'static str, plan: Option<String>, cx: &mut App) {
             match answer {
                 Some(Ok(url)) if crate::platform::open_url(&url) => {
                     cloud.billing.waiting = Some(page);
+                    cloud.billing.page = Some(url);
                 }
                 Some(Ok(_)) => {
                     cloud.billing.error =
@@ -1591,7 +1604,9 @@ fn billing_error(code: &str) -> &'static str {
 /// Waiting for Checkout: Cancel stops waiting (the browser's page stays).
 pub fn cancel_checkout(cx: &mut App) {
     if cx.has_global::<Cloud>() {
-        cx.global_mut::<Cloud>().billing.waiting = None;
+        let billed = &mut cx.global_mut::<Cloud>().billing;
+        billed.waiting = None;
+        billed.page = None;
         changed(cx);
     }
 }
@@ -1642,7 +1657,9 @@ pub fn billing_return(raw: &str) -> Option<&'static str> {
 /// the plan again, and Settings › Account comes forward.
 pub fn billing_returned(cx: &mut App) {
     if cx.has_global::<Cloud>() {
-        cx.global_mut::<Cloud>().billing.waiting = None;
+        let billed = &mut cx.global_mut::<Cloud>().billing;
+        billed.waiting = None;
+        billed.page = None;
         refresh_billing(cx);
         changed(cx);
     }

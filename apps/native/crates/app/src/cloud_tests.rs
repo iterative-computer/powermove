@@ -1138,3 +1138,55 @@ fn a_clearance_is_kept_until_its_own_expiry() {
     store.forget("http://a", "email_send:x");
     assert_eq!(store.get("http://a", "email_send:x", 1_000_000), None);
 }
+
+/// One click, one Checkout: clicks while the request is in flight, and
+/// after the page is open in the browser, make no second Checkout (the open
+/// page is opened again).
+#[gpui::test]
+fn a_click_starts_exactly_one_checkout(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let (origin, seen) = scripted(Arc::new(|path, _, _| {
+        match path {
+        "/v1/me" => (200, r#"{"user":{"id":"u","email":"person@example.com"},"publisher":{"handle":"person"},"settings":{"rememberInstalls":true}}"#.into()),
+        "/v2/billing" => (200, r#"{"plan":null,"status":null,"cancelAtPeriodEnd":false,"credits":{"included":0,"used":0,"remaining":0},"period":null,"daily":[],"plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]}"#.into()),
+        "/v2/billing/checkout" => (200, r#"{"url":"http://127.0.0.1:9/v2/dev/checkout?s=1"}"#.into()),
+        _ => (404, "{}".into()),
+    }
+    }));
+    let sealed = serde_json::json!({"origin":origin,"token":"session","expiresAt":"2099-01-01T00:00:00.000Z"})
+        .to_string()
+        .into_bytes();
+    let profile = tempfile::tempdir().unwrap();
+    let path = profile.path().to_owned();
+    cx.update(|cx| {
+        crate::cloud::init_with(
+            path.clone(),
+            origin,
+            move || Http::new(origin, Box::new(crate::cloud::Memory(Some(sealed))), path),
+            cx,
+        )
+    });
+    settle(cx, |cx| {
+        crate::cloud::fact(cx)["billing"]["state"] == "ready"
+    });
+    let checkouts = || {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.path == "/v2/billing/checkout")
+            .count()
+    };
+    // Two clicks in a row: the second finds the first in flight.
+    cx.update(crate::cloud::subscribe_offered);
+    cx.update(crate::cloud::subscribe_offered);
+    settle(cx, |cx| {
+        crate::cloud::fact(cx)["billing"]["waiting"] == "checkout"
+    });
+    assert_eq!(checkouts(), 1);
+    // A click later, while Checkout is open in the browser: the same page.
+    cx.update(crate::cloud::subscribe_offered);
+    cx.run_until_parked();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    cx.run_until_parked();
+    assert_eq!(checkouts(), 1);
+}
