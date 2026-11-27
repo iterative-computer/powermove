@@ -477,6 +477,7 @@ fn dispatch_composer(
             effect
         }
         "openSettings" => Some(panel.host_settings(thread)?),
+        "subscribe" => Some(panel.host_subscribe(thread)?),
         "submit" => {
             let draft = if composer {
                 Some(set_submission_text(

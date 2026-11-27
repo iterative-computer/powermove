@@ -1147,8 +1147,8 @@ mod review {
     }
     /// `GET /v2/billing` for a review state, shaped as the contract says.
     fn billing(state: &str) -> Value {
-        let plans = json!([{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000},
-            {"id":"aero","name":"Aero","priceCents":1999,"credits":2500}]);
+        // As the backend: Aerolite is the one plan offered (Aero isn't yet).
+        let plans = json!([{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]);
         if state == "free" {
             return json!({"plan":null,"status":null,"cancelAtPeriodEnd":false,
                 "credits":{"included":0,"used":0,"remaining":0},"period":null,"daily":[],"plans":plans});
@@ -1512,6 +1512,21 @@ pub fn refresh_billing(cx: &mut App) {
 /// waits for it (the return link, or the app coming back).
 pub fn subscribe(plan: String, cx: &mut App) {
     open_billing_page("checkout", Some(plan), cx);
+}
+/// Aero's Subscribe (the composer, the empty agent panel, Home's sidebar,
+/// onboarding): Checkout for the first plan the backend offers, or
+/// Settings › Account when none has been read yet.
+pub fn subscribe_offered(cx: &mut App) {
+    let plan = cx
+        .try_global::<Cloud>()
+        .and_then(|cloud| match &cloud.billing.state {
+            Some(Ok(Some(billing))) => billing.plans.first().map(|p| p.id.clone()),
+            _ => None,
+        });
+    match plan {
+        Some(plan) => subscribe(plan, cx),
+        None => crate::settings_window::show_page("account", cx),
+    }
 }
 /// Manage Billing: the Stripe Customer Portal opens in the browser.
 pub fn manage_billing(cx: &mut App) {

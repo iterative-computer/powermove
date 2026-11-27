@@ -134,6 +134,8 @@ pub struct ProjectLibrary {
     gallery_native: Vec<Entity<NativeControl>>,
     /// The open button menu, and where its button was last painted.
     menu: Option<Menu>,
+    /// The sidebar's Aero offer was closed (for this launch).
+    offer_closed: bool,
     anchors: Rc<RefCell<HashMap<Menu, Bounds<Pixels>>>>,
     row_anchors: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
     /// The project whose "more" menu is open.
@@ -253,6 +255,7 @@ impl ProjectLibrary {
             #[cfg(debug_assertions)]
             gallery_native: Vec::new(),
             menu: None,
+            offer_closed: false,
             anchors: Rc::default(),
             row_anchors: Rc::default(),
             menu_row: None,
@@ -829,6 +832,87 @@ impl ProjectLibrary {
     ) -> Stateful<Div> {
         kit.nav_row(id, symbol, label, count, selected)
             .debug_selector(|| id.into())
+    }
+    /// The sidebar's foot on Free, above the account: Aero and the plan the
+    /// backend offers, its button straight to Checkout, closable for this
+    /// launch. Nothing when signed out (the Sign In row), on a plan, or
+    /// before the plans are read.
+    fn aero_offer(&self, kit: &Kit, account: &Value, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let billing = &account["billing"];
+        let plan = billing["plans"][0]["name"].as_str()?;
+        if self.offer_closed
+            || account["signedIn"] != true
+            || billing["state"] != "ready"
+            || billing["subscribed"] != false
+        {
+            return None;
+        }
+        let t = &kit.t;
+        let c = &t.colors;
+        let pad = t.space.md;
+        // Concentric with its button: the card's corner is the button's
+        // plus the padding between them.
+        let corner = t.metrics.control_radius + pad;
+        Some(
+            div()
+                .id("home-aero-offer")
+                .debug_selector(|| "home-aero-offer".into())
+                .role(Role::Group)
+                .aria_label(format!("Aero, your editing agent. Get {plan}."))
+                .relative()
+                .mx(px(t.space.xs))
+                .mb(px(t.space.sm))
+                .p(px(pad))
+                .flex()
+                .flex_col()
+                .gap(px(t.space.xs))
+                // A quiet accent light on the sidebar's material, its edge
+                // a hairline of the same light.
+                .rounded(px(corner))
+                .bg(ink(c.accent, t.translucency.hover))
+                .border_1()
+                .border_color(ink(c.accent, t.translucency.selected))
+                .child(
+                    div()
+                        .text_role(t, Text::Label)
+                        .text_color(rgb(c.text))
+                        .child("Aero"),
+                )
+                .child(
+                    div()
+                        .pr(px(t.metrics.hit))
+                        .text_role(t, Text::Caption)
+                        .text_color(rgb(c.secondary))
+                        .child("Your editing agent, with inference included."),
+                )
+                .child(
+                    kit.button(
+                        "home-aero-offer-get",
+                        format!("Get {plan}"),
+                        Button::Primary,
+                        None,
+                        None,
+                    )
+                    .mt(px(t.space.xs))
+                    .w_full()
+                    .on_click(cx.listener(|_, _, _, cx| crate::cloud::subscribe_offered(cx))),
+                )
+                .child(
+                    // Not now: closed for this launch, in the corner.
+                    div()
+                        .absolute()
+                        .top(px(t.space.xs))
+                        .right(px(t.space.xs))
+                        .child(
+                            kit.icon_button("home-aero-offer-close", "xmark", "Not now", false)
+                                .on_click(cx.listener(|v, _, _, cx| {
+                                    v.offer_closed = true;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
     /// Opens a button's menu: the system's, hanging from the button (the
     /// account row's above it, at the sidebar's foot).
@@ -1779,6 +1863,7 @@ impl Render for ProjectLibrary {
                 .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("store"), cx))),
             )
             .child(div().flex_1())
+            .children(self.aero_offer(&kit, &account, cx))
             .child(match identity {
                 Some(name) => self
                     .nav_row(
