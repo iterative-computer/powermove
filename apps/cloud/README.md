@@ -29,7 +29,7 @@ them on the desktop.
   (`translate.ts`, prompt caching for both providers), and AI SDK stream parts
   back to Chat Completions SSE in the subset fx parses (`sse.ts`). Each call runs in
   a Durable Object of its own (`call.ts`, binding `AERO_CALLS`) that reserves, calls the
-  provider once and settles in exact nano-USD (`meter.ts`); uncertain bills take the whole
+  provider once and settles the request's credits (`meter.ts`); an uncertain settle takes the whole
   hold, and a period never spends past its grant.
 - `src/lifecycle.ts` is the state table (visibility × moderation × tombstone
   × yank). Every read decides through it.

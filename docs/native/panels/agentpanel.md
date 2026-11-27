@@ -207,7 +207,7 @@ loading representation, file/visual preview/error representation, and reconcile
 shipped popover actions with `design/language.md` §12's native docked surface.
 Use existing pm-design tokens when a visual layer is built. There is deliberately
 no fallback layout, invented message copy or styling in this crate. All future
-visual output remains provisional until Opus review.
+visual output remains provisional until design review.
 
 ## Verification
 

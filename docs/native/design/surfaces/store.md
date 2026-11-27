@@ -2,7 +2,7 @@
 
 Rows S073 S075 S076 S077 S078 S079 S080 S081 S082. Grammar:
 [README](README.md) §1–5. Permission sheet, Full Access alert and stored
-decisions are [reviews/na-cloud-storehost.md](../reviews/na-cloud-storehost.md)
+decisions are reviews/na-cloud-storehost.md
 and stand unchanged; S012 owns uninstall values; S011 owns Set Up. Sources:
 `R/store/`, `M/cloud/publish.ts`, `R/legacy/ui/extension-settings.ts`,
 `R/shell/{extension-update-notices,fork-updates,update-fork}.ts`.

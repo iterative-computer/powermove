@@ -800,7 +800,7 @@ mutants and the probes' verdicts on every build (`tests/probes.rs`).
   turning a program off breaks its effect (a blocker under amendment 22). The engine now records
   (`Watchdog::measured_ms`) and enforces nothing; the hang guard's 10 s
   (Chromium's) is the only thing that turns a program off. Enforcing a
-  budget (`Watchdog::set_budget`, user programs only) needs Jude's call
+  budget (`Watchdog::set_budget`, user programs only) needs a product decision
   before any renderer sets it.
 - **Uniform metadata (`udefs`) is not written by the engine**: descoped
   from this lane by the orchestrator (decision DEFS-1, 2026-10-19; the

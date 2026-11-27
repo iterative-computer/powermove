@@ -20,8 +20,8 @@ features remain explicit native requirements; there is no browser shell fallback
 
 Baseline: [T1](t1-themes.md), shipped `v1.2.0` at
 `07ed5fa17ee640659cb075f9cad1af2095011d60`. Architecture follows
-[P0 decisions](p0-decisions.md), [kernel](kernel.md), [S1](s1-v8.md),
-[S5](s5-compat.md), [C-MATRIX](c-matrix.md), [D-STATE](d-state.md),
+P0 decisions, [kernel](kernel.md), S1,
+S5, C-MATRIX, D-STATE,
 [W1](w1-workflows.md), [keymap](w1-keymap.md), [traces](traces.md),
 [MCP](mcp.md), [engine service](engine-service.md) and
 [first launch](first-launch.md). The adopted architecture in P0 supersedes older

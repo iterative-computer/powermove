@@ -9,7 +9,7 @@ random seek to draw p50 125.4, p95 347.5, max 736.3 ms against p95 ≤ 300
 ms, and a playhead drag that showed 242 of 360 asked frames.
 
 Builds on: [media.md](media.md) (sessions, the decode service, the frame
-cache), [tracer.md](tracer.md) (the presenter, transport, the measurement
+cache), tracer.md (the presenter, transport, the measurement
 spec), [pm-render.md](pm-render.md) (media into working textures).
 
 ## Where the time went
@@ -192,7 +192,7 @@ fresh renders, `reused_frame_textures_never_change_what_a_render_reads`).
 
 ## Measurements
 
-Jude's MacBook Pro (Apple M4 Max, 128 GB, macOS 27, built-in 120 Hz
+The reference MacBook Pro (Apple M4 Max, 128 GB, macOS 27, built-in 120 Hz
 display), release builds, shared with other engine lanes (the 1-minute load
 average is given per run). Not a reference machine (section 25), so these
 are measurements, not gate verdicts. Clips: `docs/engine/tracer.md`

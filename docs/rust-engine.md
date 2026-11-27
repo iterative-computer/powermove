@@ -1,23 +1,10 @@
 # Powermove native engine: plan and design
 
-Mac integration is **WIP, handed back to Jude** before full validation. See
-[the exact failures and reproduction commands](native/handoff/engine-macos.md).
-Gate E remains open.
-
-> Native-app E-track status (2026-11-01): the five open author branches are
-> integrated with dispositions in [engine/etrack-integration.md](engine/etrack-integration.md).
-> The base-M5 macOS integration includes the export-parity lane; its initial
-> export replay passed 139 tests. Fresh synthetic v1 captures on that build Mac
-> are new witnesses, not the unavailable original frozen corpus.
-> The exhaustive [Gate E ledger](engine/e2e-ledger.md#gate-e--native-engine-integration-2026-11-01)
-> remains open. The GPUI/in-process/V8 architecture in docs/native supersedes
-> this document's older Electron-host assumptions. Native H.273 Log100/Log316
-> input interpretation extends the earlier Phase 3b transfer list; proprietary
-> camera log/gamut pairs still need explicit contracts and evidence.
-
-Status: proposal, not started. Revision 5, reconciled with main at `d5d5b731`
-and audited by five independent reviewers (architecture and readiness, 3D and
-Blender, agents and security, color and video, preservation).
+> This is the design plan the Rust engine in `engine/` was built from, written
+> while Powermove 1 (Electron) was still shipping. The native app's architecture
+> in [native/](native/) (GPUI shell, in-process engine, V8 extension runtime)
+> supersedes its Electron-host assumptions; sections on Electron hosts, the
+> frame bridge and phase gates are historical.
 
 This document covers the whole rewrite of the Powermove engine (evaluation,
 decode, compositing, 3D, color, text, audio, playback, caching, proxies, and
@@ -83,7 +70,7 @@ LUTs and color effects, more delivery formats, Windows, cameras and lights for
 3a, 3b, and 3c start together at the Phase 2 gate; the 3c gate requires 3a and 3b.
 
 **FFmpeg:** the bundled `ffmpeg-static` binary is replaced by our own build as part of
-the rewrite (section 24, item 1; Jude's decision, 2026-10-11).
+the rewrite (section 24, item 1; the owner's decision, 2026-10-11).
 
 **Decisions** are in section 29; none remain open.
 
@@ -883,7 +870,7 @@ Keep valid authored GLSL, its formulas, logical resolution, `u_res`, coordinates
 uniform calls and sampling semantics. Fix translation failures in the pipeline;
 do not rewrite user shaders to hide malformed GLSL. The cutover gate requires
 previously accepted valid programs to keep drawing and match the classified visual
-oracle. [S4](native/s4-glsl.md) records the current inventory and remaining gaps;
+oracle. S4 records the current inventory and remaining gaps;
 its available-corpus draw regression passes, but the complete gate remains open.
 
 The built-in effects, transitions and Studio Cube retain their GLSL definitions;
@@ -968,7 +955,7 @@ A WGSL contract for apiVersion 4 is planned and unshipped. GLSL remains supporte
   identical.
 - **Rendering:** coverage gamma or stem darkening tuned to match CoreText.
 - **3D Text** from Blender's font, as today.
-- **Gates:** CoreText side-by-side corpus reviewed by Jude; SSIM ≥ 0.98; typing latency.
+- **Gates:** CoreText side-by-side corpus reviewed by the owner; SSIM ≥ 0.98; typing latency.
 
 ## 13. Media I/O (`pm-media`)
 
@@ -1323,7 +1310,7 @@ If S1 misses its gate after the pipeline is tuned:
 - **B.** Shared-memory CPU frames at reduced preview resolution (also the viewer path
   in the hidden host's on-demand Chromium).
 - **A′** (engine in main presenting through `CAMetalLayer`) is a last resort, because it
-  puts decoders in the browser process; adopting it requires Jude's decision.
+  puts decoders in the browser process; adopting it requires the owner's decision.
 
 ## 19. Process model, protocol, security, packaging
 
@@ -1635,7 +1622,7 @@ output path.
 Settled with counsel before the dependent work ships.
 
 1. **FFmpeg.** The shipped `ffmpeg-static` binary is a third-party build whose
-   configuration includes components that must not be redistributed. Jude chose to
+   configuration includes components that must not be redistributed. The owner chose to
    replace it as part of the rewrite rather than as a separate release; it is built in
    Phase 0 and wired in by Phase 2. Our build: pinned version, LGPL or GPLv3-compatible components
    only, never `--enable-nonfree`; dylibs for the engine plus an `ffmpeg` executable from
@@ -1666,7 +1653,7 @@ Settled with counsel before the dependent work ships.
 - **Order:** appendix A fixes marked (Phase 0) land first; then the parity corpus is
   captured on the reference machines.
 - **Parity corpus:** the 12 pixel-hash scenarios; every e2e fixture; synthetic projects per
-  feature; real-world projects Jude supplies (outside the repository); a 3D corpus
+  feature; real-world projects the owner supplies (outside the repository); a 3D corpus
   (primitives, lathe and extrude, skinned and animated glTF with source materials and
   every r180 extension listed in section 8, multi-clip files, embedded punctual lights,
   point and line primitives, instancing, transmission, every light type with shadows,
@@ -1763,10 +1750,10 @@ M-series Air with a ProRes engine ("base"), an M-series Pro ("Pro"). Calibrated 
 Ordered by dependency; lanes run in parallel (section 27). The legacy engine stays the
 default until Phase 5b.
 
-**Implementation run.** Jude asked for the implementation in one run, up to a
+**Implementation run.** The owner asked for the implementation in one run, up to a
 beta-ready build (everything through Phase 4a plus the Phase 5a build and the WASM web
-player under decision 8). The run stops there for Jude. Nothing is merged and nothing is
-released: work stays on branches and stacked PRs are not merged. Each gate has objective criteria; Jude signs off at each gate in
+player under decision 8). The run stops there for the owner. Nothing is merged and nothing is
+released: work stays on branches and stacked PRs are not merged. Each gate has objective criteria; the owner signs off at each gate in
 addition.
 
 **Engine-side features during the rewrite** follow decision 18: from Phase 0, a feature
@@ -1777,7 +1764,7 @@ hard freeze starts at Phase 3a and ends at Phase 5b.
 ### Phase 0: Foundations, contracts, spikes
 
 Base-machine gates are deferred (decision 11). Release-dependent items (the `minReaderVersion`
-guard, notarizing the placeholder addon) need Jude's release authorization.
+guard, notarizing the placeholder addon) need the owner's release authorization.
 
 Work:
 
@@ -1796,13 +1783,13 @@ Work:
 
 | Spike | Lane | Pass criteria | Informs | On failure |
 |---|---|---|---|---|
-| S1 frame bridge | Engine and platform | Section 18 S1 gate, including 3D orbit and HDR values | Bridge design, contract 2 | Fallback C′, then B; A′ only by Jude's decision |
+| S1 frame bridge | Engine and platform | Section 18 S1 gate, including 3D orbit and HDR values | Bridge design, contract 2 | Fallback C′, then B; A′ only by the owner's decision |
 | S2 precision and encode | Color | Pipeline transparency and codec generation bars on a prototype; VideoToolbox formats; f16 vs f32 on 12-bit and 16-bit sources; HEVC alpha depth; AVAssetWriter tags; QuickTime-matching tags; Metal precise math; `rgba32float` filter and blend support on every reference machine | Contract 4, decision 15 | Adjust precision defaults; drop unsupported 32-bit features per machine |
 | S3 shaders | GPU and render | Every repository, Store, docs, and generated agent shader compiles and matches WebGL; naga vs SPIRV-Cross chosen | Shader pipeline | Fallback runner (decision 19) for the residue; pipeline fixes |
 | S4 text and vectors | Text and vectors | Layout: identical line breaks and advances within 0.25 px against today on the font corpus. Rendering: Vello coverage with float paint, `vello_gpu`, and Skia Graphite compared with CoreText; a choice made | Text and vector renderers | Level 1 text keeps legacy shims longer; CPU fallback renderer |
 | S5 WASM evaluator | Model and evaluation | `evP` < 1 µs cached; patch apply < 0.2 ms property and < 2 ms structural (884 layers); per-window memory budget | Phase 1 | Narrow the mirror; more queries via cached results |
 | S6 decode | Media | Corpus decode into wgpu without copies; exact random access including coarse timebases | `pm-media` | FFmpeg software path for failing formats |
-| S7 3D | 3D | three.js r180 shading, shadows, area lights, MSAA, skinning, morphs, transmission, and imported-glTF extensions in wgpu within the 3D bar, using three.js's generated shader code through S3 as the default and comparing hand-written WGSL; `pm-geom3d` 1M-vertex skinned pick targets; 16-bit Blender surfaces with straight alpha after AgX into the job engine; Blender batching equality; orthographic framing and glTF texture orientation checked against appendix A | Decision 14, contract 11 | Narrow parity scope with Jude; keep a three.js pixel source for affected features (not headless) |
+| S7 3D | 3D | three.js r180 shading, shadows, area lights, MSAA, skinning, morphs, transmission, and imported-glTF extensions in wgpu within the 3D bar, using three.js's generated shader code through S3 as the default and comparing hand-written WGSL; `pm-geom3d` 1M-vertex skinned pick targets; 16-bit Blender surfaces with straight alpha after AgX into the job engine; Blender batching equality; orthographic framing and glTF texture orientation checked against appendix A | Decision 14, contract 11 | Narrow parity scope with the owner; keep a three.js pixel source for affected features (not headless) |
 | S8 GPU contention | Engine and platform | Section 25 S8 row | Contract 13 | Stronger slicing; pause jobs during playback |
 
 Gates, per consumer:
@@ -1860,7 +1847,7 @@ disagree, this subsection wins; the earlier text is kept for history.
 
 16. **Variable speed (section 5 rule 5).** Integration uses two midpoint samples per frame of the owning composition, at no less than 60 Hz. A root composition then matches today exactly. A nested composition uses its own rate rather than the open composition's (today's answer depends on which composition is open; appendix A). Dual-answer mode lists this nested case as an allowed difference and nothing else.
 17. **Contract 2.** The bridge lane's changes are accepted (`FrameDescriptor.view_seq` and `duration`, `ViewerState.edr` and `view_seq`, descriptor validation; `PROTOCOL_BUILD` protocol-16c8e6e125019103). Lanes regenerate against it.
-18. **S1 gate path.** The bridge merges behind "Use New Engine". Before the Phase 2 gate, the gate's "today" is the real WebGL viewer, not the harness stand-in. The gap is closed in this order, measuring after each step: engine-path gestures read `pointerrawupdate`; a vsync-phase hint in `ViewerState` so engine GPU work lands just after composition; the C′ prototype for playback. If the real viewer comparison still fails after all three, the Phase 2 gate reports it as measured and Jude decides.
+18. **S1 gate path.** The bridge merges behind "Use New Engine". Before the Phase 2 gate, the gate's "today" is the real WebGL viewer, not the harness stand-in. The gap is closed in this order, measuring after each step: engine-path gestures read `pointerrawupdate`; a vsync-phase hint in `ViewerState` so engine GPU work lands just after composition; the C′ prototype for playback. If the real viewer comparison still fails after all three, the Phase 2 gate reports it as measured and the owner decides.
 19. **Text measurement.** Level 1 measures at Blink's effective font size, `floorf(size × 100) / 100` in f32, applied once in `pm_text::compat`. The corpus comparison pins its "not compared" counts per font and fails if they grow.
 20. **Evaluation parity classes.** A rotation that differs by exactly 360° at the `atan2` branch cut (180° against −180°) is an allowed difference. Bounds and pick cases classed as fragile (the TypeScript answer changes under a 1e-12 s, 1e-7 px, or edge perturbation) may differ in at most 5% of fragile cases.
 
@@ -2143,7 +2130,7 @@ and reports failures as they are.
 
 ## 29. Decisions
 
-Jude delegated these decisions on 2026-10-11, except the ones marked **Open**.
+The owner delegated these decisions on 2026-10-11, except the ones marked **Open**.
 
 | # | Decision | Choice |
 |---|---|---|
@@ -2154,20 +2141,20 @@ Jude delegated these decisions on 2026-10-11, except the ones marked **Open**.
 | 5 | Disk guard and storage limit | Pause below the larger of 20 GB or 10% free; limit 25% of the cache volume |
 | 6 | Order after cutover | As written in section 26 |
 | 7 | Intel Macs | No, apart from the CLI's existing darwin-x64 support |
-| 8 | Web player and "no trace" | (B): the WASM web player is built before Phase 5c, so no TypeScript renderer remains anywhere. If it proves too complex, code export and the web player are removed instead (Jude accepts this); the www hero and onboarding then play engine-rendered video |
+| 8 | Web player and "no trace" | (B): the WASM web player is built before Phase 5c, so no TypeScript renderer remains anywhere. If it proves too complex, code export and the web player are removed instead (the owner accepts this); the www hero and onboarding then play engine-rendered video |
 | 9 | Serve interim | The WASM player; if decision 8 falls back to removal, serve previews use CPU frames from a host-side engine or stay paused |
-| 10 | Crash and session reporting | Beta cohort submitting local crash and session logs; no new backend. Cutover gates use the cohort: crash-free sessions ≥ 99.5% over at least 500 sessions from at least 20 users. Jude recruits the cohort at 5a |
-| 11 | Reference machines | Jude's M4 Max MacBook Pro (128 GB, XDR) is the only reference machine for now. Base-machine gates (M1 Air, base Air) are deferred and marked unverified in gate reports |
+| 10 | Crash and session reporting | Beta cohort submitting local crash and session logs; no new backend. Cutover gates use the cohort: crash-free sessions ≥ 99.5% over at least 500 sessions from at least 20 users. The owner recruits the cohort at 5a |
+| 11 | Reference machines | The reference M4 Max MacBook Pro (128 GB, XDR) is the only reference machine for now. Base-machine gates (M1 Air, base Air) are deferred and marked unverified in gate reports |
 | 12 | Licensing | No counsel needed for the pre-cutover macOS scope: an LGPL-only FFmpeg build (no x264, x265, or nonfree components), ProRes only through VideoToolbox, Blender as today. Counsel before Linux or Windows ProRes, software H.264 encode, or camera RAW |
-| 13 | Real-world corpus projects | Synthetic projects, e2e fixtures, and Jude's "Powermove ad" project (kept outside the repository) |
+| 13 | Real-world corpus projects | Synthetic projects, e2e fixtures, and the owner's "Powermove ad" project (kept outside the repository) |
 | 14 | 3D rendering | Native port of the three.js r180 subset |
 | 15 | Blender surfaces at cutover | 16-bit PNG through AgX |
 | 16 | Linux | Today's Chromium hidden host stays on Linux until after cutover; Linux and Windows ProRes and H.264 encode decided with counsel then |
 | 17 | 3D tone curves | ACES Filmic for Native and AgX for Blender at cutover; unified after |
-| 18 | Engine-side feature policy | From Phase 0, features touching the engine land with corpus cases and port notes; hard freeze from Phase 3a to 5b. This binds work by Jude and other agents on main |
+| 18 | Engine-side feature policy | From Phase 0, features touching the engine land with corpus cases and port notes; hard freeze from Phase 3a to 5b. This binds work by the owner and other agents on main |
 | 19 | Shader fallback runner | Keep a minimal in-renderer GLSL runner for shaders that fail translation |
 | 20 | CI hardware | No self-hosted runners on the public repository. Hosted runners run unit, lint, and build jobs; parity and performance gates run locally on the reference machines and their reports are attached to each PR |
-| 21 | Worker models | Opus 5.5 for implementation and reviews |
+| 21 | Worker models | Coding agents for implementation and reviews |
 | 22 | FFmpeg ProRes decoder | Kept in our FFmpeg build for agent media tools; the engine decodes ProRes only through VideoToolbox (Phase 0 amendment 13) |
 
 ## 30. Appendix A: defects found during the survey
@@ -2246,7 +2233,7 @@ Line references are at `d5d5b731`.
 38. **Blender orthographic framing** fits the wider dimension (sensor fit AUTO,
     `blender-worker.ts:293-294`) while native uses a fixed half-height of 3
     (`runtime.ts:235`), so landscape orthographic renders differ. Inferred; S7 verifies and
-    the decision on which to preserve is Jude's.
+    the decision on which to preserve is the owner's.
 39. **glTF source textures in Blender** are probably upside down (raw UVs with
     non-flipped textures, `rendering.ts:391`). Inferred; S7 verifies.
 40. **Model-group bounds cache skinned boxes on first call** (`service.ts:72`); the engine

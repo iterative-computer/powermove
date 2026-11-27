@@ -146,7 +146,7 @@ and AppKit text/AX probe pass. This run's captures use
 `/tmp/pm-shots/ptext-shell-headless-*.png`. Real Japanese/Pinyin conversion,
 Services, dictation, Writing Tools, emoji, keyboard traversal and the visible dense
 swap remain unverified after the session locked. Exact runnable checks and the
-30-second manual IME check are in [S2](s2-gpui-ce.md).
+30-second manual IME check are in S2.
 
 ## Shell 2 (2026-11-01, lane `feat/na-shell2`)
 

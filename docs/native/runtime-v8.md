@@ -341,7 +341,7 @@ All inputs were synthetic; logs remain under `/tmp/pm-macverify/`.
 
 The local S1 artifact at `/private/tmp/pm-s1-v8-artifact-final` passed all five
 `SHA256SUMS` checks. Its archive and binding match the pinned hashes in
-[s1-v8.md](s1-v8.md); both overrides below were set and `V8_FROM_SOURCE` was unset.
+s1-v8.md; both overrides below were set and `V8_FROM_SOURCE` was unset.
 Every build/test used the shared build lock and `~/Developer/pm-target`.
 Disk checks stayed above the required 8 GiB.
 
@@ -387,7 +387,7 @@ only.
 `pm-compat-runner` now executes the actual compat bundle and remote-DOM event
 closures in this runtime, with eight native tests. The extension inventory and
 remaining kernel/WebKit/Store capture gates are recorded in
-[extcheck-p2.md](extcheck-p2.md). This supersedes only the missing executable
+extcheck-p2.md. This supersedes only the missing executable
 loader blocker above; it does not certify extension parity or complete the
 production adapters.
 

@@ -17,7 +17,7 @@ pm-render's compose cost, and the presenter's render-ahead schedule.
 ## Profile (before any change)
 
 Measured 2026-10-16 on the integration tip `2b7b1346` (waves 1 to 4) on
-Jude's MacBook Pro (M4 Max, 128 GB, macOS 27, 120 Hz built-in display),
+The reference MacBook Pro (M4 Max, 128 GB, macOS 27, 120 Hz built-in display),
 Electron 44, release addons, one Electron at a time under the machine lock,
 hidden and unfocused windows. The 1-minute load average was 6.5 to 7.7 from
 other lanes. Page profiles are V8 CPU profiles of the editor window taken

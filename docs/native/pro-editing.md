@@ -347,7 +347,7 @@ exceed one. A receipt never fabricates completion for an entire frame range.
 The host aggregates frame jobs into the existing BackgroundTasks range model.
 Decision: N1/N3 require measured progress to describe the bytes actually verified.
 
-## 2026-11-04 — owner reference change and merged Opus N006
+## 2026-11-04 — owner reference change and merged design N006
 
 The behavior reference for this lane is now `origin/main` pinned at
 `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`, per the owner's new decision in
@@ -369,7 +369,7 @@ to the new effect-input remapper (E02), which belongs to delta-fx. P03–P07/P10
 storage/import/autosave changes belong to delta-data/media; U editing/panel rows
 go to the owner's later UI lane. They are not reported as completed here.
 
-Merged Opus `design/surfaces/pro-edit.md` N006 is now the source for native
+Merged `design/surfaces/pro-edit.md` N006 is now the source for native
 source-edit completion: successful Insert/Overwrite moves the session playhead
 to the resolved timeline Out and clears Source In/Out, retaining timeline marks
 and opaque facts. The actor stages those facts before planning, applies them
@@ -382,7 +382,7 @@ Slip Edit use the exact N006 undo labels. No new menu, key binding, visual copy,
 material, layout or gesture was chosen by this lane.
 
 Decisions: the owner's explicit new pin overrides the older reference text;
-N3 uses actual immutable main bodies and the authored Opus completion behavior;
+N3 uses actual immutable main bodies and the authored completion behavior;
 N4 keeps tagged inputs, opaque fields and applied edits/notices; N6 leaves the
 legacy command API and frozen tools unchanged; N7/N8 keep completion and facts
 on the existing single-writer actor with no main-thread JS/media wait. Real

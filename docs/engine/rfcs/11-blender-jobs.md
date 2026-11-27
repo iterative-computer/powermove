@@ -117,7 +117,7 @@ host would reject what a newer engine sends.
   the job engine; batching equality (decides whether `batch_layers` is ever
   set); orthographic framing (appendix A item 38: Blender fits the wider
   dimension, native uses a fixed half-height of 3; which to preserve is
-  Jude's decision) and glTF source texture orientation (appendix A
+  the owner's decision) and glTF source texture orientation (appendix A
   item 39); the PNG compression level for "fast compression"
   (`PinnedOutput::compression_percent` is `None` until S7 measures write
   cost).

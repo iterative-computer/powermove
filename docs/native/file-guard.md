@@ -130,13 +130,13 @@ archives are separate integration boundaries outside this lane's ownership.
 **Proposal only.** Apply to a reviewed transition release on its own branch.
 The following capture-free function is the executable part of the proposal;
 the native tests run it directly from this document against native PMV4 output.
-The strings are machine error codes. Map them to Opus's existing alert in
+The strings are machine error codes. Map them to the existing alert design in
 [the migration spec](design/surfaces/migration.md#n003-outcomes),
 added by integration commit `78294c4c93cdb2a3a18aef8004fc42f9e5e420a9`:
 message `“{file}” needs a newer version of Powermove.`, informative text
 `This version can’t read it, so it wasn’t opened. The file wasn’t changed.`,
 and button `OK`. The alert belongs to the transition release. No UI is
-implemented by this lane and no design placeholder remains. Mac/Opus review
+implemented by this lane and no design placeholder remains. Mac and design review
 of the actual integrated alert is still required.
 
 <!-- transition-guard:start -->
@@ -196,7 +196,7 @@ Patch attachment points and required ordering:
 Transition acceptance still required: main/worker/browser/boot/library/headless
 and IPC save paths, old and new 3D, failure handle cleanup, unchanged file bytes,
 unchanged previous active document, no media/store/registry/thread/workspace/
-autosave side effects, and Opus-approved macOS error presentation. The tested
+autosave side effects, and design-approved macOS error presentation. The tested
 function alone is not that integrated patch and is not a release gate pass.
 
 ## Verification — 2026-11-04

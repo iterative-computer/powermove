@@ -1,6 +1,5 @@
-/* Metering one Aero request: reserve, then settle. The user pays what the provider bills us, and never gets
-   more than the period's grant: when the bill is uncertain, the user pays the conservative upper bound (owner,
-   2026-11-26: "If anything, we should overcharge the user, not undercharge").
+/* Metering one Aero request: reserve, then settle. A request never spends more than the period's grant, and
+   when its usage is uncertain it is charged the conservative upper bound.
 
    The call runs in a Durable Object (call.ts), which outlives the client and the Worker; what the meter learns is
    written to that object's storage the moment it learns it, so whatever happens to the stream, the object's alarm

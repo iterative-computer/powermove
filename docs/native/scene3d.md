@@ -6,7 +6,7 @@ This lane ports `origin/feat/na-3d-source` at `b81b94c66` (`core/scene3d`,
 `core/studio/operations.ts`, and `extensions/layers-3d`). Shipped behaviour
 reference: `c7f46a05641b23944d3692c9d80f9677c7e1ef1d`; v1.2.0 remains a required
 input. The integration design update was merged at `78294c4c9`.
-[Opus's Studio spec](design/surfaces/3d-studio.md) controls all presentation.
+[The Studio design spec](design/surfaces/3d-studio.md) controls all presentation.
 No panels or visual output are built by this crate. Its section 12 proposals
 are excluded. Exploded views, place-on and soften belong to agent operations.
 
@@ -19,7 +19,7 @@ are excluded. Exploded views, place-on and soften belong to agent operations.
 | Retain selected original import bytes and archive replaced legacy layers inside the document | N4 archive, never delete; N3 exact source provenance |
 | Keep navigation transient and feed light previews to kernel gestures, with host-supplied surface picks | N3 shot intent; N7 headless driving; host independence |
 | Use exact stable splat depth order; reject malformed/nonfinite input instead of reproducing WebGL errors or a quantization artifact | N3 spec over Chromium quirks |
-| Use Softbox, Spotlight, Bulb and Sun in model labels, retaining area/spot/point/sun on disk; use the design's failure/progress copy | Opus design ownership and N6 stored types |
+| Use Softbox, Spotlight, Bulb and Sun in model labels, retaining area/spot/point/sun on disk; use the design's failure/progress copy | design ownership and N6 stored types |
 
 `pm-scene3d` joins the existing `crates/*` workspace member glob. It reuses `pm-geom3d` for self-contained glTF decoding and primitive geometry.
 An owned native OBJ/MTL/texture packer derives from that engine's importer,
@@ -49,7 +49,7 @@ PMV save/reopen including Undo.
 Work remains in progress: MCP dispatch/schema/readback, imported geometry
 bounds adapters, animated legacy upgrade, native CAD build/real fixtures,
 navigation/light/import negative tests and final full test replay.
-No macOS rendering, physical input, GPUI/WebKit, signed helper or Opus visual
+No macOS rendering, physical input, GPUI/WebKit, signed helper or design
 acceptance is claimed by this checkpoint.
 
 
@@ -60,7 +60,7 @@ schema/defaults/validation, per-layer data and animation paths, pure operation
 plans, all eleven source Studio presets, five shot tracks, environment and
 material edits, camera navigation, and the surface-pick Light tool model.
 `Softbox`, `Spotlight`, `Bulb`, `Sun`, Fast/Quality and failure/progress strings
-come from the merged Opus spec. Section 12 proposals are not implemented.
+come from the merged design spec. Section 12 proposals are not implemented.
 Explode, place-on and soften have agent operations and no panel controls.
 
 `Scene3dCommand::Apply` runs in the normal actor transaction, retaining full
@@ -182,7 +182,7 @@ libraries (including license/source obligations), exercise actual system temp
 symlinks and import cancellation, connect/publish verified media on the app
 worker, compare Metal preview/export and camera/parent transforms against
 source intent, physical trackpad/modifier/pick gestures and one-gesture Undo,
-v1–3 API calls, saved real-world legacy assets, and Opus visual acceptance.
+v1–3 API calls, saved real-world legacy assets, and design acceptance.
 Linux passes are not evidence for AppKit/GPUI/WebKit/Metal behavior.
 
 

@@ -2,7 +2,7 @@
 
 Status: **build specs** for the Powermove Native panels. Owner: design lead.
 Governing documents: [language.md](../language.md) (look),
-[tokens.md](../tokens.md) (values), [review-checklist.md](../review-checklist.md)
+[tokens.md](../tokens.md) (values), review-checklist.md
 (gate), [w1-keymap.md](../../w1-keymap.md) and
 [w1-workflows.md](../../w1-workflows.md) (behaviour), and
 [panels-mockup.html](../panels-mockup.html) (pictures of the key states).
@@ -262,7 +262,7 @@ substitute literals — it blocks on the token.
 - No all-caps, no letter-spacing, no text under `t.minimum`.
 - No new shortcut that shadows a w1-keymap binding.
 
-## Owner decisions (Chike, 2026-11-01)
+## Owner decisions (2026-11-01)
 
 1. Timeline layer-list default width is **266 pt** (as v1.2.0), so Position and Scale values show at the default width. `metrics.layer_column` = 266.
 2. The agent opens as a **popover** under its toolbar button and can be **pinned** into the dock (as specified in agent-panel.md).

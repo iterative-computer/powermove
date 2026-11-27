@@ -224,7 +224,7 @@ Sources and provenance:
 | unit-tests | GLSL literals in kernel, legacy, and panel unit tests |
 | scenes | onboarding and www hero `scene.json` |
 | store | every public Store release, fetched without credentials through the desktop Store client's read-only routes (`tools/shaders/fetch-store.ts`): 4 releases of 4 extensions on 2026-10-17 (private-extension-03 1.0.0, chrome 1.0.0, `zellzoi/private-extension-19` 2.0.1 and `mrsigma/private-extension-19` 2.0.8, two extensions of the same name), all effects. Kept outside the repository; activated under `sandbox-exec` with network and file writes denied (`tools/shaders/activate.ts`) |
-| generated-s3 | spike S3's 56 agent-style shaders (written by Opus 5.5 from the docs) |
+| generated-s3 | spike S3's 56 agent-style shaders (agent-written from the docs) |
 | generated-agent | 37 prompts covering every contract feature (`tools/shaders/prompts.ts`, `CONTRACT`; the script fails when a feature has no prompt), answered by `claude --print` (Claude Code 2.1.300, `claude-opus-5-5`) with the in-app agent's own system prompt (`agentInstructions()`, the adapter's schema suffix), the API pack readable with Read/Glob/Grep, and the shader-layer runtime the Shader panel shows. The in-app harness itself needs a running Powermove with its MCP tools, which cannot run headlessly here; differences: no render_frames or validate_effect loop, the deliverable returned as JSON. Outputs with provenance in `tools/shaders/generated/` |
 | local | opt-in (`--local <project.pmv>` or an extensions folder); not run for this report |
 

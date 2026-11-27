@@ -2311,19 +2311,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-studio-host"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam",
- "libc",
- "pm-import-fbx",
- "pm-studio",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "pm-text"
 version = "0.1.0"
 dependencies = [

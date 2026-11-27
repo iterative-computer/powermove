@@ -7,7 +7,7 @@
 //! zero as authored). The clip, placed at 0, is exported through the job
 //! engine to ProRes with PCM, and the file is decoded by FFmpeg: the white
 //! frame and the chirp must sit where the asset's reading places them
-//! (docs/native/p0-decisions.md, clip timing), together for `timing: 2`.
+//! (clip timing), together for `timing: 2`.
 //! An older project (no member) hears the program sample its edits
 //! address, so a late soundtrack stays where the earlier app played it.
 

@@ -9,7 +9,7 @@
 //!
 //! These are standalone types rather than a `GpuInterop` impl: the decode
 //! half lives in `decode_in` (media lane), and the trait impl delegates to
-//! both once they share one device type (see docs/engine/bridge.md).
+//! both once they share one device type.
 
 pub mod display;
 mod noise;

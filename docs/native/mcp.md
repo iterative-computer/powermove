@@ -326,7 +326,7 @@ reuse this admission function when its host is integrated.
 
 No visual/UX change or new visual placeholder is introduced. There are no
 `DESIGN-TODO(opus)` additions in this lane. Existing visual output remains
-provisional for Opus review.
+provisional for design review.
 
 ## Implemented adapter limits
 
@@ -880,7 +880,7 @@ memory admission must be bound there by its owner. Do not replace the app actor
 with a second `Automation` kernel. Both host adapters and that binding require
 actual application acceptance; Linux standalone tests alone cannot prove them.
 
-**S070 update consumed from the final native-engine merge.** Opus has now supplied
+**S070 update consumed from the final native-engine merge.** The design spec now supplies
 [the consent and Other Agent Apps spec](design/surfaces/agent-auth.md#s070-subscriptions-and-external-clients).
 The earlier design dependency is resolved; there is no remaining missing-design
 placeholder in this lane. The app owner must still bind its specified alert and

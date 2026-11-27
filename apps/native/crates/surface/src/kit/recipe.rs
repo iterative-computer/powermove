@@ -371,7 +371,7 @@ impl Recipe {
         }
     }
 }
-// Resolved (design review 2026-11-01, docs/native/design/reviews/na-cloud-uikit.md):
+// Design decisions:
 // segmented-track padding is `track_padding` above; Toggle draws as a checkbox at
 // the leading edge of the value column; tree indentation follows NSOutlineView's
 // default until pm-design adds `metrics.tree_indent` (follow-up F2).

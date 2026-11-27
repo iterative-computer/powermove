@@ -32,7 +32,7 @@ with the kit and `metrics.*`/`colors.*`/`typography.*` tokens only:
 The older lane notes below describe the 2026-11-01 provisional tree.
 
 **Partial implementation; blocked for native panel acceptance. All visual output is provisional
-until Opus review.** Entry: `index.ts`. Source spec:
+until design review.** Entry: `index.ts`. Source spec:
 `docs/native/design/panels/agent-panel.md` and its shared README/owner decisions.
 This lane changes only this directory, thin `pm-panel-agentpanel` adapter code
 and the one required native lockfile dependency edge. No existing consumer is
@@ -104,7 +104,7 @@ also projects the emitted commits through the real AccessKit tree builder.
 | §5 Interactions   | Supported header/attachment/Send/Stop/disclosure actions; actual model key/slash/IME/repeat/select-all/consent behavior tested through data service                                                      | Composer input/paste/drop/inline token driver, native key cancellation, file picking, full cards, drag/dock and fitted previews                                                                                       |
 | §6 Keyboard/focus | Available controls' order/disabled guards; native model routes; hidden disclosure descendants removed                                                                                                    | Full tab sequence, native composer/selection ownership, global ⌘⇧K registry, layered Esc dismissal and focus restoration                                                                                              |
 | §7 VoiceOver      | Actual AccessKit group/list/button roles, available labels, disabled state and descendant assertions                                                                                                     | AXRowCount, row role projection for raw message containers, text-area/hint semantics, row navigation, announcements and real VoiceOver                                                                                |
-| §8 Appearance     | Token-only colors/type/radii/available dimensions; no decorative canvases                                                                                                                                | Exact derived geometry, control slots/material renderer, accessibility appearance, screenshots and Opus approval                                                                                                      |
+| §8 Appearance     | Token-only colors/type/radii/available dimensions; no decorative canvases                                                                                                                                | Exact derived geometry, control slots/material renderer, accessibility appearance, screenshots and design approval                                                                                                      |
 | §9 Copy           | Spec strings and model/provider-authored content only; no new product copy                                                                                                                               | Unavailable controls' copy remains represented by placeholders until their API lands                                                                                                                                  |
 | §10 Don't         | Popover default; solid content; replies have no bubbles; no decorative canvases; no retired consumer deletion                                                                                            | Platform shortcut/focus/popup proofs require the macOS integration                                                                                                                                                    |
 
@@ -153,7 +153,7 @@ All four are also recorded in `gaps.ts`; no extra product decisions are made:
    provides only Answered/Skipped copy. Closed questions stay plain labelled
    placeholders with no submission controls pending the specified state/copy.
 
-These items and all visuals require Opus review; API absence is not a request to
+These items and all visuals require design review; API absence is not a request to
 redesign the already specified controls.
 
 ## Rule-selected decisions
@@ -194,7 +194,7 @@ dock behavior and layout Undo, native text/IME/dictation/pasteboard/selection an
 shortcut ownership, all card/picker/preview interactions, sandbox/resource/focus
 restoration, 60k measured-row scrolling/input latency and full VoiceOver. Capture
 light/dark 2×, Increase Contrast, Reduce Transparency and Reduce Motion states,
-confirm real hit rectangles and no UI-thread JS waits, then obtain Opus review.
+confirm real hit rectangles and no UI-thread JS waits, then obtain design review.
 Linux wire/model/AX descriptions do not certify those gates.
 
 ## Frozen API baseline — 2026-11-01
@@ -216,5 +216,5 @@ does not certify completion of this panel or macOS rendering.
 Rule-selected decision: consume the frozen contract unchanged and report missing
 capabilities as additive API requests (orchestrator freeze directive; N3/N7).
 Keep all existing consumers and asynchronous authority boundaries intact (N4/N6,
-N8 and the prune rule). The four Opus TODOs and macOS verification list above are
+N8 and the prune rule). The four design TODOs and macOS verification list above are
 unchanged.

@@ -1,5 +1,5 @@
 //! Does a refresh-rate request reach the ProMotion panel? (plan section
-//! 15; docs/engine/bridge.md "ProMotion"). Watches the main display's
+//! 15). Watches the main display's
 //! refreshes with a display link for a few seconds without a request, then
 //! with requests for multiples of common content rates, and prints the
 //! refresh intervals seen. Opens no window.
