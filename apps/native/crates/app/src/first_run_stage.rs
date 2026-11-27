@@ -111,18 +111,14 @@ impl StageWindow {
             c
         });
         *self.card.borrow_mut() = next.clone();
-        let native = *self.native.borrow();
-        let _ = self.window.update(cx, |stage, window, cx| {
-            stage.set_card(next.clone(), cx);
-            if native.is_none() {
-                next.update(cx, |c, cx| c.hold_focus(window, cx));
-            }
+        // The `Stage` entity, not its window: once the Welcome has its own
+        // window the stage window has gone.
+        self.stage
+            .update(cx, |stage, cx| stage.set_card(next.clone(), cx));
+        let holder = self.native.borrow().unwrap_or_else(|| self.window.into());
+        let _ = holder.update(cx, |_, window, cx| {
+            next.update(cx, |c, cx| c.hold_focus(window, cx));
         });
-        if let Some(native) = native {
-            let _ = native.update(cx, |_, window, cx| {
-                next.update(cx, |c, cx| c.hold_focus(window, cx));
-            });
-        }
     }
     /// The last step: the window eases out and the app's first window,
     /// opened a moment before, is there. Whatever is left of the stage (the
