@@ -71,6 +71,54 @@ pub(crate) fn open(
     })
     .unwrap()
 }
+/// Onboarding's agent step on Free with Aero's plan card, drawn offscreen
+/// in light and dark (`--stage-capture <folder> offer`): what the step shows
+/// a signed-in person on Free, with the plan the backend offers.
+pub fn offer_stills(out: std::path::PathBuf) -> anyhow::Result<()> {
+    use crate::first_run::{AeroPlan, Choices, step_frame};
+    use pm_services::surface_backing::onboarding::Step as Onboard;
+    std::fs::create_dir_all(&out)?;
+    let choices = Choices {
+        aero: AeroPlan::from_fact(&serde_json::json!({"state":"ready","subscribed":false,
+            "plans":[{"id":"aerolite","name":"Aerolite","priceCents":999,"credits":1000}]})),
+        ..Choices::default()
+    };
+    let frame = step_frame(
+        Onboard::Agent,
+        &choices,
+        &Default::default(),
+        Some("ana@example.com"),
+        None,
+    );
+    for scheme in [Scheme::Light, Scheme::Dark] {
+        let tokens = Tokens::new(scheme, Accessibility::default());
+        let mut cx = headless();
+        let frame = frame.clone();
+        let window = cx
+            .open_window(size(px(560.), px(900.)), move |_, cx| {
+                cx.new(|cx| WelcomeView::new(tokens, frame, Rc::new(|_, _| {}), cx))
+            })
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        for _ in 0..3 {
+            cx.update_window(window.into(), |_, w, cx| {
+                w.refresh();
+                w.draw(cx).clear(cx);
+            })
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            cx.run_until_parked();
+        }
+        let image = cx
+            .capture_screenshot(window.into())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let name = if scheme == Scheme::Dark {
+            "dark"
+        } else {
+            "light"
+        };
+        image.save(out.join(format!("onboarding-offer-{name}.png")))?;
+    }
+    Ok(())
+}
 pub(crate) fn frame_at(
     cx: &mut HeadlessAppContext,
     window: WindowHandle<Stage>,

@@ -254,6 +254,8 @@ pub(crate) struct Choices {
     pub agent_picked: bool,
     /// The Powermove account's plan: what Aero's row offers on Free.
     pub aero: AeroPlan,
+    /// Maybe Later on Aero's plan card.
+    pub offer_later: bool,
     /// The speech models to download once the library is open, one after
     /// another in the order asked for; none unless the person asks.
     pub speech: Vec<String>,
@@ -270,7 +272,9 @@ pub(crate) enum AeroPlan {
     Offer {
         id: String,
         name: String,
+        /// `$9.99`, and the credits a month (`1,000`).
         price: String,
+        credits: String,
     },
     On(String),
 }
@@ -294,7 +298,8 @@ impl AeroPlan {
             (Some(id), Some(name), Some(cents)) => Self::Offer {
                 id: id.to_owned(),
                 name: name.to_owned(),
-                price: format!("${}.{:02} per month", cents / 100, cents % 100),
+                price: format!("${}.{:02}", cents / 100, cents % 100),
+                credits: pm_agents::inference::grouped(plan["credits"].as_u64().unwrap_or(0)),
             },
             _ => Self::Unknown,
         }
@@ -324,6 +329,7 @@ impl Default for Choices {
             agent: "aero".into(),
             agent_picked: false,
             aero: AeroPlan::default(),
+            offer_later: false,
             // Nothing downloads unless the person asks.
             speech: vec![],
             workspace: "import".into(),
@@ -816,6 +822,24 @@ impl Flow {
             }
             return vec![];
         }
+        // Aero's plan card: Checkout for its plan, or Maybe Later.
+        if onboarding.step == Onboard::Agent {
+            match id {
+                "offer:get" => {
+                    if let AeroPlan::Offer { id, .. } = &self.choices.aero {
+                        self.choices.agent = "aero".into();
+                        self.choices.agent_picked = true;
+                        return vec![Effect::Subscribe(id.clone())];
+                    }
+                    return vec![];
+                }
+                "offer:later" => {
+                    self.choices.offer_later = true;
+                    return vec![];
+                }
+                _ => {}
+            }
+        }
         // A row's button: Connect on an agent, Download on the model.
         if let Some(row) = id.strip_prefix("pill:") {
             match onboarding.step {
@@ -1219,10 +1243,10 @@ pub(crate) fn step_frame(
                 // Signed in on Free: its plan to buy, right here; on a plan,
                 // the plan's name.
                 match (&choices.aero, powermove) {
-                    (AeroPlan::Offer { name, price, .. }, Some(_)) => Choice {
+                    (AeroPlan::Offer { name, .. }, Some(_)) => Choice {
                         badge: Some("Recommended".into()),
-                        detail: Some(format!("Inference included, {price}.")),
-                        pill: Some(format!("Get {name}")),
+                        detail: Some(format!("Runs on {name}, Powermove's inference.")),
+                        pill: None,
                         status: None,
                         ..agent("aero", "Aero", "", "powermove", "chatgpt")
                     },
@@ -1251,6 +1275,31 @@ pub(crate) fn step_frame(
                 agent("chatgpt", "Codex", "With your ChatGPT account.", "provider.chatgpt", "chatgpt"),
             ],
             chosen: Some(choices.agent_for(accounts)),
+            // Aero chosen on Free: its plan's card, to buy here.
+            offer: match (&choices.aero, powermove) {
+                (
+                    AeroPlan::Offer {
+                        name,
+                        price,
+                        credits,
+                        ..
+                    },
+                    Some(_),
+                ) if !choices.offer_later && choices.agent_for(accounts) == "aero" => {
+                    Some(pm_shell::welcome::Offer {
+                        name: name.clone(),
+                        price: price.clone(),
+                        period: "per month".into(),
+                        note: "Aero, our agent, with inference included.".into(),
+                        features: vec![(
+                            format!("{credits} credits a month"),
+                            "Inference for Aero, run by Powermove".into(),
+                        )],
+                        action: format!("Get {name}"),
+                    })
+                }
+                _ => None,
+            },
             preview: Some("agent".into()),
             ..Frame::default()
         }),
@@ -2270,6 +2319,16 @@ mod step_frame_tests {
         assert_eq!(frame.choices[0].status.as_deref(), Some("ana@example.com"));
     }
 
+    fn frame_offer(choices: &Choices) -> Option<pm_shell::welcome::Offer> {
+        step_frame(
+            Onboard::Agent,
+            choices,
+            &Default::default(),
+            Some("ana@example.com"),
+            None,
+        )
+        .offer
+    }
     /// Aero leads; it is chosen unless a Codex or Claude Code sign-in
     /// already exists (then that one), and the person's own pick wins. On
     /// Free its row offers the plan the backend lists, with its price; on a
@@ -2299,10 +2358,33 @@ mod step_frame_tests {
             Some("ana@example.com"),
             None,
         );
-        assert_eq!(frame.choices[0].pill.as_deref(), Some("Get Aerolite"));
+        // Aero chosen (no other sign-in): its plan's card, to buy here.
+        choices.agent_picked = false;
+        let offer = frame_offer(&choices);
         assert_eq!(
-            frame.choices[0].detail.as_deref(),
-            Some("Inference included, $9.99 per month.")
+            offer
+                .as_ref()
+                .map(|o| (o.name.as_str(), o.price.as_str(), o.action.as_str())),
+            Some(("Aerolite", "$9.99", "Get Aerolite"))
+        );
+        assert_eq!(offer.unwrap().features[0].0, "1,000 credits a month");
+        assert_eq!(frame.choices[0].pill, None);
+        // Maybe Later, or another agent chosen: no card.
+        choices.offer_later = true;
+        assert_eq!(frame_offer(&choices), None);
+        choices.offer_later = false;
+        let codex =
+            std::collections::BTreeMap::from([("chatgpt".to_owned(), "Connected".to_owned())]);
+        assert_eq!(
+            step_frame(
+                Onboard::Agent,
+                &choices,
+                &codex,
+                Some("ana@example.com"),
+                None
+            )
+            .offer,
+            None
         );
         // Signed out: Connect, whatever the plans.
         let frame = step_frame(Onboard::Agent, &choices, &Default::default(), None, None);
