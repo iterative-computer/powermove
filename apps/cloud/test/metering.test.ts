@@ -145,7 +145,7 @@ test('uncertain bills round up: a stream that reports no usage bills its whole h
     } finally { await s.stop(); }
   }));
 
-test('one dispatch per call: a retryable provider error is not retried under the same hold', async () =>
+test('one dispatch per call: a 5xx is not retried, and being ambiguous it bills the whole hold', async () =>
   withData(async (data) => {
     const s = await stack(data);
     try {
@@ -154,7 +154,9 @@ test('one dispatch per call: a retryable provider error is not retried under the
       const r = await chat(s, { model: 'anthropic/claude-sonnet-5-5', messages: [{ role: 'user', content: 'x' }] }, 'req-retry-0001');
       expect((await frames(r)).at(-1)).toEqual({ error: { code: 'upstream_error' } });
       expect(s.ai.requests).toHaveLength(1);
-      expect(await rowFor(data, s, 'req-retry-0001')).toMatchObject({ kind: 'spend', usageSource: 'none', costNanoUsd: 0 });
+      const row = await rowFor(data, s, 'req-retry-0001');
+      expect(row).toMatchObject({ kind: 'spend', usageSource: 'hold', estimated: true });
+      expect(row.costNanoUsd).toBe(row.holdNanoUsd);
     } finally { await s.stop(); }
   }));
 
@@ -179,13 +181,13 @@ test('the output cap: at most what the balance allows (and the model max), never
       // The client's own limit stands when it is lower.
       fxReduce(await frames(await chat(s, { model: 'openai/gpt-6.2-sol', max_completion_tokens: 900, messages: [{ role: 'user', content: 'x' }] }, 'req-cap-0002')));
       expect(s.ai.requests.at(-1)!.body.max_output_tokens).toBe(900);
-      // Little left: the cap shrinks to fit, from the provider's exact input count.
+      // Little left: the cap shrinks to fit the input's byte bound (no count is asked, none could lower it).
       await data.db.delete(creditLedger).where(and(eq(creditLedger.userId, s.user.id), ne(creditLedger.kind, 'grant')));
       await leave(data, s, 100_000_000); // $0.10
       const r = await chat(s, { model: opus.id, messages: [{ role: 'user', content: 'x' }] }, 'req-cap-0003');
       expect(r.status).toBe(200);
       fxReduce(await frames(r));
-      expect(s.ai.counts).toHaveLength(1);
+      expect(s.ai.counts).toHaveLength(0);
       const row = await rowFor(data, s, 'req-cap-0003');
       const sent = s.ai.requests.at(-1)!.body.max_tokens;
       expect(sent).toBe(row.outputCap!);
@@ -300,16 +302,24 @@ test('Anthropic cache breakpoints: never more than four, all on the 5-minute TTL
     } finally { await s.stop(); }
   }));
 
-test('the input bound is above what the provider counts, and images are bounded by pixels, not base64', async () => {
+test('the input bound counts the whole request as bytes; only real image parts count by pixels', async () => {
   const body = { model: 'm', system: [{ type: 'text', text: 'é'.repeat(1000) }], messages: [{ role: 'user', content: [{ type: 'text', text: 'hello world '.repeat(500) }] }] };
   // A byte-level tokenizer can't take more tokens than bytes: 2,000 bytes of é and 6,000 of ASCII.
   expect(inputBound('anthropic', body)).toBeGreaterThanOrEqual(8_000);
   // A 1x1 PNG's bound is its pixel bound, and a big base64 payload doesn't count byte for byte.
   const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-  expect(imageBound(png)).toBe(1 + 1024);
+  // Pixel bound or base64 length, whichever is smaller: a 1x1 PNG's base64 is shorter than 1 + 1,024.
+  expect(imageBound(png)).toBe(png.length);
   const withImage = (data: string) => inputBound('anthropic', { messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data } }] }] });
   const padded = Buffer.concat([Buffer.from(png, 'base64'), Buffer.alloc(300_000)]).toString('base64');
-  expect(withImage(padded)).toBe(withImage(png));
+  expect(imageBound(padded)).toBe(1 + 1024);
+  // 400 KB of base64 in a message's image part adds only its pixel bound.
+  expect(withImage(padded) - withImage(png)).toBe(1 + 1024 - png.length);
+  // Image-shaped data anywhere else (a tool's schema, which goes upstream whole) is text, counted byte for byte.
+  for (const provider of ['anthropic', 'openai'] as const) {
+    const schema = (data: string) => inputBound(provider, { tools: [{ name: 't', input_schema: { type: 'object', default: { type: 'image', source: { type: 'base64', data } }, examples: [{ type: 'input_image', image_url: `data:image/png;base64,${data}` }] } }], messages: [{ role: 'user', content: 'x' }], input: [{ role: 'user', content: 'x' }] });
+    expect(schema(padded) - schema(png)).toBe(2 * (padded.length - png.length));
+  }
   // Unreadable: its base64 length.
   expect(imageBound('notanimage')).toBe(10);
 });

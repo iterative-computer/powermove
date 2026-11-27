@@ -7,10 +7,15 @@ import type { Data } from '../src/db/client';
 
 class Storage {
   fenced = false;
+  /** A key whose next write kills this instance instead (the runtime dropping it mid-call). */
+  dieOnPut: string | null = null;
   constructor(private readonly backing: Map<string, unknown>, private readonly alarms: Map<string, number>, private readonly name: string) {}
   private check() { if (this.fenced) throw new Error('object evicted'); }
   async get<T>(key: string) { this.check(); return structuredClone(this.backing.get(key)) as T | undefined; }
-  async put(entries: Record<string, unknown>) { this.check(); for (const [key, value] of Object.entries(entries)) this.backing.set(key, structuredClone(value)); }
+  async put(entries: Record<string, unknown>) {
+    this.check();
+    if (this.dieOnPut && this.dieOnPut in entries) { this.fenced = true; throw new Error('object evicted'); }
+    for (const [key, value] of Object.entries(entries)) this.backing.set(key, structuredClone(value)); }
   async deleteAll() { this.check(); this.backing.clear(); }
   async setAlarm(at: number) { this.check(); this.alarms.set(this.name, at); }
   async deleteAlarm() { this.check(); this.alarms.delete(this.name); }
@@ -43,6 +48,9 @@ export class FakeCalls {
     if (entry) entry.storage.fenced = true;
     this.live.delete(name);
   }
+
+  /** The next write of `key` by the object named `name` kills it (creating the object if needed). */
+  dieOnPut(name: string, key: string) { this.object(name).storage.dieOnPut = key; }
 
   /** Fires every set alarm once (as the runtime would when they come due). Returns how many fired. */
   async runAlarms(): Promise<number> {

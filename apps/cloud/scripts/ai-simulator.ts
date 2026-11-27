@@ -13,13 +13,17 @@
 export interface SimulatorRequest { provider: 'openai' | 'anthropic'; body: Record<string, any>; headers: Record<string, string> }
 /** One scripted reply. `usage` is the provider's own usage JSON: Anthropic's `start` (message_start) and `delta`
     (message_delta), OpenAI's `usage` (response.completed). `fail`: 'http' answers 400 before any stream, 'http500' a retryable 500; 'error'
-    streams the start and some text, then an error event; 'cut' streams the start and some text, then ends. */
-export interface Script { start?: Record<string, unknown>; delta?: Record<string, unknown>; usage?: Record<string, unknown>; fail?: 'http' | 'http500' | 'error' | 'cut' }
+    streams the start and some text, then an error event; 'cut' streams the start and some text, then ends; 'failed'
+    ends an OpenAI response with response.failed carrying partial usage; 'cut-after-delta' ends an Anthropic
+    stream after its message_delta, before message_stop. */
+export interface Script { start?: Record<string, unknown>; delta?: Record<string, unknown>; usage?: Record<string, unknown>; fail?: 'http' | 'http500' | 'error' | 'cut' | 'failed' | 'cut-after-delta' }
 export interface Simulator {
   url: string;
   requests: SimulatorRequest[];
   /** Token-count calls. */
   counts: SimulatorRequest[];
+  /** Scales the token counts it answers (a count that under-reports, for tests). */
+  countScale: number;
   /** Replies for the next generation requests, in order. */
   queue: Script[];
   /** Streams the client cut off before the end. */
@@ -63,11 +67,11 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
       request.headers.forEach((value, key) => { headers[key] = value; });
       if (url.pathname === '/openai/v1/responses/input_tokens') {
         counts.push({ provider: 'openai', body, headers });
-        return Response.json({ object: 'response.input_tokens', input_tokens: tokens([body.instructions, body.input, body.tools]) });
+        return Response.json({ object: 'response.input_tokens', input_tokens: Math.floor(tokens([body.instructions, body.input, body.tools]) * simulator.countScale) });
       }
       if (url.pathname === '/anthropic/v1/messages/count_tokens') {
         counts.push({ provider: 'anthropic', body, headers });
-        return Response.json({ input_tokens: tokens([body.system, body.messages, body.tools]) });
+        return Response.json({ input_tokens: Math.floor(tokens([body.system, body.messages, body.tools]) * simulator.countScale) });
       }
       if (url.pathname === '/openai/v1/responses' || url.pathname === '/anthropic/v1/messages') {
         const provider = url.pathname.startsWith('/openai') ? 'openai' : 'anthropic';
@@ -155,6 +159,7 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
         out('response.output_item.done', { output_index: index, item: { type: 'function_call', id: fid, call_id: callId, name: toolName, arguments: args, status: 'completed' } });
         outputTokens += 10;
       }
+      if (script.fail === 'failed') { out('response.failed', { response: { id, object: 'response', created_at: created, model: body.model, status: 'failed', error: { code: 'server_error', message: 'scripted failure' }, usage: { input_tokens: 3, input_tokens_details: { cached_tokens: 0 }, output_tokens: 2, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 5 } } }); return; }
       out('response.completed', { response: { id, object: 'response', created_at: created, model: body.model, status: 'completed', usage: script.usage ?? { input_tokens: inputTokens, input_tokens_details: { cached_tokens: cached }, output_tokens: outputTokens, output_tokens_details: { reasoning_tokens: body.reasoning?.effort && body.reasoning.effort !== 'none' ? 12 : 0 }, total_tokens: inputTokens + outputTokens } } });
     });
   }
@@ -203,11 +208,12 @@ export function startAiSimulator(options: { port?: number } = {}): Simulator {
         outputTokens += 10;
       }
       out('message_delta', { delta: { stop_reason: toolName ? 'tool_use' : 'end_turn', stop_sequence: null }, usage: script.delta ?? { output_tokens: outputTokens } });
+      if (script.fail === 'cut-after-delta') return;
       out('message_stop', {});
     });
   }
 
-  const simulator: Simulator = { url: `http://localhost:${server.port}`, requests, counts, queue, aborted: 0, stop: async () => { await server.stop(true); } };
+  const simulator: Simulator = { url: `http://localhost:${server.port}`, requests, counts, queue, countScale: 1, aborted: 0, stop: async () => { await server.stop(true); } };
   return simulator;
 }
 

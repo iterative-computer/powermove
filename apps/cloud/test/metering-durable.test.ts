@@ -5,7 +5,7 @@ import { eq, sql } from 'drizzle-orm';
 import { withData } from './db';
 import { billing, frames, fxReduce, periodOf, stack, subscribe, type Stack } from './billing-helpers';
 import { creditLedger, subscriptions } from '../src/db/schema';
-import { CREDIT_NANO_USD } from '../src/aero/catalogue';
+import { CREDIT_NANO_USD, cost, modelById } from '../src/aero/catalogue';
 import { MIN_OUTPUT } from '../src/aero/meter';
 import type { CallStart } from '../src/aero/call';
 import type { Data } from '../src/db/client';
@@ -119,12 +119,10 @@ test('the hard cap: under parallel requests, failures, evictions and lost settle
       const period = await periodOf(data, s.user.id);
       // $0.08 left of the $5 grant.
       await data.db.insert(creditLedger).values({ userId: s.user.id, kind: 'spend', idempotencyKey: keyOf(s, 'spent'), credits: 0, costNanoUsd: 1000 * CREDIT_NANO_USD - 80_000_000, model: 'openai/gpt-6-luna', ...period });
-      // Every kind of reply: usage far over any hold, an error, a cut stream, a refusal, a retryable error, a
-      // normal reply; and the settle writes fail for a while.
+      // Every kind of reply: an error, a cut stream, a failed response, a refusal, a 5xx, normal replies; and the
+      // settle writes fail for a while.
       s.ai.queue.push(
-        { usage: { input_tokens: 5_000_000, input_tokens_details: { cached_tokens: 0 }, output_tokens: 100_000, total_tokens: 5_100_000 } },
-        { fail: 'error' }, { fail: 'cut' }, { fail: 'http' }, { fail: 'http500' }, {},
-        { usage: { input_tokens: 5_000_000, input_tokens_details: { cached_tokens: 0 }, output_tokens: 100_000, total_tokens: 5_100_000 } },
+        { fail: 'error' }, { fail: 'cut' }, { fail: 'http' }, { fail: 'http500' }, {}, { fail: 'failed' },
         { fail: 'cut' }, {}, {},
       );
       // The database is down for the whole burst: every in-process settle fails, and alarms finish them.
@@ -145,7 +143,20 @@ test('the hard cap: under parallel requests, failures, evictions and lost settle
       while (await s.calls.runAlarms() > 0) { /* until every call has settled */ }
       const rows = await data.db.select().from(creditLedger).where(eq(creditLedger.userId, s.user.id));
       const requests = rows.filter(row => row.kind !== 'grant');
-      for (const row of requests.filter(row => row.idempotencyKey !== keyOf(s, 'spent'))) expect(row.costNanoUsd).toBeLessThanOrEqual(row.holdNanoUsd);
+      // What the provider billed: a reported call its usage at list price (which the hold covers); any other call at
+      // most its hold, which is what it was charged.
+      const calls = requests.filter(row => row.idempotencyKey !== keyOf(s, 'spent'));
+      let upstream = 1000 * CREDIT_NANO_USD - 80_000_000;
+      for (const row of calls) {
+        expect(row.kind).toBe('spend');
+        const billed = row.usageSource === 'reported'
+          ? cost(modelById(row.model!)!, { input: row.inputTokens, cacheRead: row.cachedInputTokens, cacheWrite: row.cacheWriteTokens, cacheWriteLong: row.cacheWriteLongTokens, output: row.outputTokens }).nanoUsd
+          : row.holdNanoUsd;
+        expect(billed).toBeLessThanOrEqual(row.holdNanoUsd);
+        if (row.usageSource === 'reported') expect(row.costNanoUsd).toBe(billed);
+        upstream += billed;
+      }
+      expect(upstream).toBeLessThanOrEqual(1000 * CREDIT_NANO_USD);
       const settled = requests.filter(row => row.kind === 'spend').reduce((sum, row) => sum + row.costNanoUsd, 0);
       const holds = requests.filter(row => row.kind === 'hold').reduce((sum, row) => sum + row.holdNanoUsd, 0);
       expect(settled + holds).toBeLessThanOrEqual(1000 * CREDIT_NANO_USD);
