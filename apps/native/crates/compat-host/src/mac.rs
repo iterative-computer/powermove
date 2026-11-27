@@ -700,7 +700,21 @@ define_class!(
                 }
             });
             if let Some(window) = web.window() {
-                panel.beginSheetModalForWindow_completionHandler(&window, &finish);
+                // Through the app's sheet gate, as the extension's modals are:
+                // a lane launch holds it while the app is inactive; never begun,
+                // the page hears a cancel.
+                let (on, sheet, on_done) = (window.clone(), panel.clone(), finish.clone());
+                let begin: SheetCall = Box::new(move || unsafe {
+                    sheet.beginSheetModalForWindow_completionHandler(&on, &on_done);
+                });
+                let cancelled = finish.clone();
+                let cancel: SheetCall = Box::new(move || cancelled.call((NSModalResponseCancel,)));
+                match SHEET_GATE.get() {
+                    Some(gate) => {
+                        (gate.begin)(&window, &panel, begin, cancel);
+                    }
+                    None => begin(),
+                }
             } else {
                 panel.beginWithCompletionHandler(&finish);
             }
