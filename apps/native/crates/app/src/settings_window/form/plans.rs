@@ -1,31 +1,34 @@
-//! Settings › Account's plan picker on Free: one card per plan, laid out as
-//! the website's plan cards in the Settings card anatomy (its well, hairline
-//! edge and nested corner). Top, from the top edge: the plan's name, its
-//! price large with a quiet period after it, one line saying who it is for.
-//! Bottom, from the bottom edge: a hairline, then the features, each a check
-//! mark and a line (and a quieter detail under it, when it has one). The padding is the same on
-//! all four sides; the room a taller neighbour leaves falls between the two
-//! halves, never under the last line. The chosen card wears the shared
-//! selection ring (`ring::Ring`). No art; every size and colour is a token.
+//! Settings › Account's plans on Free, after the website's pricing cards:
+//! Free, the plan the account is on, as a quiet Settings card; each plan the
+//! backend offers as the highlighted card, dark in both appearances with the
+//! site's warm light rising from its foot. Each card, top down, on one
+//! padding: the name; the price large with a quiet period; one line saying
+//! who it is for; its action (a real push button, "Get Aerolite", which
+//! starts Checkout for that plan; Free says "Current plan"); a hairline;
+//! the features, each a check mark, a line and a quieter detail. Every size
+//! and colour is a token.
 //!
-//! An option's label is its lines, in order: name, price, period, note,
-//! then one line per feature (`title\tdetail`).
-use super::ring::{Ring, srgb};
+//! An option's label is its lines: name, price, period, note, action (a
+//! button's title, or `=` and a quiet status), then one feature a line
+//! (`title\tdetail`). A plan's value is its index; the button sends it.
+use super::ring::srgb;
 use super::{font, regular, space, st, text_size};
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained};
+use objc2::{
+    DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained, runtime::NSObject,
+};
 use objc2_app_kit::{
-    NSAccessibility, NSAccessibilityRadioButtonRole, NSAccessibilityRadioGroupRole,
-    NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBezierPath,
-    NSColor, NSEvent, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSLineCapStyle,
+    NSAccessibility, NSAccessibilityGroupRole, NSAppearanceCustomization, NSAppearanceNameAqua,
+    NSAppearanceNameDarkAqua, NSBezelStyle, NSBezierPath, NSButton, NSColor, NSControlSize, NSFont,
+    NSFontAttributeName, NSForegroundColorAttributeName, NSGradient, NSLineCapStyle,
     NSLineJoinStyle, NSStackView, NSStackViewDistribution, NSStringDrawing, NSStringDrawingOptions,
     NSStringNSExtendedStringDrawing, NSUserInterfaceLayoutOrientation, NSView,
 };
 use objc2_foundation::{
-    NSAlignmentOptions, NSArray, NSDictionary, NSEdgeInsets, NSPoint, NSRect, NSSize, NSString,
+    NSAlignmentOptions, NSArray, NSDictionary, NSEdgeInsets, NSObjectProtocol, NSPoint, NSRect,
+    NSSize, NSString,
 };
 use pm_design::{Colors, Ink, Scheme};
 use serde_json::{Value, json};
-use std::cell::Cell;
 
 fn attributes(
     font: &NSFont,
@@ -42,6 +45,15 @@ fn attributes(
 fn padding() -> f64 {
     space().xl as f64
 }
+/// The cards' width as laid out: the page's column (the window less its
+/// sidebar and the page's insets, at most `settings.column`), less the
+/// group card's row inset on both sides and the gap between two cards,
+/// halved.
+fn card_width() -> f64 {
+    let s = st();
+    let page = (s.window_width - s.sidebar - 2. * s.page_inset).min(s.column);
+    ((page - 2. * s.row_inset - space().lg) / 2.) as f64
+}
 
 /// One plan, read from its option's lines.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -50,40 +62,57 @@ struct Plan {
     price: String,
     period: String,
     note: String,
+    /// A button's title, or (`=…`) a quiet status where the button stands.
+    action: Action,
     features: Vec<(String, String)>,
+}
+#[derive(Clone, Debug, Default, PartialEq)]
+enum Action {
+    #[default]
+    None,
+    Button(String),
+    Status(String),
 }
 impl Plan {
     fn parse(option: &str) -> Self {
-        let mut lines = option.lines();
-        let mut next = || lines.next().unwrap_or_default().to_owned();
-        let (name, price, period, note) = (next(), next(), next(), next());
-        let features = option
-            .lines()
-            .skip(4)
+        let lines: Vec<&str> = option.lines().collect();
+        let at = |i: usize| lines.get(i).copied().unwrap_or_default().to_owned();
+        let action = match at(4) {
+            a if a.is_empty() => Action::None,
+            a => match a.strip_prefix('=') {
+                Some(status) => Action::Status(status.to_owned()),
+                None => Action::Button(a),
+            },
+        };
+        let features = lines
+            .iter()
+            .skip(5)
             .map(|line| {
                 let (title, detail) = line.split_once('\t').unwrap_or((line, ""));
                 (title.to_owned(), detail.to_owned())
             })
             .collect();
         Self {
-            name,
-            price,
-            period,
-            note,
+            name: at(0),
+            price: at(1),
+            period: at(2),
+            note: at(3),
+            action,
             features,
         }
     }
+    /// The highlighted card: a plan to buy.
+    fn offered(&self) -> bool {
+        matches!(self.action, Action::Button(_))
+    }
     /// What VoiceOver reads: every line, in order.
     fn spoken(&self) -> String {
-        let mut parts = vec![
-            self.name.clone(),
-            format!(
-                "{} per {}",
-                self.price,
-                self.period.trim_start_matches('/').trim()
-            ),
-            self.note.clone(),
-        ];
+        let price = format!("{} {}", self.price, self.period).trim().to_owned();
+        let mut parts = vec![self.name.clone(), price];
+        parts.push(self.note.clone());
+        if let Action::Status(status) = &self.action {
+            parts.push(status.clone());
+        }
         for (title, detail) in &self.features {
             parts.push(title.clone());
             parts.push(detail.clone());
@@ -93,7 +122,7 @@ impl Plan {
     }
 }
 
-/// The card's type: name, price, period, note, feature, feature detail.
+/// The card's type: name, price, period, note, feature, its detail.
 struct Type {
     name: Retained<NSFont>,
     price: Retained<NSFont>,
@@ -121,73 +150,82 @@ fn line_height(font: &NSFont) -> f64 {
         .height
         .ceil()
 }
-/// The check mark's square: the feature line's height.
-fn mark(ty: &Type) -> f64 {
-    line_height(&ty.feature)
+/// `text` wrapped at `width` in `font`: its height.
+fn wrapped(text: &str, font: &NSFont, width: f64) -> f64 {
+    if text.is_empty() {
+        return 0.;
+    }
+    let attrs = attributes(font, &NSColor::labelColor());
+    let rect = unsafe {
+        NSString::from_str(text).boundingRectWithSize_options_attributes_context(
+            NSSize::new(width, f64::MAX),
+            NSStringDrawingOptions::UsesLineFragmentOrigin,
+            Some(&attrs),
+            None,
+        )
+    };
+    rect.size.height.ceil()
 }
-/// The note wraps to at most this many lines.
-const NOTE_LINES: f64 = 2.;
-/// The top half: name, price, note.
-fn top_height(ty: &Type) -> f64 {
-    line_height(&ty.name)
-        + space().sm as f64
-        + line_height(&ty.price)
-        + space().xs as f64
-        + NOTE_LINES * line_height(&ty.note)
+/// The action's row: a regular push button's height.
+fn action_height() -> f64 {
+    st().row as f64 - 2. * st().row_padding as f64
 }
-/// One feature: its line, and its detail under it when it has one.
-fn feature_height(ty: &Type, detail: &str) -> f64 {
-    line_height(&ty.feature)
-        + if detail.is_empty() {
-            0.
-        } else {
-            space().hair as f64 / 2. + line_height(&ty.detail)
-        }
-}
-/// The features, `space.sm` apart.
-fn features_height(ty: &Type, features: &[(String, String)]) -> f64 {
-    features
-        .iter()
-        .map(|(_, d)| feature_height(ty, d))
-        .sum::<f64>()
-        + features.len().saturating_sub(1) as f64 * space().sm as f64
-}
-/// A card's least height: the padding, the top half, the hairline
-/// `space.lg` from each side, the features.
-fn card_height(ty: &Type, features: &[(String, String)]) -> f64 {
-    (2. * padding() + top_height(ty) + 2. * space().lg as f64 + features_height(ty, features)
-        - top_trim(ty)
-        - bottom_trim(ty, features))
-    .ceil()
-}
-/// The padding is measured to the ink, as `text-box: trim-both cap
-/// alphabetic` does: from the top edge to the name's cap height, from the
-/// bottom edge to the last line's baseline. What the name's line box holds
-/// above its caps:
+/// The cap height trimmed off the top, as `text-box: trim-both cap` does.
 fn top_trim(ty: &Type) -> f64 {
     ty.name.ascender() - ty.name.capHeight()
 }
-/// What the last line's box holds under its baseline.
-fn bottom_trim(ty: &Type, features: &[(String, String)]) -> f64 {
-    let font = match features.last() {
-        Some((_, detail)) if !detail.is_empty() => &ty.detail,
-        Some(_) => &ty.feature,
-        None => return 0.,
-    };
-    line_height(font) - font.ascender()
+
+/// Where each part of a card stands, from its top (padding included), for a
+/// text column `width` wide.
+struct Layout {
+    price: f64,
+    note: f64,
+    action: f64,
+    hairline: f64,
+    features: Vec<(f64, f64)>,
+    height: f64,
+}
+fn layout(ty: &Type, plan: &Plan, width: f64) -> Layout {
+    let (p, sm, md, lg) = (
+        padding(),
+        space().sm as f64,
+        space().md as f64,
+        space().lg as f64,
+    );
+    let mut y = p - top_trim(ty) + line_height(&ty.name) + sm;
+    let price = y;
+    y += line_height(&ty.price) + space().xs as f64;
+    let note = y;
+    y += wrapped(&plan.note, &ty.note, width).max(line_height(&ty.note)) + lg;
+    let action = y;
+    y += action_height() + lg;
+    let hairline = y.round();
+    y += lg;
+    let text = width - line_height(&ty.feature) - sm;
+    let mut features = vec![];
+    for (_, detail) in &plan.features {
+        let below = y + line_height(&ty.feature) + space().hair as f64 / 2.;
+        features.push((y, below));
+        y = below + wrapped(detail, &ty.detail, text) + md;
+    }
+    let height = y - if plan.features.is_empty() { lg } else { md } + p;
+    Layout {
+        price,
+        note,
+        action,
+        hairline,
+        features,
+        height: height.ceil(),
+    }
 }
 
 pub(super) struct CardState {
     plan: Plan,
-    index: usize,
-    selected: Cell<bool>,
-    enabled: Cell<bool>,
     radius: f64,
-    send: async_channel::Sender<Value>,
 }
 
 define_class!(
-    /// One plan, drawn as a Settings card; a click chooses it.
+    /// One plan, drawn as a card; its action is a real button inside it.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[name = "PMSettingsPlanCard"]
@@ -199,78 +237,51 @@ define_class!(
         fn flipped(&self) -> bool {
             true
         }
-        #[unsafe(method(acceptsFirstMouse:))]
-        fn accepts_first_mouse(&self, _: Option<&NSEvent>) -> bool {
-            true
-        }
-        #[unsafe(method(mouseDown:))]
-        fn down(&self, _: &NSEvent) {
-            self.choose();
-        }
-        #[unsafe(method(accessibilityPerformPress))]
-        fn press(&self) -> bool {
-            self.choose();
-            true
+        /// The action's button stands where the card's layout puts it, at the
+        /// card's own width.
+        #[unsafe(method(layout))]
+        fn lay_out(&self) {
+            let _: () = unsafe { msg_send![super(self), layout] };
+            let bounds = self.bounds();
+            let p = padding();
+            let width = bounds.size.width - 2. * p;
+            let y = layout(&Type::new(), &self.ivars().plan, width).action;
+            for view in self.subviews().iter() {
+                view.setFrame(NSRect::new(
+                    NSPoint::new(p, y),
+                    NSSize::new(width, action_height()),
+                ));
+            }
         }
         #[unsafe(method(drawRect:))]
         fn draw(&self, _: NSRect) {
-            let state = self.ivars();
             let names = unsafe { [NSAppearanceNameAqua, NSAppearanceNameDarkAqua] };
             let dark = self
                 .effectiveAppearance()
                 .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&names))
                 .is_some_and(|name| &*name == names[1]);
-            let c = Colors::of(if dark { Scheme::Dark } else { Scheme::Light });
-            // The card is the view, on whole device pixels; the ring stands
-            // outside it (the view doesn't clip), so the cards' edges line
-            // up with the rows' text.
             let card = self.backingAlignedRect_options(
                 self.bounds(),
                 NSAlignmentOptions::AlignAllEdgesNearest,
             );
-            let r = state.radius;
-            let shape = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(card, r, r);
-            srgb(c.text, Ink::new().well as f64).setFill();
-            shape.fill();
-            if state.selected.get() {
-                let radii = pm_shell::scale().radius;
-                Ring::of(&st()).stroke(&radii, card, r, &srgb(c.accent, 1.));
-            } else {
-                // The cards' hairline edge, inside the card.
-                let edge = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                    inset(card, 0.25),
-                    r - 0.25,
-                    r - 0.25,
-                );
-                NSColor::separatorColor().setStroke();
-                edge.setLineWidth(0.5);
-                edge.stroke();
-            }
-            let alpha = if state.enabled.get() { 1. } else { 0.5 };
             let pixel = 1. / self.window().map_or(2., |w| w.backingScaleFactor());
-            draw_plan(&state.plan, card, &c, alpha, state.selected.get(), pixel);
+            let state = self.ivars();
+            draw_card(&state.plan, card, state.radius, dark, pixel);
         }
     }
 );
 
-fn inset(rect: NSRect, by: f64) -> NSRect {
-    NSRect::new(
-        NSPoint::new(rect.origin.x + by, rect.origin.y + by),
-        NSSize::new(rect.size.width - 2. * by, rect.size.height - 2. * by),
-    )
+fn gradient() -> objc2::rc::Allocated<NSGradient> {
+    <NSGradient as objc2::AnyThread>::alloc()
 }
-
-/// `text` in `font` and `ink` from `at`, on one line cut with an ellipsis
-/// at `width`; its width.
+/// `text` from `at`, on one line cut with an ellipsis at `width`; its width.
 fn line(text: &str, font: &NSFont, ink: &NSColor, at: NSPoint, width: f64) -> f64 {
-    lines(text, font, ink, at, width, 1.)
+    lines(text, font, ink, at, width, line_height(font))
 }
-/// `text` wrapped at `width` to at most `count` lines, the last cut with an
-/// ellipsis; its one-line width.
-fn lines(text: &str, font: &NSFont, ink: &NSColor, at: NSPoint, width: f64, count: f64) -> f64 {
+/// `text` wrapped at `width` within `height`; its one-line width.
+fn lines(text: &str, font: &NSFont, ink: &NSColor, at: NSPoint, width: f64, height: f64) -> f64 {
     let attrs = attributes(font, ink);
     let string = NSString::from_str(text);
-    let height = count * line_height(font);
     unsafe {
         string.drawWithRect_options_attributes_context(
             NSRect::new(at, NSSize::new(width.max(0.), height)),
@@ -299,89 +310,198 @@ fn check(at: NSPoint, side: f64, ink: &NSColor) {
     path.stroke();
 }
 
-/// `hairline`: one device pixel, in points.
-fn draw_plan(plan: &Plan, card: NSRect, c: &Colors, alpha: f64, selected: bool, hairline: f64) {
+fn draw_card(plan: &Plan, card: NSRect, r: f64, dark: bool, pixel: f64) {
     let ty = Type::new();
+    let here = Colors::of(if dark { Scheme::Dark } else { Scheme::Light });
+    // The offered plan is dark in both appearances (the site's Aerolite).
+    let ink = if plan.offered() {
+        Colors::of(Scheme::Dark)
+    } else {
+        here.clone()
+    };
+    let shape = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(card, r, r);
+    if plan.offered() {
+        // Night with the site's warm light rising from the foot: the ground
+        // into the accent, then a soft pool of it at the bottom centre.
+        let base = srgb(ink.window, 1.);
+        let warm = srgb(here.accent, 1.);
+        let blend = |f: f64| {
+            base.blendedColorWithFraction_ofColor(f, &warm)
+                .unwrap_or(base.clone())
+        };
+        let stops =
+            NSArray::from_retained_slice(&[base.clone(), blend(0.06), blend(0.22), blend(0.40)]);
+        let locations = [0., 0.4, 0.78, 1.];
+        // SAFETY: four locations for four colours, in the device's sRGB.
+        if let Some(fade) = unsafe {
+            NSGradient::initWithColors_atLocations_colorSpace(
+                gradient(),
+                &stops,
+                locations.as_ptr(),
+                &objc2_app_kit::NSColorSpace::sRGBColorSpace(),
+            )
+        } {
+            // The view is flipped: 90° runs top to bottom.
+            fade.drawInBezierPath_angle(&shape, 90.);
+        }
+        if let Some(pool) = NSGradient::initWithStartingColor_endingColor(
+            gradient(),
+            &warm.colorWithAlphaComponent(0.55),
+            &warm.colorWithAlphaComponent(0.),
+        ) {
+            objc2_app_kit::NSGraphicsContext::saveGraphicsState_class();
+            shape.addClip();
+            let centre = NSPoint::new(
+                card.origin.x + card.size.width / 2.,
+                card.origin.y + card.size.height * 1.08,
+            );
+            pool.drawFromCenter_radius_toCenter_radius_options(
+                centre,
+                0.,
+                centre,
+                card.size.width * 0.62,
+                objc2_app_kit::NSGradientDrawingOptions::empty(),
+            );
+            objc2_app_kit::NSGraphicsContext::restoreGraphicsState_class();
+        }
+        // A light top edge, as the site's inset highlight.
+        srgb(0xffffff, 0.1).setStroke();
+        let edge = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+            NSRect::new(
+                NSPoint::new(card.origin.x + 0.25, card.origin.y + 0.25),
+                NSSize::new(card.size.width - 0.5, card.size.height - 0.5),
+            ),
+            r - 0.25,
+            r - 0.25,
+        );
+        edge.setLineWidth(0.5);
+        edge.stroke();
+    } else {
+        srgb(here.text, Ink::new().well as f64).setFill();
+        shape.fill();
+        NSColor::separatorColor().setStroke();
+        shape.setLineWidth(0.5);
+        shape.stroke();
+    }
+    let (white, light) = (plan.offered(), |a: f64| srgb(0xffffff, a));
+    let label = if white {
+        light(1.)
+    } else {
+        srgb(here.text, 1.)
+    };
+    let secondary = if white {
+        light(0.72)
+    } else {
+        srgb(here.secondary, 1.)
+    };
+    let quiet = if white {
+        light(0.56)
+    } else {
+        srgb(here.muted, 1.)
+    };
     let p = padding();
     let (x, width) = (card.origin.x + p, card.size.width - 2. * p);
-    let label = srgb(c.text, alpha);
-    let secondary = srgb(c.secondary, alpha);
-    let quiet = srgb(c.muted, alpha);
-    // Top: the name, the price with its period on the same baseline, the note.
-    let mut y = card.origin.y + p - top_trim(&ty);
-    line(&plan.name, &ty.name, &label, NSPoint::new(x, y), width);
-    y += line_height(&ty.name) + space().sm as f64;
-    let price_width = line(&plan.price, &ty.price, &label, NSPoint::new(x, y), width);
+    let at = layout(&ty, plan, width);
+    let top = card.origin.y;
+    line(
+        &plan.name,
+        &ty.name,
+        &label,
+        NSPoint::new(x, top + p - top_trim(&ty)),
+        width,
+    );
+    let price_width = line(
+        &plan.price,
+        &ty.price,
+        &label,
+        NSPoint::new(x, top + at.price),
+        width,
+    );
     let gap = space().xs as f64;
     let baseline = ty.price.ascender() - ty.period.ascender();
     line(
         &plan.period,
         &ty.period,
         &quiet,
-        NSPoint::new(x + price_width + gap, y + baseline),
+        NSPoint::new(x + price_width + gap, top + at.price + baseline),
         width - price_width - gap,
     );
-    y += line_height(&ty.price) + space().xs as f64;
     lines(
         &plan.note,
         &ty.note,
         &secondary,
-        NSPoint::new(x, y),
+        NSPoint::new(x, top + at.note),
         width,
-        NOTE_LINES,
+        wrapped(&plan.note, &ty.note, width).max(line_height(&ty.note)),
     );
-    // Bottom, from the bottom edge up: the features under a hairline.
-    let bottom = card.origin.y + card.size.height - p + bottom_trim(&ty, &plan.features);
-    let mut y = bottom - features_height(&ty, &plan.features);
-    NSColor::separatorColor().setFill();
-    NSBezierPath::fillRect(NSRect::new(
-        NSPoint::new(x, (y - space().lg as f64).round()),
-        NSSize::new(width, hairline),
-    ));
-    let side = mark(&ty);
-    let text_x = x + side + space().sm as f64;
-    let check_ink = if selected {
-        srgb(c.accent, alpha)
+    if let Action::Status(status) = &plan.action {
+        let y = top + at.action + (action_height() - line_height(&ty.note)) / 2.;
+        line(status, &ty.note, &quiet, NSPoint::new(x, y), width);
+    }
+    if white {
+        light(0.1)
     } else {
-        srgb(c.secondary, alpha)
+        NSColor::separatorColor()
+    }
+    .setFill();
+    NSBezierPath::fillRect(NSRect::new(
+        NSPoint::new(x, top + at.hairline),
+        NSSize::new(width, pixel),
+    ));
+    let side = line_height(&ty.feature);
+    let text_x = x + side + space().sm as f64;
+    let text = width - (text_x - x);
+    let mark = if white {
+        srgb(here.accent, 1.)
+            .blendedColorWithFraction_ofColor(0.55, &light(1.))
+            .unwrap_or(light(1.))
+    } else {
+        secondary.clone()
     };
-    for (title, detail) in &plan.features {
-        check(NSPoint::new(x, y), side, &check_ink);
+    for ((title, detail), (y, below)) in plan.features.iter().zip(&at.features) {
+        check(NSPoint::new(x, top + y), side, &mark);
         line(
             title,
             &ty.feature,
             &label,
-            NSPoint::new(text_x, y),
-            width - (text_x - x),
+            NSPoint::new(text_x, top + y),
+            text,
         );
-        if !detail.is_empty() {
-            let below = y + line_height(&ty.feature) + space().hair as f64 / 2.;
-            line(
-                detail,
-                &ty.detail,
-                &secondary,
-                NSPoint::new(text_x, below),
-                width - (text_x - x),
-            );
-        }
-        y += feature_height(&ty, detail) + space().sm as f64;
+        let h = wrapped(detail, &ty.detail, text);
+        lines(
+            detail,
+            &ty.detail,
+            &quiet,
+            NSPoint::new(text_x, top + below),
+            text,
+            h,
+        );
     }
 }
 
-impl Card {
-    fn choose(&self) {
-        let state = self.ivars();
-        if state.enabled.get() {
-            let _ = state.send.try_send(json!(state.index));
+/// The action's target: a button's tag is its plan's index.
+pub(super) struct Target(async_channel::Sender<Value>);
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSettingsPlanTarget"]
+    #[ivars = Target]
+    pub(super) struct PlanTarget;
+    unsafe impl NSObjectProtocol for PlanTarget {}
+    impl PlanTarget {
+        #[unsafe(method(choose:))]
+        fn choose(&self, sender: &NSButton) {
+            let _ = self.ivars().0.try_send(json!(sender.tag()));
         }
     }
-}
+);
 
 /// The plans side by side, each card the same width and height, `space.lg`
 /// apart.
 pub(super) struct Plans {
     pub(super) stack: Retained<NSStackView>,
-    cards: Vec<Retained<Card>>,
+    buttons: Vec<Retained<NSButton>>,
+    _target: Retained<PlanTarget>,
 }
 
 impl Plans {
@@ -396,90 +516,116 @@ impl Plans {
         stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         stack.setDistribution(NSStackViewDistribution::FillEqually);
         stack.setSpacing(space().lg as f64);
-        // The chosen card's ring stands outside it: its room above and below.
-        let ring = Ring::of(&st()).margin();
         stack.setEdgeInsets(NSEdgeInsets {
-            top: space().sm as f64 + ring,
+            top: space().sm as f64,
             left: 0.,
-            bottom: space().hair as f64 + ring,
+            bottom: space().hair as f64,
             right: 0.,
         });
         stack.setTranslatesAutoresizingMaskIntoConstraints(false);
-        stack.setAccessibilityRole(Some(unsafe { NSAccessibilityRadioGroupRole }));
+        stack.setAccessibilityRole(Some(unsafe { NSAccessibilityGroupRole }));
         stack.setAccessibilityLabel(Some(&NSString::from_str(label)));
+        let target: Retained<PlanTarget> =
+            unsafe { msg_send![super(PlanTarget::alloc(mtm).set_ivars(Target(send))), init] };
         let plans: Vec<Plan> = options.iter().map(|o| Plan::parse(o)).collect();
-        // Every card as tall as the one whose features take the most room.
+        // Every card as tall as the tallest, laid out at the column's width.
         let ty = Type::new();
+        let width = card_width() - 2. * padding();
         let height = plans
             .iter()
-            .map(|p| card_height(&ty, &p.features))
+            .map(|p| layout(&ty, p, width).height)
             .fold(0., f64::max);
-        let cards = plans
-            .into_iter()
-            .enumerate()
-            .map(|(index, plan)| {
-                let spoken = plan.spoken();
-                let card: Retained<Card> = unsafe {
-                    msg_send![
-                        super(Card::alloc(mtm).set_ivars(CardState {
-                            plan,
-                            index,
-                            selected: Cell::new(false),
-                            enabled: Cell::new(true),
-                            radius,
-                            send: send.clone(),
-                        })),
-                        init
-                    ]
+        let mut buttons = vec![];
+        for (index, plan) in plans.into_iter().enumerate() {
+            let spoken = plan.spoken();
+            let button_title = match &plan.action {
+                Action::Button(title) => Some(title.clone()),
+                _ => None,
+            };
+            let card: Retained<Card> = unsafe {
+                msg_send![
+                    super(Card::alloc(mtm).set_ivars(CardState { plan, radius })),
+                    init
+                ]
+            };
+            card.setTranslatesAutoresizingMaskIntoConstraints(false);
+            card.setClipsToBounds(false);
+            card.heightAnchor()
+                .constraintEqualToConstant(height)
+                .setActive(true);
+            card.setAccessibilityElement(false);
+            card.setAccessibilityLabel(Some(&NSString::from_str(&spoken)));
+            if let Some(title) = button_title {
+                // A real push button, white on the night card (the site's
+                // light pill), full width in the card's column.
+                let button = unsafe {
+                    NSButton::buttonWithTitle_target_action(
+                        &NSString::from_str(&title),
+                        Some(&target),
+                        Some(objc2::sel!(choose:)),
+                        mtm,
+                    )
                 };
-                card.setTranslatesAutoresizingMaskIntoConstraints(false);
-                card.setClipsToBounds(false);
-                card.heightAnchor()
-                    .constraintEqualToConstant(height)
-                    .setActive(true);
-                card.setAccessibilityElement(true);
-                card.setAccessibilityRole(Some(unsafe { NSAccessibilityRadioButtonRole }));
-                card.setAccessibilityLabel(Some(&NSString::from_str(&spoken)));
-                stack.addArrangedSubview(&card);
-                card
-            })
-            .collect();
-        Self { stack, cards }
-    }
-    pub(super) fn update(&self, selected: Option<usize>, disabled: bool) {
-        for (i, card) in self.cards.iter().enumerate() {
-            let state = card.ivars();
-            let on = selected == Some(i);
-            if state.selected.replace(on) != on || state.enabled.replace(!disabled) == disabled {
-                card.setNeedsDisplay(true);
+                button.setBezelStyle(NSBezelStyle::Push);
+                button.setControlSize(NSControlSize::Regular);
+                // The site's light pill: the light ground as the tint
+                // (pure white reads as no tint to the system).
+                button.setBezelColor(Some(&srgb(Colors::of(Scheme::Light).window, 1.)));
+                button.setFont(Some(&font(text_size().base, st().heading_weight)));
+                button.setTag(index as isize);
+                // The night card's appearance: untinted (its window not
+                // key) it is dark glass with light text, never lost.
+                button.setAppearance(
+                    objc2_app_kit::NSAppearance::appearanceNamed(unsafe {
+                        NSAppearanceNameDarkAqua
+                    })
+                    .as_deref(),
+                );
+                card.addSubview(&button);
+                buttons.push(button);
             }
-            unsafe { card.setAccessibilityValue(Some(&objc2_foundation::NSNumber::new_bool(on))) };
+            stack.addArrangedSubview(&card);
+        }
+        Self {
+            stack,
+            buttons,
+            _target: target,
+        }
+    }
+    /// Busy (Checkout open, or the account changing): the buttons wait.
+    pub(super) fn update(&self, disabled: bool) {
+        for button in &self.buttons {
+            button.setEnabled(!disabled);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Plan;
+    use super::{Action, Plan};
 
     #[test]
     fn a_plan_reads_its_lines_in_order() {
         let plan = Plan::parse(
-            "Aero\n$19.99\n/ month\nFor editors who lean on Aero every day.\n2,500 credits a month\t25% more credits per dollar",
+            "Aerolite\n$9.99\nper month\nAero, our agent, with inference included.\nGet Aerolite\n1,000 credits every month\tInference for Aero, run by Powermove",
         );
-        assert_eq!(plan.name, "Aero");
-        assert_eq!(plan.price, "$19.99");
-        assert_eq!(plan.period, "/ month");
+        assert_eq!(plan.action, Action::Button("Get Aerolite".into()));
+        assert!(plan.offered());
         assert_eq!(
             plan.features,
             [(
-                "2,500 credits a month".to_owned(),
-                "25% more credits per dollar".to_owned()
+                "1,000 credits every month".to_owned(),
+                "Inference for Aero, run by Powermove".to_owned()
             )]
         );
+        let free = Plan::parse(
+            "Free\n$0\n\nThe whole editor, with your own agent.\n=Current plan\nThe whole editor\tEvery tool, effect and export",
+        );
+        assert_eq!(free.action, Action::Status("Current plan".into()));
+        assert!(!free.offered());
         assert_eq!(
-            plan.spoken(),
-            "Aero, $19.99 per month, For editors who lean on Aero every day., 2,500 credits a month, 25% more credits per dollar"
+            free.spoken(),
+            "Free, $0, The whole editor, with your own agent., Current plan, The whole editor, Every tool, effect and export"
         );
     }
 }
