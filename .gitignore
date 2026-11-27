@@ -55,3 +55,7 @@ packages/cli/prebuilds/
 __pycache__/
 *.pyc
 engine/target/pm-wasm/
+
+# Local test runners and measurements
+test-results/
+MCPSPEED/
