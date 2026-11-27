@@ -3985,7 +3985,9 @@ impl Editor {
                         this.tab_menu(&menu_header, e.position, cx);
                     }),
                 );
-            if custom.is_some() && !multi && id != "scopes" {
+            // Scopes keeps the shell title: its own header overflowed to "S" (PM-668).
+            let shell_title = multi || custom.is_none() || id == "scopes";
+            if !shell_title {
                 header = header.px(px(0.));
             }
             // The strip stands as far in from the panel's edge as its tabs
