@@ -1353,7 +1353,12 @@ pub(crate) fn cloud_rows(cloud: &Value) -> Vec<Value> {
         let mut sign_in = row("sign-in", "Powermove Account", "action");
         sign_in["action"] = json!("account.sign-in");
         sign_in["actionLabel"] = json!("Sign In…");
-        sign_in["detail"] = json!("Publish and manage your extensions on the Store.");
+        // Powermove refused the session this launch: one quiet notice.
+        sign_in["detail"] = json!(if cloud["sessionEnded"] == true {
+            "Your session ended. Sign in again."
+        } else {
+            "Publish and manage your extensions on the Store."
+        });
         let mut remember = row("remember", "Remember Installs on This Account", "switch");
         remember["value"] = json!(false);
         remember["disabled"] = json!(true);
@@ -1830,6 +1835,9 @@ mod cloud_tests {
     #[test]
     fn powermove_account_rows_follow_the_session() {
         assert!(cloud_rows(&serde_json::Value::Null).is_empty());
+        let ended = cloud_rows(&json!({"revision":2,"signedIn":false,"sessionEnded":true}));
+        assert_eq!(ended[0]["detail"], "Your session ended. Sign in again.");
+        assert_eq!(ended[0]["actionLabel"], "Sign In…");
         let out = cloud_rows(&json!({"revision":2,"signedIn":false}));
         assert_eq!(out[0]["action"], "account.sign-in");
         assert_eq!(out[0]["actionLabel"], "Sign In…");
