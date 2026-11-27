@@ -9,6 +9,8 @@
   const items = [
     { label: 'Editor', href: '/#editor' },
     { label: 'Features', href: '/#features' },
+    { label: 'Pricing', href: '/#pricing' },
+    { label: 'FAQ', href: '/#faq' },
   ];
 
   let open = $state(false);

@@ -6,7 +6,7 @@
 html{line-height:1.5;-webkit-text-size-adjust:100%;scroll-behavior:auto;scroll-padding-top:32px}
 html.overflow-hidden{overflow:hidden}
 body{margin:0;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
-img,svg,video{display:block}
+img,svg,video,picture{display:block}
 img{max-width:100%;height:auto}
 h1,h2,h3,p,figure,ul,ol,pre{margin:0}
 ul,ol{padding:0;list-style:none}
@@ -101,12 +101,13 @@ main{overflow:clip}
 .hero-description{max-width:44ch;margin:28px auto 0;padding-inline:24px;font-size:17px;line-height:1.5;letter-spacing:-.011em;color:rgb(255 255 255 / .72);text-wrap:balance}
 .hero-cta{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:24px}
 
-/* The editor window, cropped to its own bounds so it sits on the stage like a real one.
-   Its corners are the capture's; the radius only shapes the shadow to match (18px at 1782px). */
+/* The editor window. The capture carries its own corners and shadow on transparent margins
+   (86px each side, 48px above, 121px below the 3024px-wide window), so the image is widened
+   and pulled out by those margins to keep the window itself on the column's edges. */
 .stage-window{max-width:var(--col);margin:clamp(64px,9vh,96px) auto 0;padding-inline:24px;container-type:inline-size}
 @media(max-width:640px){.stage-window{padding-inline:12px}}
 /* Keep the image and its shadow in one stable layer while mobile browsers scroll. */
-.stage-window img{width:100%;height:auto;border-radius:calc(100cqw * 18 / 1914);transform:translateZ(0);backface-visibility:hidden;box-shadow:0 0 0 1px rgb(0 0 0 / .35),0 40px 80px -24px rgb(40 10 0 / .55),0 0 140px -30px rgb(255 107 26 / .45)}
+.stage-window img{width:calc(100cqw * 3196 / 3024);max-width:none;height:auto;margin:calc(100cqw * -48 / 3024) 0 calc(100cqw * -121 / 3024) calc(100cqw * -86 / 3024);transform:translateZ(0);backface-visibility:hidden}
 .pill-count{opacity:.6;font-weight:400}
 
 /* ---- rows: copy beside each product graphic, on paper ---- */
@@ -122,7 +123,7 @@ main{overflow:clip}
 .row-copy p{max-width:34ch;font-size:17px;line-height:1.5;letter-spacing:-.011em;color:var(--tx-3);text-wrap:pretty}
 .row-copy .strong{color:var(--tx)}
 .row-media{overflow:hidden;border-radius:16px;background:#fff;box-shadow:0 0 0 1px rgb(28 18 12 / .06),0 24px 48px -28px rgb(28 18 12 / .2)}
-.row-media>img{width:100%;height:auto}
+.row-media img{width:100%;height:auto}
 .kernel-body{padding:48px 32px 56px;background:#F6F4F1}
 @media(max-width:640px){.kernel-body{padding:32px 16px 40px}}
 .kernel-body .slab{background:#fff;box-shadow:0 0 0 1px rgb(28 18 12 / .06),0 1px 2px rgb(28 18 12 / .04)}
@@ -154,6 +155,95 @@ main{overflow:clip}
   .slab:hover{transform:none}
 }
 
+/* ---- home additions ---- */
+.hero-description .strong{color:#fff;font-weight:500}
+
+/* ---- FAQ: question beside its answer, on the rows' 4/8 grid, hairlines between ---- */
+.faq{display:grid;gap:clamp(32px,4vw,48px);max-width:var(--col);margin:clamp(104px,12vw,152px) auto 0;padding-inline:24px;scroll-margin-top:32px}
+@media(max-width:640px){.faq{padding-inline:16px}}
+.faq-list{margin:0;border-top:1px solid var(--line-2)}
+.faq-item{display:grid;gap:8px;padding:22px 0;border-bottom:1px solid var(--line-2)}
+@media(min-width:900px){.faq-item{grid-template-columns:minmax(0,4fr) minmax(0,8fr);gap:48px}}
+.faq-item dt{font-size:17px;font-weight:500;line-height:1.4;letter-spacing:-.011em;color:var(--tx);text-wrap:balance}
+.faq-item dd{margin:0;max-width:60ch;font-size:17px;line-height:1.5;letter-spacing:-.011em;color:var(--tx-2);text-wrap:pretty}
+/* ---- pricing ----
+   Free is a plain sheet of paper. Aerolite is cut from the hero's stage (our
+   black warming into our orange) and stands a little taller than its neighbours.
+   Aero is a dashed outline, like the "Your mods" slab: a plan that isn't open yet.
+   On wide screens the cards share one subgrid, so names, prices, buttons and
+   lists line up across all three whatever their copy. */
+@property --mx{syntax:'<percentage>';inherits:true;initial-value:50%}
+/* Last section in <main>, which clips overflow, so the bottom padding keeps Aerolite's shadow whole. */
+.pricing{max-width:var(--col);margin:clamp(104px,12vw,152px) auto 0;padding:0 24px 48px;scroll-margin-top:32px}
+@media(max-width:640px){.pricing{padding-inline:16px}}
+.plans{display:grid;gap:12px;margin-top:clamp(32px,4vw,48px)}
+.plan{position:relative;isolation:isolate;display:flex;flex-direction:column;padding:28px;border-radius:16px;overflow:hidden}
+@media(min-width:900px){
+  .plans{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(5,auto);column-gap:12px;row-gap:0;padding-block:12px}
+  .plan{display:grid;grid-row:span 5;grid-template-rows:subgrid;row-gap:0}
+  /* Taller by its padding only, so its rows still line up with the other two. */
+  .plan[data-plan=aerolite]{margin-block:-12px;padding-block:40px}
+}
+
+.plan[data-plan=free]{background:#fff;box-shadow:0 0 0 1px rgb(28 18 12 / .06),0 24px 48px -28px rgb(28 18 12 / .2)}
+.plan[data-plan=aerolite]{color:#F5F5F4;
+  background:linear-gradient(in oklab,var(--ink-0) 0%,color-mix(in oklab,var(--ember) 6%,var(--ink-0)) 40%,color-mix(in oklab,var(--ember) 22%,var(--ink-0)) 78%,color-mix(in oklab,var(--ember) 40%,var(--ink-0)) 100%);
+  box-shadow:inset 0 1px 0 rgb(255 255 255 / .1),inset 0 0 0 1px rgb(255 255 255 / .05),0 0 0 1px rgb(12 10 9 / .5),0 24px 48px -24px rgb(28 18 12 / .45),0 40px 80px -36px rgb(240 88 10 / .5);
+  transition:--mx .7s var(--ease)}
+.plan-glow{position:absolute;inset:0;z-index:-1;pointer-events:none;background:
+  radial-gradient(90% 50% at var(--mx) 110%,color-mix(in oklab,var(--ember) 66%,transparent),transparent 72%),
+  radial-gradient(50% 30% at var(--mx) 0%,rgb(255 255 255 / .06),transparent 70%)}
+.plan[data-plan=aero]{outline:1px dashed rgb(28 18 12 / .16);outline-offset:-1px}
+
+/* Offer, top half: name, price, one line, the button. The price is the loudest thing in each card. */
+.plan-head{display:flex;align-items:center;gap:8px;min-height:20px}
+.plan-name{font-size:15px;font-weight:500;line-height:20px;letter-spacing:-.01em;color:var(--tx)}
+.plan[data-plan=aerolite] .plan-name{color:#fff}
+.tag{display:inline-block;padding:0 6px;border-radius:var(--r-xs);background:var(--accent-dim);font-size:11px;font-weight:500;line-height:18px;letter-spacing:0;color:var(--accent-tx);white-space:nowrap}
+.plan[data-plan=aerolite] .tag{background:color-mix(in oklab,var(--ember) 26%,transparent);color:color-mix(in oklab,var(--ember) 40%,#fff)}
+.plan-price{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 8px;margin-top:20px}
+.plan-price .amount{font-size:40px;font-weight:500;line-height:1;letter-spacing:-.04em;color:var(--tx)}
+.plan-price .period{font-size:14px;color:var(--tx-3)}
+.plan[data-plan=aerolite] .amount{color:#fff}
+.plan[data-plan=aerolite] .period{color:rgb(255 255 255 / .56)}
+.plan-note{margin-top:12px;max-width:30ch;font-size:15px;line-height:1.45;letter-spacing:-.01em;color:var(--tx-2);text-wrap:pretty}
+.plan[data-plan=aerolite] .plan-note{color:rgb(255 255 255 / .72)}
+
+.plan-cta{display:flex;align-items:center;margin-top:24px}
+.plan-cta .pill{width:100%}
+.plan .pill.dark{transition:background var(--dur-3),scale var(--dur-2) var(--ease)}
+.plan .pill.dark:hover{background:#2E2520}
+.pill.outline{gap:2px;color:var(--tx);box-shadow:inset 0 0 0 1px rgb(28 18 12 / .14);transition:background var(--dur-3),box-shadow var(--dur-3),scale var(--dur-2) var(--ease)}
+.pill.outline:hover{background:rgb(28 18 12 / .04);box-shadow:inset 0 0 0 1px rgb(28 18 12 / .22)}
+.pill.outline .ext{color:var(--tx-3)}
+.pill.outline:hover .ext{color:var(--tx-2);translate:1px -1px}
+
+/* Details, bottom half: a hairline, a lead-in that says what the list adds to, then
+   checked lines with a title and a quieter detail under it. */
+.plan-features{margin-top:28px;padding-top:24px;border-top:1px solid rgb(28 18 12 / .08)}
+.plan[data-plan=aerolite] .plan-features{border-top-color:rgb(255 255 255 / .1)}
+.features-lead{font-size:13px;font-weight:500;line-height:20px;color:var(--tx-3)}
+.plan[data-plan=aerolite] .features-lead{color:rgb(255 255 255 / .5)}
+.plan-features ul{display:grid;gap:14px;margin-top:14px}
+.plan-features li{display:grid;grid-template-columns:16px minmax(0,1fr);gap:10px;align-items:start}
+.feature-mark{width:16px;height:16px;margin-top:2px;color:var(--tx-2)}
+.feature-text{display:grid;gap:2px}
+.feature-title{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;font-size:14px;font-weight:500;line-height:20px;letter-spacing:-.005em;color:var(--tx)}
+.feature-detail{font-size:13.5px;line-height:1.45;color:var(--tx-3);text-wrap:pretty}
+.plan-features li[data-soon] .feature-mark{color:var(--tx-4)}
+.plan[data-plan=aerolite] .feature-mark{color:color-mix(in oklab,var(--ember) 45%,#fff)}
+.plan[data-plan=aerolite] .feature-title{color:#fff}
+.plan[data-plan=aerolite] .feature-detail{color:rgb(255 255 255 / .56)}
+.plan[data-plan=aerolite] li[data-soon] .feature-mark{color:rgb(255 255 255 / .3)}
+.plan[data-plan=aerolite] a:focus-visible{box-shadow:0 0 0 2px var(--ink-0),0 0 0 4px rgb(255 255 255 / .7)}
+.pricing-fine{margin-top:24px;font-size:13px;color:var(--tx-3)}
+
+/* Cards settle in left to right when the section arrives. */
+@media(prefers-reduced-motion:no-preference){
+  .plan{transition:opacity .6s var(--ease),translate .6s var(--ease),--mx .7s var(--ease);transition-delay:calc(var(--i) * 70ms),calc(var(--i) * 70ms),0s}
+  .plans:not([data-in]) .plan{opacity:0;translate:0 12px}
+}
+
 /* ---- footer ----
    The hero in reverse: paper warms through our orange and settles into
    near-black, so the page ends on the stage it opened on. Type stays at the
@@ -178,7 +268,7 @@ main{overflow:clip}
 /* 28px rows, so each link is an honest hit target rather than just its glyphs. */
 .foot-nav a{display:inline-flex;align-items:center;min-height:28px;font-size:14px;letter-spacing:-.005em;color:rgb(255 255 255 / .72);transition:color var(--dur-2)}
 .foot-nav a:hover{color:#fff}
-.ext{margin-left:3px;font-size:.85em;color:rgb(255 255 255 / .3);transition:color var(--dur-2),translate var(--dur-3) var(--ease)}
+.ext{flex:none;width:14px;height:14px;margin-left:2px;color:rgb(255 255 255 / .3);transition:color var(--dur-2),translate var(--dur-3) var(--ease)}
 .foot-nav a:hover .ext{color:rgb(255 255 255 / .6);translate:1px -1px}
 .foot-base{grid-column:1/-1;display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px 16px;margin-top:40px;padding-top:20px;border-top:1px solid rgb(255 255 255 / .08);font-size:12px;line-height:1;color:rgb(255 255 255 / .36)}
 .foot-meta{display:flex;gap:16px}

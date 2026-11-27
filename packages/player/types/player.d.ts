@@ -1,4 +1,4 @@
-/** A portable Powermove scene, as written by the desktop app's web export (`scene.json`). */
+/** A portable Powermove scene (`scene.json`) for the browser player. */
 export interface WebScene {
   format: 'powermove-web';
   version: 1;
