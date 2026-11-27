@@ -23,7 +23,7 @@ Connect an agent, describe the change, and it lands in the running app as an und
 <br>
 
 <p align="center">
-  <img src="apps/www/static/editor-hero.png" alt="The Powermove editor in its dark theme: media, the agent conversation, the canvas, the timeline, properties and effects." width="100%">
+  <img src="assets/readme/editor.jpg" alt="The Powermove editor with a project called Summer in Lisbon: a graded sunset over Lisbon with the title in the viewer, a Layers timeline with captions, title keyframes, lower thirds and shots, a Grade layer's effects, and an Aero agent turn that warmed the sunset and added a glow to the title." width="100%">
 </p>
 
 <br>
