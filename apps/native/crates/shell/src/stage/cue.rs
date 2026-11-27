@@ -92,6 +92,10 @@ impl Spring {
 /// peaks at 0.871 and lifts away once its window is up.
 pub const DIM_PEAK: f64 = 0.741;
 pub const DIM_WINDOW: f64 = 0.675;
+/// The lights go down once the Welcome has its own window: seconds, and
+/// under Reduce Motion.
+pub const LIGHTS_DOWN: f64 = 0.8;
+pub const LIGHTS_DOWN_REDUCED: f64 = 0.3;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CueSheet {
@@ -289,6 +293,31 @@ impl CueSheet {
     /// intro's time `t` (a Skip moves `t`, never the dim's own fade-in).
     pub fn veil(&self, opened: f64, t: f64) -> f64 {
         DIM_PEAK * self.dim.at(opened) - (DIM_PEAK - DIM_WINDOW) * self.lift.at(t)
+    }
+    /// Seconds the lights take to go down once the Welcome has its own
+    /// window (`lights_left`).
+    pub fn lights_seconds(&self, motion: bool) -> f64 {
+        if motion {
+            LIGHTS_DOWN
+        } else {
+            LIGHTS_DOWN_REDUCED
+        }
+    }
+    /// The veil's and the light's share left `since` seconds after the
+    /// Welcome's real window showed (1 to 0): `dim_out`'s curve, quicker
+    /// and subtle; Reduce Motion, a plain quick cross-fade.
+    pub fn lights_left(&self, since: f64, motion: bool) -> f64 {
+        let curve = if motion {
+            self.dim_out.curve
+        } else {
+            [0., 0., 1., 1.]
+        };
+        let fade = Fade {
+            at: 0.,
+            seconds: self.lights_seconds(motion),
+            curve,
+        };
+        1. - fade.at(since)
     }
     /// The veil's share left `since` seconds into the hand-off (1 to 0).
     pub fn veil_left(&self, since: f64) -> f64 {
