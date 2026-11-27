@@ -155,6 +155,8 @@ pub(crate) struct SelectedEase<'a> {
     pub curve: Option<[f64; 4]>,
     pub mixed: bool,
     pub interpolation: Option<&'a str>,
+    pub mixed_interpolation: bool,
+    pub segments: usize,
 }
 
 fn string(node: Option<&pm_model::Node>) -> Option<&str> {
@@ -270,24 +272,24 @@ pub(crate) fn selected_ease<'a>(
     }
     let all_layers = has_unqualified_keys && selection.layers().is_empty();
 
-    fn visit<'a>(node: &'a Node, read: &mut impl FnMut(&'a [Node], usize)) {
+    fn visit_tracks<'a>(node: &'a Node, read: &mut impl FnMut(&'a [Node])) {
         match node.kind() {
             NodeKind::Object(members) => {
                 for (name, child) in members.iter() {
                     if name.as_str() == Some("kf") {
                         if let NodeKind::Array(keys) = child.kind() {
-                            for i in 0..keys.len() {
-                                read(keys, i);
+                            if !keys.is_empty() {
+                                read(keys);
                             }
                         }
                     } else {
-                        visit(child, read);
+                        visit_tracks(child, read);
                     }
                 }
             }
             NodeKind::Array(items) => {
                 for child in items.iter() {
-                    visit(child, read);
+                    visit_tracks(child, read);
                 }
             }
             _ => {}
@@ -297,6 +299,7 @@ pub(crate) fn selected_ease<'a>(
     let mut curve_rank = usize::MAX;
     let mut first_curve = None;
     let mut interpolation_rank = usize::MAX;
+    let mut first_interp: Option<&'a str> = None;
     // A key selected by ID alone and without a layer can be on any layer.
     let positions = if all_layers {
         Vec::new()
@@ -307,23 +310,36 @@ pub(crate) fn selected_ease<'a>(
     for i in unknown.chain(positions) {
         let layer = &layers[i];
         let layer_id = string(layer.get("id"));
-        visit(layer, &mut |keys, i| {
-            let key = &keys[i];
-            let Some(id) = string(key.get("i")) else {
-                return;
-            };
-            let Some(&rank) = ranks.get(id) else { return };
-            if owners
-                .get(id)
-                .is_some_and(|allowed| !layer_id.is_some_and(|id| allowed.contains(id)))
-            {
+        visit_tracks(layer, &mut |keys| {
+            let mut sel: Vec<(usize, usize)> = Vec::new();
+            for (idx, key) in keys.iter().enumerate() {
+                let Some(id) = string(key.get("i")) else {
+                    continue;
+                };
+                let Some(&rank) = ranks.get(id) else {
+                    continue;
+                };
+                if owners
+                    .get(id)
+                    .is_some_and(|allowed| !layer_id.is_some_and(|id| allowed.contains(id)))
+                {
+                    continue;
+                }
+                let interp = interpolation(key);
+                let first = *first_interp.get_or_insert(interp);
+                if interp != first {
+                    selected.mixed_interpolation = true;
+                }
+                if rank < interpolation_rank {
+                    selected.interpolation = Some(interp);
+                    interpolation_rank = rank;
+                }
+                sel.push((idx, rank));
+            }
+            if sel.is_empty() {
                 return;
             }
-            if rank < interpolation_rank {
-                selected.interpolation = Some(interpolation(key));
-                interpolation_rank = rank;
-            }
-            if let Some(curve) = key_curve(keys, i) {
+            let mut record_curve = |curve: [f64; 4], rank: usize| {
                 let first = first_curve.get_or_insert(curve);
                 selected.mixed |= curve
                     .iter()
@@ -333,10 +349,72 @@ pub(crate) fn selected_ease<'a>(
                     selected.curve = Some(curve);
                     curve_rank = rank;
                 }
+            };
+            // Consecutive selected keyframes on a native temporal track define
+            // transition segments `(k[i].outEase, k[i+1].inEase)`. Reading the
+            // actual segment avoids mixing in untouched outer handles!
+            let mut covered = vec![false; sel.len()];
+            for pos in 0..sel.len().saturating_sub(1) {
+                let (a, rank_a) = sel[pos];
+                let (b, rank_b) = sel[pos + 1];
+                if b == a + 1 {
+                    selected.segments += 1;
+                    let native_pair =
+                        keys[a].get("outEase").is_some() || keys[b].get("inEase").is_some();
+                    if native_pair {
+                        covered[pos] = true;
+                        covered[pos + 1] = true;
+                        if let Some(curve) = segment_curve(keys, a, b) {
+                            record_curve(curve, rank_a.min(rank_b));
+                        }
+                    }
+                }
+            }
+            for (pos, &(idx, rank)) in sel.iter().enumerate() {
+                if covered[pos] {
+                    continue;
+                }
+                if let Some(curve) = key_curve(keys, idx) {
+                    record_curve(curve, rank);
+                }
             }
         });
     }
     selected
+}
+
+/// Read the cubic easing curve of a single consecutive segment `(from -> to)`.
+fn segment_curve(keys: &[pm_model::Node], from: usize, to: usize) -> Option<[f64; 4]> {
+    use pm_eval::temporal::{Side, make_ease, unit_handle_from_ease};
+    let a = wire(&keys.get(from)?.to_value());
+    let b = wire(&keys.get(to)?.to_value());
+    let dt = b["t"].as_f64()? - a["t"].as_f64()?;
+    let dv = b["v"].as_f64()? - a["v"].as_f64()?;
+    let span = (dt.abs(), dv * dt.signum());
+    let handle = |key: &Value, field: &str, interp: &str, legacy: &str, side| {
+        let linear = if legacy == "eo" { [0., 0.] } else { [1., 1.] };
+        if key[field].is_object() {
+            if key[interp] != "bezier" {
+                return Some(linear);
+            }
+            unit_handle_from_ease(
+                make_ease(
+                    key[field]["speed"].as_f64()?,
+                    key[field]["influence"].as_f64()?,
+                ),
+                span.0,
+                span.1,
+                side,
+            )
+        } else if let Some(h) = key[legacy].as_array() {
+            Some([h.first()?.as_f64()?, h.get(1)?.as_f64()?])
+        } else {
+            Some(linear)
+        }
+    };
+    let out = handle(&a, "outEase", "outInterp", "eo", Side::Out)?;
+    let incoming = handle(&b, "inEase", "inInterp", "ei", Side::In)?;
+    Some([out[0], out[1], incoming[0], incoming[1]])
 }
 
 #[cfg(test)]
@@ -507,5 +585,49 @@ mod panel_tests {
         let other_comp = selected_ease(root, &selection(&[], &["c"]));
         assert_eq!(other_comp.interpolation, None);
         assert_eq!(other_comp.curve, None);
+    }
+
+    #[test]
+    fn selected_ease_reads_segment_curve_for_consecutive_native_keyframes() {
+        // 3 native keyframes: k0 -> k1 has [0.7, 0, 1, 1], k1 -> k2 has [0.2, 0, 0.4, 1].
+        let value = crate::data::model(&json!({
+            "layers": [{
+                "id": "L1",
+                "p": {
+                    "x": {
+                        "kf": [
+                            {"i": "k0", "t": 0, "v": 0, "inInterp": "linear", "outInterp": "bezier",
+                             "inEase": {"speed": 0, "influence": 33.33}, "outEase": {"speed": 0, "influence": 70}},
+                            {"i": "k1", "t": 1, "v": 100, "inInterp": "linear", "outInterp": "bezier",
+                             "inEase": {"speed": 0, "influence": 33.33}, "outEase": {"speed": 0, "influence": 20}},
+                            {"i": "k2", "t": 2, "v": 200, "inInterp": "bezier", "outInterp": "linear",
+                             "inEase": {"speed": 0, "influence": 60}, "outEase": {"speed": 0, "influence": 33.33}}
+                        ]
+                    }
+                }
+            }]
+        }))
+        .unwrap();
+        let document = pm_model::Document::new(Some(value), 1);
+        let root = document.root().unwrap();
+        let sel = |keys: &[&str]| {
+            pm_kernel::selection::Selection::from_parts(
+                vec!["L1".into()],
+                keys.iter().map(|s| (*s).into()).collect(),
+                None,
+            )
+        };
+        // Selecting [k1, k2] reads segment k1 -> k2 ([0.2, 0, 0.4, 1]), NOT mixed!
+        let pair = selected_ease(root, &sel(&["k1", "k2"]));
+        assert_eq!(pair.segments, 1);
+        assert!(!pair.mixed);
+        let curve = pair.curve.expect("segment curve");
+        for (a, b) in curve.iter().zip([0.2, 0.0, 0.4, 1.0]) {
+            assert!((a - b).abs() < 1e-6, "got {curve:?}");
+        }
+        // Selecting all 3 keys [k0, k1, k2] spans 2 distinct segments -> mixed!
+        let all = selected_ease(root, &sel(&["k0", "k1", "k2"]));
+        assert_eq!(all.segments, 2);
+        assert!(all.mixed);
     }
 }

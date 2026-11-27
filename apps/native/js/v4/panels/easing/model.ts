@@ -17,14 +17,18 @@ export interface EasingState {
   open: boolean;
   /** Selected keyframes: what every action changes. */
   count: number;
+  /** Number of consecutive keyframe segments covered by the selection. */
+  segments?: number;
   selection?: [number, string[], [string, string][]];
   presets: Preset[];
   library?: { stateRevision: string; source: any };
   curve?: Curve | null;
   mixed?: boolean;
   interpolation?: Interpolation | null;
+  mixedInterpolation?: boolean;
 }
 export type Side = "both" | "in" | "out";
+export type ApplyScope = "between" | "all";
 export type Interpolation =
   | "linear"
   | "bezier"
@@ -32,11 +36,11 @@ export type Interpolation =
   | "auto"
   | "continuous";
 export type EasingAction =
-  | { type: "preset"; preset: string }
+  | { type: "preset"; preset: string; scope?: ApplyScope }
   | { type: "save"; group: string; name: string; curve: Curve }
   | { type: "addGroup"; id: string; name: string }
-  | { type: "curve"; curve: Curve; name?: string }
-  | { type: "easyEase"; side: Side }
+  | { type: "curve"; curve: Curve; name?: string; scope?: ApplyScope }
+  | { type: "easyEase"; side: Side; scope?: ApplyScope }
   | { type: "interpolation"; interpolation: Interpolation; side: Side };
 
 export const emptyState = (): EasingState => ({
@@ -61,7 +65,13 @@ export function status(state: EasingState, message: string): string {
     state.count === 1
       ? "1 keyframe selected"
       : `${state.count} keyframes selected`;
-  return state.mixed ? `${count} · Mixed curves` : count;
+  const seg =
+    state.segments && state.segments > 0
+      ? state.segments === 1
+        ? " · 1 segment"
+        : ` · ${state.segments} segments`
+      : "";
+  return state.mixed ? `${count}${seg} · Mixed curves` : `${count}${seg}`;
 }
 
 export function selectionKey(state: EasingState): string {

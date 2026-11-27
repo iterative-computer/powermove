@@ -595,13 +595,29 @@ fn easing_curve(curve: &EaseSpec) -> Result<[f64; 4], CommandError> {
 }
 
 /// `key.eo = …; key.ei = …` through the bridge accessors of
-/// `temporal-bridge.ts`, then `key.hold = false`.
-fn set_unit_handles(keys: &mut [Value], index: usize, eo: [f64; 2], ei: [f64; 2]) {
+/// `temporal-bridge.ts`, then `key.hold = false`, touching only the requested
+/// sides (`apply_in`, `apply_out`) so easing a selected span of keyframes never
+/// corrupts adjacent unselected segments.
+fn set_unit_handles_sides(
+    keys: &mut [Value],
+    index: usize,
+    eo: [f64; 2],
+    ei: [f64; 2],
+    apply_in: bool,
+    apply_out: bool,
+) {
+    if !apply_in && !apply_out {
+        return;
+    }
     if !keys.iter().all(|k| track::numeric(k.get("v"))) {
         let m = values::obj(&mut keys[index]);
-        m.insert("eo", pair(eo));
-        m.insert("ei", pair(ei));
-        m.insert("hold", Value::Bool(false));
+        if apply_out {
+            m.insert("eo", pair(eo));
+            m.insert("hold", Value::Bool(false));
+        }
+        if apply_in {
+            m.insert("ei", pair(ei));
+        }
         return;
     }
     let mut e = track::ease_key(&keys[index]);
@@ -619,13 +635,22 @@ fn set_unit_handles(keys: &mut [Value], index: usize, eo: [f64; 2], ei: [f64; 2]
         ),
         None => (1.0, 1.0),
     };
-    let (dt, dv) = span(other(1).or_else(|| other(-1)));
-    e.out_interp = Interp::Bezier;
     e.auto_bezier = false;
-    e.out_ease = pm_eval::temporal::ease_from_unit_handle(eo, dt, dv, Side::Out);
-    let (dt, dv) = span(other(-1).or_else(|| other(1)));
-    e.in_interp = Interp::Bezier;
-    e.in_ease = pm_eval::temporal::ease_from_unit_handle(ei, dt, dv, Side::In);
+    if apply_in != apply_out {
+        // Modifying only one side of an interior boundary key decouples it from
+        // the untouched adjacent segment so future edits keep them independent.
+        e.continuous = false;
+    }
+    if apply_out {
+        let (dt, dv) = span(other(1).or_else(|| other(-1)));
+        e.out_interp = Interp::Bezier;
+        e.out_ease = pm_eval::temporal::ease_from_unit_handle(eo, dt, dv, Side::Out);
+    }
+    if apply_in {
+        let (dt, dv) = span(other(-1).or_else(|| other(1)));
+        e.in_interp = Interp::Bezier;
+        e.in_ease = pm_eval::temporal::ease_from_unit_handle(ei, dt, dv, Side::In);
+    }
     track::write_ease(&mut keys[index], &e);
 }
 
@@ -690,6 +715,12 @@ fn pair(v: [f64; 2]) -> Value {
 }
 
 /// `setEasing(command)`.
+///
+/// When 2+ consecutive keyframes are selected on a track, the curve is applied
+/// to the segments *between* the selected keyframes without touching the outer
+/// incoming handle before the first selected key or the outer outgoing handle
+/// after the last selected key (when unselected neighbors exist). Isolated
+/// single selected keyframes still receive both handles.
 fn set_easing(cx: &mut Cx<'_>, key_ids: &[String], curve: &EaseSpec) -> Result<(), CommandError> {
     let ids: HashSet<&str> = key_ids
         .iter()
@@ -705,15 +736,40 @@ fn set_easing(cx: &mut Cx<'_>, key_ids: &[String], curve: &EaseSpec) -> Result<(
     edit_tracks(cx, &ids, |_, prop, _| {
         let keys = track::keys_mut(prop);
         track::temporal_keys(keys);
-        for i in 0..keys.len() {
-            if keys[i]
-                .get("i")
-                .and_then(Value::as_str)
-                .is_some_and(|k| ids.contains(k))
-            {
-                found = true;
-                set_unit_handles(keys, i, [curve[0], curve[1]], [curve[2], curve[3]]);
+        let selected: Vec<bool> = keys
+            .iter()
+            .map(|k| {
+                k.get("i")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| ids.contains(id))
+            })
+            .collect();
+        let len = keys.len();
+        for i in 0..len {
+            if !selected[i] {
+                continue;
             }
+            found = true;
+            let prev_selected = i > 0 && selected[i - 1];
+            let next_selected = i + 1 < len && selected[i + 1];
+            let (apply_in, apply_out) = if prev_selected || next_selected {
+                // Part of a selected segment span: preserve outer unselected
+                // neighbor segments (`k[i-1] -> k[i]` and `k[i] -> k[i+1]`).
+                let apply_in = prev_selected || i == 0;
+                let apply_out = next_selected || i + 1 == len;
+                (apply_in, apply_out)
+            } else {
+                // Isolated single selected keyframe on this track.
+                (true, true)
+            };
+            set_unit_handles_sides(
+                keys,
+                i,
+                [curve[0], curve[1]],
+                [curve[2], curve[3]],
+                apply_in,
+                apply_out,
+            );
         }
         Ok(())
     })?;

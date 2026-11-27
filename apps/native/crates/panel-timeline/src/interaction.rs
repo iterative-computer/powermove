@@ -1339,15 +1339,15 @@ pub struct Drag {
     track_snap: Option<bool>,
     pub property_values: std::collections::HashMap<(String, String), f64>,
 
-    /// A key drag in the Speed Graph: each key side's speed and influence at
-    /// the press. A vertical drag there changes speeds (as v1 does), never
-    /// the keys' values.
+    /// True when dragging GraphKeys in the Speed Graph: moving keys shifts time
+    /// only, never rewriting easing handles or corrupting adjacent segments.
+    speed_key_drag: bool,
+    /// Single-axis Speed Graph key eases captured at drag start, used ONLY for
+    /// strictly vertical speed-only drags (`delta == 0`). Never used for time
+    /// moves or multi-axis Combined Position Speed drags.
     speed_eases: Option<Vec<(String, EaseSide, TemporalEase)>>,
-    /// A handle drag: each target key's id (expanded across linked scale /
-    /// combined position axes), its layer-local time, value, dragged-side
-    /// neighbour span `dt`, opposite side's ease, and normalized chord
-    /// directions `(side_dir, opp_dir)` for combined Speed Graph handle drags.
-    handle_keys: Vec<(String, f64, f64, Option<f64>, Option<TemporalEase>, f64, f64)>,
+    /// A handle drag: each target key's metadata captured at drag start.
+    handle_keys: Vec<HandleTarget>,
     /// True when the active `DragKind::Handle` is in Speed Graph space
     /// (explicit Speed Graph mode or combined Position Speed curve).
     handle_speed: bool,
@@ -1355,6 +1355,21 @@ pub struct Drag {
     /// locked layers in a mixed selection instead of refusing the gesture).
     skipped_locked: usize,
     trim_limit: f64,
+}
+
+#[derive(Clone, Debug)]
+struct HandleTarget {
+    id: String,
+    key_time: f64,
+    key_value: f64,
+    neighbour_dt: Option<f64>,
+    opposite: Option<TemporalEase>,
+    /// Only mirror speed onto the opposite handle (unless ⌥ splits) when the
+    /// key is continuous / auto-bezier (or a fresh linear key in Value Graph).
+    /// Never overwrite an independent eased opposite segment.
+    should_mirror: bool,
+    side_dir: f64,
+    opp_dir: f64,
 }
 /// Each side's ease of the keys `ids` as the graph shows it: the speed (value
 /// units per second) and influence (percent) of its direction handle, so a
@@ -1645,18 +1660,19 @@ impl Drag {
         } else {
             None
         };
-        let speed_eases = match &kind {
-            DragKind::GraphKeys { ids }
-                if model.graph_mode == GraphMode::Speed
-                    || ids.iter().all(|id| {
+        let (speed_key_drag, speed_eases) = match &kind {
+            DragKind::GraphKeys { ids } => {
+                let combined_pos = !ids.is_empty()
+                    && ids.iter().all(|id| {
                         index.key(id).is_some_and(|(l, c, _)| {
                             model.is_combined_position_speed(&l.id, &c.path)
                         })
-                    }) =>
-            {
-                Some(key_eases(index, ids))
+                    });
+                let is_speed = model.graph_mode == GraphMode::Speed || combined_pos;
+                let eases = (is_speed && !combined_pos).then(|| key_eases(index, ids));
+                (is_speed, eases)
             }
-            _ => None,
+            _ => (false, None),
         };
         let (handle_keys, handle_speed) = match &kind {
             DragKind::Handle { id, side } => {
@@ -1670,11 +1686,7 @@ impl Drag {
                         model.is_combined_position_speed(&l.id, &c.path)
                     });
                 let expanded = model.expand_graph_keys(std::slice::from_ref(id));
-                // Compute per-axis chord deltas on the dragged side and opposite
-                // side so a multi-axis Speed handle preserves the exact motion
-                // path direction.
-                let mut raw: Vec<(String, f64, f64, Option<f64>, Option<TemporalEase>, f64, f64)> =
-                    Vec::new();
+                let mut raw: Vec<HandleTarget> = Vec::new();
                 for target_id in expanded {
                     let Some((_, channel, key)) = index.key(&target_id) else {
                         continue;
@@ -1703,31 +1715,53 @@ impl Drag {
                         .into_iter()
                         .find(|(_, s, _)| *s == other)
                         .map(|(_, _, e)| e);
-                    raw.push((
-                        target_id,
-                        key.time,
-                        value,
-                        side_info.map(|(dt, _)| dt),
+                    let stored = key.stored.to_value();
+                    let continuous = stored.get("continuous").and_then(Value::as_bool) == Some(true);
+                    let auto_bezier = stored.get("autoBezier").and_then(Value::as_bool) == Some(true);
+                    let in_interp = stored
+                        .get("inInterp")
+                        .and_then(Value::as_str)
+                        .unwrap_or("linear");
+                    let out_interp = stored
+                        .get("outInterp")
+                        .and_then(Value::as_str)
+                        .unwrap_or("linear");
+                    let both_linear = in_interp == "linear" && out_interp == "linear";
+                    // In Speed Graph, handles on non-continuous keys are independent
+                    // per side so adjusting one segment never corrupts the adjacent
+                    // segment. In Value Graph, mirror continuous/auto keys and fresh
+                    // linear keys, never independent already-eased handles.
+                    let should_mirror = if is_speed {
+                        continuous || auto_bezier
+                    } else {
+                        continuous || auto_bezier || both_linear
+                    };
+                    raw.push(HandleTarget {
+                        id: target_id,
+                        key_time: key.time,
+                        key_value: value,
+                        neighbour_dt: side_info.map(|(dt, _)| dt),
                         opposite,
-                        side_info.map_or(0., |(_, slope)| slope),
-                        opp_info.map_or(0., |(_, slope)| slope),
-                    ));
+                        should_mirror,
+                        side_dir: side_info.map_or(0., |(_, slope)| slope),
+                        opp_dir: opp_info.map_or(0., |(_, slope)| slope),
+                    });
                 }
                 if is_speed && raw.len() > 1 {
-                    let side_norm = raw.iter().map(|r| r.5 * r.5).sum::<f64>().sqrt();
-                    let opp_norm = raw.iter().map(|r| r.6 * r.6).sum::<f64>().sqrt();
+                    let side_norm = raw.iter().map(|r| r.side_dir * r.side_dir).sum::<f64>().sqrt();
+                    let opp_norm = raw.iter().map(|r| r.opp_dir * r.opp_dir).sum::<f64>().sqrt();
                     for r in &mut raw {
-                        r.5 = if side_norm > 1e-6 {
-                            r.5 / side_norm
+                        r.side_dir = if side_norm > 1e-6 {
+                            r.side_dir / side_norm
                         } else if opp_norm > 1e-6 {
-                            r.6 / opp_norm
+                            r.opp_dir / opp_norm
                         } else {
                             0.
                         };
-                        r.6 = if opp_norm > 1e-6 {
-                            r.6 / opp_norm
+                        r.opp_dir = if opp_norm > 1e-6 {
+                            r.opp_dir / opp_norm
                         } else {
-                            r.5
+                            r.side_dir
                         };
                     }
                 }
@@ -1750,6 +1784,7 @@ impl Drag {
             handle_speed,
             skipped_locked,
             trim_limit,
+            speed_key_drag,
             speed_eases,
             kind,
             start: index.clone(),
@@ -2155,14 +2190,15 @@ impl Drag {
                 .into(),
             ),
             DragKind::GraphKeys { ids } => {
-                // In the Speed Graph the vertical axis is speed: the keys
-                // keep their values and each side's speed moves instead.
-                let speeds = self.speed_eases.as_ref();
+                // In the Speed Graph, moving keyframes in time NEVER mutates
+                // easing handles or corrupts adjacent segments. A strictly
+                // vertical drag on a single-axis Speed key (`delta == 0`) adjusts
+                // its speed without touching its value.
                 out.push(
                     KeyframeCommand::GraphMove {
                         key_ids: ids.clone(),
                         delta,
-                        value_delta: if speeds.is_some() {
+                        value_delta: if self.speed_key_drag {
                             0.
                         } else {
                             sample.value_delta
@@ -2170,19 +2206,25 @@ impl Drag {
                     }
                     .into(),
                 );
-                for (id, side, ease) in speeds.into_iter().flatten() {
-                    out.push(
-                        KeyframeCommand::SetHandle {
-                            key_id: id.clone(),
-                            side: *side,
-                            value: HandleValue::Ease(TemporalEase {
-                                speed: ease.speed + sample.value_delta,
-                                influence: ease.influence,
-                            }),
-                            split: false,
-                        }
-                        .into(),
-                    );
+                if self.speed_key_drag
+                    && delta.abs() < 1e-9
+                    && sample.value_delta.abs() > 1e-9
+                    && let Some(speeds) = self.speed_eases.as_ref()
+                {
+                    for (id, side, ease) in speeds {
+                        out.push(
+                            KeyframeCommand::SetHandle {
+                                key_id: id.clone(),
+                                side: *side,
+                                value: HandleValue::Ease(TemporalEase {
+                                    speed: ease.speed + sample.value_delta,
+                                    influence: ease.influence,
+                                }),
+                                split: false,
+                            }
+                            .into(),
+                        );
+                    }
                 }
             }
             DragKind::StretchKeys {
@@ -2231,19 +2273,33 @@ impl Drag {
                 finite(sample.handle_time)?;
                 finite(sample.handle_value)?;
                 let (t, raw_v) = (sample.handle_time, sample.handle_value);
-                let primary_value = self
-                    .handle_keys
-                    .first()
-                    .map(|(_, _, kv, _, _, _, _)| *kv);
+                let primary_value = self.handle_keys.first().map(|h| h.key_value);
                 let multi_speed = self.handle_speed && self.handle_keys.len() > 1;
-                let targets: Vec<_> = if self.handle_keys.is_empty() {
-                    vec![(id.clone(), 0., raw_v, None, None, 1., 1.)]
+                let targets: Vec<HandleTarget> = if self.handle_keys.is_empty() {
+                    vec![HandleTarget {
+                        id: id.clone(),
+                        key_time: 0.,
+                        key_value: raw_v,
+                        neighbour_dt: None,
+                        opposite: None,
+                        should_mirror: false,
+                        side_dir: 1.,
+                        opp_dir: 1.,
+                    }]
                 } else {
                     self.handle_keys.clone()
                 };
-                for (target_id, key_time, key_value, neighbour_dt, opposite, side_dir, opp_dir) in
-                    targets
-                {
+                for target in targets {
+                    let HandleTarget {
+                        id: target_id,
+                        key_time,
+                        key_value,
+                        neighbour_dt,
+                        opposite,
+                        should_mirror,
+                        side_dir,
+                        opp_dir,
+                    } = target;
                     if self.handle_speed {
                         let Some(dt) = neighbour_dt.filter(|dt| *dt > 1e-6) else {
                             continue;
@@ -2272,7 +2328,8 @@ impl Drag {
                             }
                             .into(),
                         );
-                        if let Some(opposite) = opposite
+                        if should_mirror
+                            && let Some(opposite) = opposite
                             && !sample.modifiers.alt
                         {
                             let opp_speed = if sample.modifiers.shift {
@@ -2308,7 +2365,7 @@ impl Drag {
                         Some(base) if target_id != *id => key_value + (raw_v - base),
                         _ => raw_v,
                     };
-                    // ⇧ lays the handle flat (v1's `moveBezierHandle` flat side).
+                    // ⇧ lays the handle flat.
                     if sample.modifiers.shift {
                         v = key_value;
                     }
@@ -2321,10 +2378,11 @@ impl Drag {
                         }
                         .into(),
                     );
-                    // Unless ⌥ splits them, the opposite handle stays on the
-                    // exact same clamped tangent speed as the dragged handle,
-                    // keeping its own length (`mirroredBezierHandlePoint`).
-                    if let (Some(dt), Some(opposite)) = (neighbour_dt, opposite)
+                    // Only mirror to the opposite side when the key is continuous
+                    // (or a fresh linear key pulled without ⌥); never corrupt an
+                    // independent eased opposite segment!
+                    if should_mirror
+                        && let (Some(dt), Some(opposite)) = (neighbour_dt, opposite)
                         && !sample.modifiers.alt
                         && dt > 1e-6
                     {

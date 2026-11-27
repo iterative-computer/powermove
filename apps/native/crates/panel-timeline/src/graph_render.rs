@@ -71,16 +71,40 @@ impl KeyShape {
         }
     }
 }
-/// The strip at the graph's top naming its curves.
+/// The strip at the graph's top naming its curves and quick graph controls.
 pub const LEGEND: f64 = 28.;
 /// The plot sits this far under the graph's top, clear of the legend, and
 /// `PLOT_BOTTOM` over its foot: keys at the value range's ends never clip.
 pub const PLOT_TOP: f64 = 42.;
 pub const PLOT_BOTTOM: f64 = 16.;
-/// A key mark's side, and how near a press must be to take a key or handle.
+/// A key mark's side, and how near a press must be to take a key, handle or grip.
 pub const VERTEX: f64 = 8.;
-pub const POINT_HIT: f64 = 8.;
-pub const HANDLE_HIT: f64 = 7.;
+pub const POINT_HIT: f64 = 10.;
+pub const HANDLE_HIT: f64 = 12.;
+pub const GRIP_HIT: f64 = 6.;
+/// What a pointer hits inside the Graph Editor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphHit {
+    Grip(usize),
+    Handle {
+        layer: String,
+        key: String,
+        side: EaseSide,
+    },
+    Key {
+        layer: String,
+        key: String,
+    },
+    SelectionBox,
+    LegendMode,
+    LegendFit,
+}
+/// Live hover & active drag decoration drawn on top of the graph.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GraphDecor {
+    pub hover: Option<GraphHit>,
+    pub active_handle: Option<(String, EaseSide)>,
+}
 /// The plot inside a graph `region`: values map into it.
 pub fn plot(region: Rect) -> Rect {
     Rect::new(
@@ -242,7 +266,8 @@ pub fn sample(
     t: &Tokens,
     mut value: impl FnMut(&str, &str, f64) -> Option<f64>,
 ) -> Option<Graph> {
-    const SAMPLES: usize = 48;
+    const SAMPLES: usize = 64;
+    let clean_zero = |v: f64| if v.abs() < 1e-6 { 0. } else { v };
     let index = &model.index;
     let (series, picked) = model.graph_series();
     let (layer_id, path) = model.graph_property().or_else(|| series.first().cloned())?;
@@ -365,7 +390,7 @@ pub fn sample(
                         }
                         sum_sq += rate * rate;
                     }
-                    let mag = sum_sq.sqrt();
+                    let mag = clean_zero(sum_sq.sqrt());
                     mag.is_finite().then_some(mag)
                 };
                 let first = times[0];
@@ -525,9 +550,10 @@ pub fn sample(
                         1 => (seconds, seconds + h),
                         _ => (seconds - h / 2., seconds + h / 2.),
                     };
-                    let rate =
+                    let rate = clean_zero(
                         (value(&layer_id, &channel.path, b)? - value(&layer_id, &channel.path, a)?)
-                            / (b - a);
+                            / (b - a),
+                    );
                     rate.is_finite().then_some(rate)
                 };
                 let mut segments = vec![];
@@ -575,9 +601,83 @@ pub fn sample(
                 } else {
                     None
                 };
+                let stored: Vec<_> = channel.keys.iter().map(|k| k.stored.to_value()).collect();
+                let value_handles = if speed {
+                    vec![]
+                } else {
+                    pm_kernel::commands::keyframes::handle_points(&stored)
+                };
+                // For non-expression, non-spring Value Graph segments, use exact
+                // cubic Béziers (razor-sharp at any zoom); fall back to dense
+                // sampling for expressions, springs, and Speed Graph.
+                let has_expr = channel
+                    .expression
+                    .as_ref()
+                    .is_some_and(|e| !e.to_string_lossy().trim().is_empty());
+                let exact_bezier = !speed
+                    && !has_expr
+                    && stored.iter().all(|k| k.get("spring").is_none());
                 segments.extend(lead);
-                for pair in channel.keys.windows(2) {
+                for (seg_idx, pair) in channel.keys.windows(2).enumerate() {
                     let (from, to) = (at(&pair[0]), at(&pair[1]));
+                    if exact_bezier {
+                        let v0 = pair[0].value.as_f64().or_else(|| plot(from, 1, 1e-3))?;
+                        let v1 = pair[1].value.as_f64().or_else(|| plot(to, -1, 1e-3))?;
+                        let p0 = Point { seconds: from, value: v0 };
+                        let p3 = Point { seconds: to, value: v1 };
+                        range = (range.0.min(v0).min(v1), range.1.max(v0).max(v1));
+                        if KeyShape::of(&stored[seg_idx]) == KeyShape::Hold {
+                            let corner = Point { seconds: to, value: v0 };
+                            segments.push(Segment { from: p0, to: corner, controls: None });
+                            segments.push(Segment { from: corner, to: p3, controls: None });
+                        } else {
+                            let out_is_bezier = stored[seg_idx]
+                                .get("outInterp")
+                                .and_then(pm_model::Value::as_str)
+                                == Some("bezier")
+                                || stored[seg_idx].get("eo").is_some();
+                            let in_is_bezier = stored[seg_idx + 1]
+                                .get("inInterp")
+                                .and_then(pm_model::Value::as_str)
+                                == Some("bezier")
+                                || stored[seg_idx + 1].get("ei").is_some();
+                            let controls = if out_is_bezier || in_is_bezier {
+                                let c1 = value_handles
+                                    .get(seg_idx)
+                                    .and_then(|h| h[1])
+                                    .map(|(t, v)| Point { seconds: layer.from + t, value: v })
+                                    .unwrap_or_else(|| Point {
+                                        seconds: from + (to - from) / 3.,
+                                        value: v0 + (v1 - v0) / 3.,
+                                    });
+                                let c2 = value_handles
+                                    .get(seg_idx + 1)
+                                    .and_then(|h| h[0])
+                                    .map(|(t, v)| Point { seconds: layer.from + t, value: v })
+                                    .unwrap_or_else(|| Point {
+                                        seconds: from + (to - from) * (2. / 3.),
+                                        value: v0 + (v1 - v0) * (2. / 3.),
+                                    });
+                                // Sample curve interior for exact Y range (handles overshoot).
+                                for step in 1..16 {
+                                    let u = step as f64 / 16.;
+                                    let r = 1. - u;
+                                    let y = r * r * r * v0
+                                        + 3. * r * r * u * c1.value
+                                        + 3. * r * u * u * c2.value
+                                        + u * u * u * v1;
+                                    if y.is_finite() {
+                                        range = (range.0.min(y), range.1.max(y));
+                                    }
+                                }
+                                Some([c1, c2])
+                            } else {
+                                None
+                            };
+                            segments.push(Segment { from: p0, to: p3, controls });
+                        }
+                        continue;
+                    }
                     let reach = (to - from) / SAMPLES as f64 / 4.;
                     let mut previous = None;
                     for step in 0..=SAMPLES {
@@ -603,12 +703,6 @@ pub fn sample(
                     }
                 }
                 segments.extend(tail);
-                let stored: Vec<_> = channel.keys.iter().map(|k| k.stored.to_value()).collect();
-                let value_handles = if speed {
-                    vec![]
-                } else {
-                    pm_kernel::commands::keyframes::handle_points(&stored)
-                };
                 let mut points = vec![];
                 for (i, key) in channel.keys.iter().enumerate() {
                     let seconds = at(key);
@@ -741,15 +835,16 @@ pub fn sample(
             .collect();
         times.sort_by(f64::total_cmp);
         times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-        let channels: Vec<String> = model
-            .track_channels(&layer_id, &path)
-            .into_iter()
-            .filter(|c| !c.keys.is_empty())
-            .map(|c| c.path.clone())
+        let channels: Vec<(String, String)> = curves
+            .iter()
+            .filter_map(|c| {
+                let (l, ch) = c.id.rsplit_once(':')?;
+                Some((l.to_owned(), ch.to_owned()))
+            })
             .collect();
         let mut at = |seconds: f64, side: i8, reach: f64| -> Option<Point> {
             let mut points = vec![];
-            for channel in &channels {
+            for (lid, channel) in &channels {
                 let value = if speed {
                     let h = reach.clamp(1e-6, 1e-3);
                     let (a, b) = match side {
@@ -757,9 +852,9 @@ pub fn sample(
                         1 => (seconds, seconds + h),
                         _ => (seconds - h / 2., seconds + h / 2.),
                     };
-                    (value(&layer_id, channel, b)? - value(&layer_id, channel, a)?) / (b - a)
+                    (value(lid, channel, b)? - value(lid, channel, a)?) / (b - a)
                 } else {
-                    value(&layer_id, channel, seconds)?
+                    value(lid, channel, seconds)?
                 };
                 points.push(Point { seconds, value });
             }
@@ -1008,14 +1103,135 @@ impl Graph {
     pub fn value_of(curve: &Curve, seconds: f64) -> Option<f64> { curve.value_at(seconds) }
     /// Whether this graph, shown over `min`..`max` (the range on screen),
     /// still reads well there: every value fits, and the values fill at
-    /// least half of it. Then the range on screen is kept and nothing under
-    /// the pointer moves.
+    /// least a quarter of it. Keeping wider hysteresis prevents sudden Y-axis
+    /// jumps right after releasing a drag.
     pub fn fits_in(&self, min: f64, max: f64) -> bool {
         let span = max - min;
         self.min >= min - 1e-9
             && self.max <= max + 1e-9
             && span > 0.
-            && (self.max - self.min) >= span * 0.5
+            && (self.max - self.min) >= span * 0.25
+    }
+    /// Bounding rects of the quick controls in the legend strip: `(mode_pill, fit_button)`.
+    pub fn legend_controls(&self, region: Rect) -> (Rect, Rect) {
+        let right = region.x + region.width - 8.;
+        let fit_w = 34.;
+        let mode_w = 52.;
+        let h = 18.;
+        let y = region.y + (LEGEND - h) / 2.;
+        let fit = Rect::new((right - fit_w).max(region.x), y, fit_w, h);
+        let mode = Rect::new((fit.x - 6. - mode_w).max(region.x), y, mode_w, h);
+        (mode, fit)
+    }
+    /// Single authoritative hit test shared by clicks, drags, hover highlights,
+    /// and cursors.
+    pub fn hit_test(&self, v: Viewport, region: Rect, x: f64, y: f64) -> Option<GraphHit> {
+        if x < region.x || x > region.x + region.width || y < region.y || y > region.y + region.height
+        {
+            return None;
+        }
+        if y < region.y + LEGEND {
+            let (mode, fit) = self.legend_controls(region);
+            let inside = |r: Rect| x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height;
+            if inside(fit) {
+                return Some(GraphHit::LegendFit);
+            }
+            if inside(mode) {
+                return Some(GraphHit::LegendMode);
+            }
+            return None;
+        }
+        let boxed = self.selection_box(v, region);
+        if let Some(b) = boxed
+            && self.transformable()
+            && let Some(grip) = grip_at(b, x, y)
+        {
+            return Some(GraphHit::Grip(grip));
+        }
+        let plot = plot(region);
+        let bottom = plot.y + plot.height;
+        let y_of = |value: f64| bottom - (value - self.min) / (self.max - self.min) * plot.height;
+        let from = v.scroll_time;
+        let to = from + (v.width - v.layer_column) / v.pps;
+
+        let mut best_handle: Option<(bool, f64, String, String, EaseSide)> = None;
+        let mut best_key: Option<(bool, f64, String, String)> = None;
+
+        for curve in &self.curves {
+            let Some((layer, _)) = curve.id.rsplit_once(':') else {
+                continue;
+            };
+            for key in &curve.points {
+                let kx = v.x(key.point.seconds);
+                // Check handles even if the key itself is slightly outside view.
+                for (side, handle) in &key.handles {
+                    let hx = v.x(handle.seconds);
+                    let hy = y_of(handle.value);
+                    let d = (hx - x).hypot(hy - y);
+                    if d <= HANDLE_HIT {
+                        let better = match &best_handle {
+                            None => true,
+                            // Prefer handles on selected keys, then nearest distance.
+                            Some((sel, bd, _, _, _)) => {
+                                (key.selected && !*sel) || (key.selected == *sel && d < *bd)
+                            }
+                        };
+                        if better {
+                            best_handle = Some((
+                                key.selected,
+                                d,
+                                layer.to_owned(),
+                                key.id.clone(),
+                                *side,
+                            ));
+                        }
+                    }
+                }
+                if key.point.seconds < from - 1e-6 || key.point.seconds > to + 1e-6 {
+                    continue;
+                }
+                // In Speed Graph, a discontinuous key has two vertical anchors
+                // (`in_spd` and `out_spd`); hit-test all of them.
+                let mut kd = (kx - x).hypot(y_of(key.point.value) - y);
+                if self.speed {
+                    for (_, h) in &key.handles {
+                        kd = kd.min((kx - x).hypot(y_of(h.value) - y));
+                    }
+                }
+                if kd <= POINT_HIT {
+                    let better = match &best_key {
+                        None => true,
+                        Some((sel, bd, _, _)) => {
+                            (key.selected && !*sel) || (key.selected == *sel && kd < *bd)
+                        }
+                    };
+                    if better {
+                        best_key = Some((key.selected, kd, layer.to_owned(), key.id.clone()));
+                    }
+                }
+            }
+        }
+        // Only let a key beat a handle when the pointer is directly on top of
+        // the key vertex (< 5px) and closer to the key than the handle.
+        let key_wins = match (&best_key, &best_handle) {
+            (Some((_, kd, _, _)), Some((_, hd, _, _, _))) => *kd < 5. && *kd < *hd,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if !key_wins
+            && let Some((_, _, layer, key, side)) = best_handle
+        {
+            return Some(GraphHit::Handle { layer, key, side });
+        }
+        if let Some((_, _, layer, key)) = best_key {
+            return Some(GraphHit::Key { layer, key });
+        }
+        if boxed
+            .is_some_and(|b| x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height)
+        {
+            return Some(GraphHit::SelectionBox);
+        }
+        None
     }
     /// Keys whose drawn centres the box covers, in curve and time order.
     pub fn marquee_keys(&self, v: Viewport, region: Rect, area: Rect) -> Vec<(String, String)> {
@@ -1061,6 +1277,18 @@ impl Graph {
         t: &Tokens,
         playhead: Option<f64>,
         selection: Option<&SceneSelection>,
+    ) -> Result<Vec<Op>, Error> {
+        self.prepare_with_state(v, region, t, playhead, selection, None)
+    }
+
+    pub fn prepare_with_state(
+        &self,
+        v: Viewport,
+        region: Rect,
+        t: &Tokens,
+        playhead: Option<f64>,
+        selection: Option<&SceneSelection>,
+        decor: Option<&GraphDecor>,
     ) -> Result<Vec<Op>, Error> {
         if !v.valid()
             || ![region.x, region.y, region.width, region.height]
@@ -1155,42 +1383,132 @@ impl Graph {
                 let selected = selection.zip(layer)
                     .map_or(key.selected, |(selection, layer)| selection.key(layer, &key.id));
                 let p = point(key.point);
-                // Tangents: dashed, a hollow knob; a selected key's in yellow.
+                let key_hovered = decor.is_some_and(|d| {
+                    matches!(&d.hover, Some(GraphHit::Key { key: hk, .. }) if hk == &key.id)
+                });
+                // In Speed Graph, a discontinuous key has distinct incoming &
+                // outgoing speed anchors: draw a vertical dashed connector when
+                // they differ so each handle stems cleanly from its own speed.
+                if self.speed {
+                    let in_y = key
+                        .handles
+                        .iter()
+                        .find(|(s, _)| *s == EaseSide::In)
+                        .map(|(_, h)| y_of(h.value));
+                    let out_y = key
+                        .handles
+                        .iter()
+                        .find(|(s, _)| *s == EaseSide::Out)
+                        .map(|(_, h)| y_of(h.value));
+                    if let (Some(iy), Some(oy)) = (in_y, out_y)
+                        && (iy - oy).abs() > 1.
+                    {
+                        let mut jump = Op::new(
+                            format!("graph-speed-jump:{}", key.id),
+                            "line",
+                            region,
+                            ink,
+                        );
+                        jump.stroke = 1.;
+                        jump.opacity = 0.55;
+                        jump.detail = json!({"from":[p[0], iy],"to":[p[0], oy],"dash":[2.,2.]});
+                        jump.clip = Some(body);
+                        ops.push(jump);
+                    }
+                }
+                // Tangents & handle knobs: hovered or active handles enlarge and
+                // draw solid arms for crisp feedback when interactive decor is on.
+                let interactive = decor.is_some();
                 let handle_ink = if selected { t.graph_handle_selected() } else { ink };
                 for (side, handle) in &key.handles {
                     let h = point(*handle);
+                    let anchor = if self.speed {
+                        [p[0], h[1]]
+                    } else {
+                        p
+                    };
                     let side_name = side_name(*side);
+                    let active = interactive
+                        && (key.active_handle == Some(*side)
+                            || decor.is_some_and(|d| {
+                                d.active_handle
+                                    .as_ref()
+                                    .is_some_and(|(ak, as_)| ak == &key.id && as_ == side)
+                            }));
+                    let hovered = decor.is_some_and(|d| {
+                        matches!(&d.hover, Some(GraphHit::Handle { key: hk, side: hs, .. }) if hk == &key.id && hs == side)
+                    });
+                    let emphasized = active || hovered;
                     let mut line = Op::new(
                         format!("graph-tangent:{}:{side_name}", key.id),
                         "line",
                         region,
-                        handle_ink,
+                        if emphasized { t.graph_handle_selected() } else { handle_ink },
                     );
-                    line.stroke = 1.;
-                    line.detail = json!({"from":p,"to":h,"dash":[2.,2.]});
+                    line.stroke = if emphasized { 1.6 } else { 1. };
+                    line.detail = if emphasized {
+                        json!({"from":anchor,"to":h})
+                    } else {
+                        json!({"from":anchor,"to":h,"dash":[2.,2.]})
+                    };
                     line.clip = Some(body);
                     ops.push(line);
+                    let knob = if emphasized {
+                        9.
+                    } else if interactive {
+                        7.
+                    } else {
+                        6.
+                    };
+                    let knob_ink = if emphasized { t.graph_handle_selected() } else { handle_ink };
                     let mut dot = Op::new(
                         format!("graph-handle:{}:{side_name}", key.id),
                         "circle",
-                        Rect::new(h[0] - 3., h[1] - 3., 6., 6.),
-                        if selected { handle_ink } else { c.panel },
+                        Rect::new(h[0] - knob / 2., h[1] - knob / 2., knob, knob),
+                        if selected || emphasized { knob_ink } else { c.panel },
                     );
-                    dot.detail = json!({"keyline":handle_ink,"keylineWidth":1.});
+                    dot.detail = json!({
+                        "keyline": if active { c.text } else { knob_ink },
+                        "keylineWidth": if emphasized { 1.5 } else if interactive { 1.2 } else { 1. },
+                    });
                     dot.clip = Some(body);
                     ops.push(dot);
                 }
-                let half = VERTEX / 2.;
+                let side_len = if key_hovered { VERTEX + 1.5 } else { VERTEX };
+                let half = side_len / 2.;
+                let ring = if selected {
+                    Some(t.graph_key_selected())
+                } else if key_hovered {
+                    Some(c.text)
+                } else {
+                    None
+                };
                 let mut mark = Op::new(
                     format!("graph-key:{}", key.id),
                     "graph-vertex",
-                    Rect::new(p[0] - half, p[1] - half, VERTEX, VERTEX),
+                    Rect::new(p[0] - half, p[1] - half, side_len, side_len),
                     ink,
                 );
-                mark.detail =
-                    json!({"kind":key.shape.name(),"ring":selected.then(|| t.graph_key_selected())});
+                mark.detail = json!({"kind":key.shape.name(),"ring":ring});
                 mark.clip = Some(body);
                 marks.push(mark);
+                // Secondary vertex marker at the split incoming speed anchor.
+                if self.speed
+                    && let Some((_, in_h)) = key.handles.iter().find(|(s, _)| *s == EaseSide::In)
+                    && (y_of(in_h.value) - p[1]).abs() > 2.
+                {
+                    let iy = y_of(in_h.value);
+                    let sub = 5.5;
+                    let mut sub_mark = Op::new(
+                        format!("graph-key-split:{}", key.id),
+                        "circle",
+                        Rect::new(p[0] - sub / 2., iy - sub / 2., sub, sub),
+                        c.panel,
+                    );
+                    sub_mark.detail = json!({"keyline": if selected { t.graph_key_selected() } else { ink }, "keylineWidth": 1.3});
+                    sub_mark.clip = Some(body);
+                    marks.push(sub_mark);
+                }
             }
             // Keys over every tangent.
             ops.extend(marks);
@@ -1318,6 +1636,13 @@ impl Graph {
         rule.opacity = alpha as f64;
         rule.clip = Some(region);
         ops.push(rule);
+        let (mode_rect, fit_rect) = self.legend_controls(region);
+        let show_pills = decor.is_some() && region.width >= 180.;
+        let legend_limit = if show_pills {
+            (mode_rect.x - 8.).max(region.x + 12.)
+        } else {
+            right - 8.
+        };
         let mut x = region.x + 12.;
         let legend: Vec<(String, u32)> = if self.merged {
             vec![("Merged curves".to_owned(), c.accent)]
@@ -1329,7 +1654,7 @@ impl Graph {
         };
         for (name, ink) in legend {
             let width = name.chars().count() as f64 * small * 0.58 + 25.;
-            if x + width > right - 8. {
+            if x + width > legend_limit {
                 let mut more = Op::new(
                     "graph-legend-more",
                     "text",
@@ -1362,6 +1687,47 @@ impl Graph {
             ops.push(label);
             x += width;
         }
+        // Quick Value/Speed toggle & Fit controls on the right of the legend strip.
+        let mode_hover = decor.is_some_and(|d| d.hover == Some(GraphHit::LegendMode));
+        let fit_hover = decor.is_some_and(|d| d.hover == Some(GraphHit::LegendFit));
+        let mut draw_pill = |id: &str, rect: Rect, text: &str, active: bool, hovered: bool| {
+            let mut bg = Op::new(
+                format!("graph-pill-bg:{id}"),
+                "rounded-rect",
+                rect,
+                if active {
+                    c.selected_fill
+                } else if hovered {
+                    c.hover
+                } else {
+                    c.field
+                },
+            );
+            bg.radius = 4.;
+            bg.clip = Some(strip);
+            ops.push(bg);
+            let mut lbl = Op::new(
+                format!("graph-pill:{id}"),
+                "text",
+                rect,
+                if active || hovered { c.text } else { c.secondary },
+            );
+            lbl.text = Some(text.to_owned());
+            lbl.font_size = small;
+            lbl.detail = json!({"align":"center"});
+            lbl.clip = Some(strip);
+            ops.push(lbl);
+        };
+        if show_pills {
+            draw_pill(
+                "mode",
+                mode_rect,
+                if self.speed { "Speed" } else { "Value" },
+                self.speed,
+                mode_hover,
+            );
+            draw_pill("fit", fit_rect, "Fit", false, fit_hover);
+        }
         Ok(ops)
     }
 }
@@ -1381,10 +1747,10 @@ pub fn grips(b: Rect) -> [(f64, f64); 8] {
         (x0, my),
     ]
 }
-/// The grip within 6 points of `(x, y)`, the nearest.
+/// The grip within `GRIP_HIT` points of `(x, y)`, the nearest.
 pub fn grip_at(b: Rect, x: f64, y: f64) -> Option<usize> {
     let mut best = None;
-    let mut reach = 6.;
+    let mut reach = GRIP_HIT;
     for (i, (gx, gy)) in grips(b).into_iter().enumerate() {
         let d = (x - gx).hypot(y - gy);
         if d <= reach {

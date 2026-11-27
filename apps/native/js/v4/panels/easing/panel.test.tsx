@@ -300,3 +300,36 @@ test("copy uses the selected keys and paste applies their curve to another selec
   expect(f.node("easing:curve").props.value).toEqual([...from]);
   await f.root.dispose();
 });
+
+test("multi-keyframe mixed curves unify on edit and support scope toggle", async () => {
+  const f = await fixture(3);
+  await f.refresh({
+    count: 3,
+    segments: 2,
+    mixed: true,
+    curve: [0, 0, 0.58, 1],
+  });
+  expect(f.node("easing:status").props.label).toBe(
+    "3 keyframes selected · 2 segments · Mixed curves",
+  );
+  // Preset tile is not falsely marked active when curves are mixed.
+  expect(f.node("easing:preset:easeOut").props["aria-selected"]).toBe(false);
+  // Clicking the preset applies to all selected segments.
+  await f.fire("easing:preset:easeOut", "click");
+  await f.settle();
+  expect(f.actions).toEqual([{ type: "preset", preset: "easeOut" }]);
+  // Toggling scope in More tools sends explicit scope:"all".
+  await f.fire("easing:more", "click");
+  const allSides = f
+    .node("easing:scope")
+    .children.find((c) => c.props.label === "All Sides")!;
+  await f.fire(allSides.props.id as string, "click");
+  await f.fire("easing:preset:easeOut", "click");
+  await f.settle();
+  expect(f.actions[1]).toEqual({
+    type: "preset",
+    preset: "easeOut",
+    scope: "all",
+  });
+  await f.root.dispose();
+});

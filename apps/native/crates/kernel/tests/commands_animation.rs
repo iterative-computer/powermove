@@ -1078,3 +1078,84 @@ fn placing_a_keyframe_inside_a_hold_segment_keeps_it_held() {
     assert_eq!(num(&k[1], &["v"]), 0.0);
     assert_eq!(at(&k[1], &["outInterp"]).as_str(), Some("hold"));
 }
+
+#[test]
+fn set_easing_on_consecutive_keys_preserves_outer_unselected_segments() {
+    let mut s = store();
+    // Create 4 keyframes: k1 (t=0, v=0), k2 (t=1, v=100), k3 (t=2, v=200), k4 (t=3, v=300)
+    run(
+        &mut s,
+        kc(KeyframeCommand::Add {
+            layer_id: "anim".into(),
+            channel: "opacity".into(),
+            time: 2.0,
+            key_id: "k3".into(),
+            value: Some(Value::Number(200.0)),
+        }),
+    );
+    run(
+        &mut s,
+        kc(KeyframeCommand::Add {
+            layer_id: "anim".into(),
+            channel: "opacity".into(),
+            time: 3.0,
+            key_id: "k4".into(),
+            value: Some(Value::Number(300.0)),
+        }),
+    );
+    // Ease k1 -> k2 with easeIn, and k3 -> k4 with snap.
+    run(
+        &mut s,
+        kc(KeyframeCommand::SetEasing {
+            key_ids: vec!["k1".into(), "k2".into()],
+            curve: EaseSpec::Preset("easeIn".into()),
+        }),
+    );
+    run(
+        &mut s,
+        kc(KeyframeCommand::SetEasing {
+            key_ids: vec!["k3".into(), "k4".into()],
+            curve: EaseSpec::Preset("snap".into()),
+        }),
+    );
+    let before = keys(&s, "anim", "opacity");
+    let k2_in_before = before[1].get("inEase").unwrap().clone();
+    let k2_in_interp_before = before[1].get("inInterp").unwrap().clone();
+    let k3_out_before = before[2].get("outEase").unwrap().clone();
+    let k3_out_interp_before = before[2].get("outInterp").unwrap().clone();
+
+    // Now select k2 and k3 and adjust easing between them to easeOut.
+    run(
+        &mut s,
+        kc(KeyframeCommand::SetEasing {
+            key_ids: vec!["k2".into(), "k3".into()],
+            curve: EaseSpec::Preset("easeOut".into()),
+        }),
+    );
+    let after = keys(&s, "anim", "opacity");
+    // Outer segments k1 -> k2 (k2.inEase) and k3 -> k4 (k3.outEase) MUST be untouched!
+    assert_eq!(after[1].get("inEase").unwrap(), &k2_in_before);
+    assert_eq!(after[1].get("inInterp").unwrap(), &k2_in_interp_before);
+    assert_eq!(after[2].get("outEase").unwrap(), &k3_out_before);
+    assert_eq!(after[2].get("outInterp").unwrap(), &k3_out_interp_before);
+    // Interior segment k2 -> k3 received easeOut ([0, 0, 0.58, 1] -> in influence 42%).
+    assert_eq!(at(&after[1], &["outInterp"]).as_str(), Some("bezier"));
+    assert_eq!(at(&after[2], &["inInterp"]).as_str(), Some("bezier"));
+    assert!((num(&after[2], &["inEase", "influence"]) - 42.0).abs() < 1e-6);
+
+    // Selecting 3 keys [k2, k3, k4] eases both k2->k3 and k3->k4 while still
+    // leaving k1->k2 (k2.inEase) completely untouched!
+    run(
+        &mut s,
+        kc(KeyframeCommand::SetEasing {
+            key_ids: vec!["k2".into(), "k3".into(), "k4".into()],
+            curve: EaseSpec::Curve([0.8, 0.0, 0.2, 1.0]),
+        }),
+    );
+    let multi = keys(&s, "anim", "opacity");
+    assert_eq!(multi[1].get("inEase").unwrap(), &k2_in_before);
+    assert!((num(&multi[1], &["outEase", "influence"]) - 80.0).abs() < 1e-6);
+    assert!((num(&multi[2], &["inEase", "influence"]) - 80.0).abs() < 1e-6);
+    assert!((num(&multi[2], &["outEase", "influence"]) - 80.0).abs() < 1e-6);
+    assert!((num(&multi[3], &["inEase", "influence"]) - 80.0).abs() < 1e-6);
+}

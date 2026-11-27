@@ -1070,6 +1070,93 @@ fn handle_drag_is_undoable_and_option_splits_continuity() {
     );
 }
 #[test]
+fn speed_graph_handle_and_key_drags_never_corrupt_previous_segment() {
+    let (_a, mut c) = client_with(
+        parse(
+            r#"{
+        "id":"P","compId":"C","w":1920,"h":1080,"fps":30,"dur":5,"comps":{},"assets":{},
+        "layers":[{"id":"l1","from":0,"dur":5,"type":"shape","on":true,"p":{
+            "position.x":{"v":0,"kf":[
+                {"i":"x0","t":0,"v":0,"inInterp":"linear","outInterp":"bezier","inEase":{"speed":0,"influence":33.33},"outEase":{"speed":0,"influence":75},"continuous":false,"autoBezier":false},
+                {"i":"x1","t":1,"v":300,"inInterp":"bezier","outInterp":"bezier","inEase":{"speed":0,"influence":65},"outEase":{"speed":0,"influence":33.33},"continuous":false,"autoBezier":false},
+                {"i":"x2","t":2,"v":600,"inInterp":"bezier","outInterp":"linear","inEase":{"speed":0,"influence":33.33},"outEase":{"speed":0,"influence":33.33},"continuous":false,"autoBezier":false}
+            ]},
+            "position.y":{"v":540,"kf":[
+                {"i":"y0","t":0,"v":540,"inInterp":"linear","outInterp":"bezier","inEase":{"speed":0,"influence":33.33},"outEase":{"speed":0,"influence":75},"continuous":false,"autoBezier":false},
+                {"i":"y1","t":1,"v":540,"inInterp":"bezier","outInterp":"bezier","inEase":{"speed":0,"influence":65},"outEase":{"speed":0,"influence":33.33},"continuous":false,"autoBezier":false},
+                {"i":"y2","t":2,"v":540,"inInterp":"bezier","outInterp":"linear","inEase":{"speed":0,"influence":33.33},"outEase":{"speed":0,"influence":33.33},"continuous":false,"autoBezier":false}
+            ]}
+        }}]
+    }"#,
+        )
+        .unwrap(),
+    );
+    c.model.graph_mode = pm_panel_timeline::GraphMode::Speed;
+    let x1_in_before = c
+        .model
+        .index
+        .key("x1")
+        .unwrap()
+        .2
+        .stored
+        .to_value()
+        .get("inEase")
+        .unwrap()
+        .clone();
+    // 1) Dragging x1's outgoing handle in Speed Graph MUST NOT touch x1.inEase (segment x0->x1)!
+    block_on(c.begin_drag(DragKind::Handle {
+        id: "x1".into(),
+        side: EaseSide::Out,
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        handle_time: 1.7,
+        handle_value: 200.,
+        ..sample(0.)
+    }))
+    .unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    let x1_after_handle = c.model.index.key("x1").unwrap().2.stored.to_value();
+    let y1_after_handle = c.model.index.key("y1").unwrap().2.stored.to_value();
+    assert_eq!(
+        x1_after_handle.get("inEase").unwrap(),
+        &x1_in_before,
+        "previous segment's incoming ease must not be altered"
+    );
+    let x1_out_inf = x1_after_handle
+        .get("outEase")
+        .and_then(|e| e.get("influence"))
+        .and_then(Value::as_f64)
+        .unwrap();
+    let y1_out_speed = y1_after_handle
+        .get("outEase")
+        .and_then(|e| e.get("speed"))
+        .and_then(Value::as_f64)
+        .unwrap();
+    assert!((x1_out_inf - 70.).abs() < 1e-3, "got {x1_out_inf}");
+    assert_eq!(
+        y1_out_speed,
+        0.,
+        "constant Y axis must not receive bogus speed"
+    );
+    // 2) Dragging x1 in time in Speed Graph MUST NOT rewrite its easing handles!
+    let x1_out_before_move = x1_after_handle.get("outEase").unwrap().clone();
+    block_on(c.begin_drag(DragKind::GraphKeys {
+        ids: c.model.expand_graph_keys(&strings(&["x1"])),
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        value_delta: 450.,
+        ..sample(0.2)
+    }))
+    .unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    let x1_after_move = c.model.index.key("x1").unwrap().2.stored.to_value();
+    assert!((key_time(&c, "x1") - 1.2).abs() < 1e-3);
+    assert_eq!(x1_after_move.get("inEase").unwrap(), &x1_in_before);
+    assert_eq!(x1_after_move.get("outEase").unwrap(), &x1_out_before_move);
+}
+#[test]
 fn menu_easing_uses_current_selected_keys_only_if_hit_selected() {
     let (_a, mut c) = client();
     select_keys(&mut c, &["a0", "a2"]);

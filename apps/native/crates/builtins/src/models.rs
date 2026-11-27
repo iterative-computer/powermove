@@ -1934,6 +1934,8 @@ impl Backend {
             "curve": selected.curve,
             "mixed": selected.mixed,
             "interpolation": selected.interpolation,
+            "mixedInterpolation": selected.mixed_interpolation,
+            "segments": selected.segments,
             "count": p.selection.keys().len(),
             "selection": [p.snapshot.doc_id, p.selection.keys(), p.selection.key_layers()],
             "revision": p.revision().to_string(),
@@ -1942,34 +1944,113 @@ impl Backend {
         }))
     }
     /// An Easing panel action on the selected keyframes, as one Undo step:
-    /// `{type:"preset", preset}`, `{type:"curve", curve:[x1,y1,x2,y2]}`,
-    /// `{type:"easyEase", side:"both"|"in"|"out"}` or
+    /// `{type:"preset", preset, scope?}`, `{type:"curve", curve:[x1,y1,x2,y2], scope?}`,
+    /// `{type:"easyEase", side:"both"|"in"|"out", scope?}` or
     /// `{type:"interpolation", interpolation:"linear"|"bezier"|"hold"|"auto"|"continuous"}`.
     pub(crate) fn easing_intent(&mut self, args: &Value) -> Result<Request, String> {
         use pm_kernel::commands::keyframes::{EaseSide, EaseSpec, Interpolation};
         self.sync()?;
         let p = self.published().ok_or("No open project")?;
-        let key_ids: Vec<String> = p.selection.keys().to_vec();
-        if key_ids.is_empty() {
+        let raw_keys: Vec<String> = p.selection.keys().to_vec();
+        if raw_keys.is_empty() {
             return Err("Select keyframes to apply easing".into());
         }
+        // Resolve selected keys on unlocked layers and expand linked scale /
+        // combined position sibling keys so multi-keyframe & multi-layer easing
+        // updates every selected track cleanly without failing on a locked layer
+        // when unlocked keyframes are also selected.
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&p.snapshot);
+        let mut model = pm_panel_timeline::TimelineModel::default();
+        model.sync(&p);
+        let expanded = model.expand_graph_keys(&raw_keys);
+        let mut unlocked_keys: Vec<String> = Vec::with_capacity(expanded.len());
+        for id in &expanded {
+            if let Some((layer, _, _)) = index.key(id) {
+                if !layer.effectively_locked {
+                    unlocked_keys.push(id.clone());
+                }
+            } else {
+                unlocked_keys.push(id.clone());
+            }
+        }
+        let key_ids = if unlocked_keys.is_empty() {
+            raw_keys
+        } else {
+            unlocked_keys
+        };
+        let all_sides = args["scope"].as_str() == Some("all");
         let side = |v: &Value| match v["side"].as_str().unwrap_or("both") {
             "in" => Ok(EaseSide::In),
             "out" => Ok(EaseSide::Out),
             "both" => Ok(EaseSide::Both),
             _ => Err("Unknown easing side".to_string()),
         };
-        let command: Command = match args["type"].as_str().unwrap_or("") {
+        // Partition consecutive selected pairs vs isolated keys for Easy Ease
+        // so clicking Easy Ease / Ease In / Ease Out on a selected span never
+        // corrupts adjacent unselected segments.
+        let segment_sides = |ids: &[String]| -> (Vec<String>, Vec<String>, Vec<String>) {
+            let id_set: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+            let mut out_only = Vec::new();
+            let mut in_only = Vec::new();
+            let mut isolated = Vec::new();
+            for layer in &index.layers {
+                if layer.effectively_locked {
+                    continue;
+                }
+                for channel in &layer.channels {
+                    let sel: Vec<bool> = channel
+                        .keys
+                        .iter()
+                        .map(|k| id_set.contains(k.id.as_str()))
+                        .collect();
+                    let len = channel.keys.len();
+                    for i in 0..len {
+                        if !sel[i] {
+                            continue;
+                        }
+                        let prev_sel = i > 0 && sel[i - 1];
+                        let next_sel = i + 1 < len && sel[i + 1];
+                        if prev_sel || next_sel {
+                            if next_sel {
+                                out_only.push(channel.keys[i].id.clone());
+                            }
+                            if prev_sel {
+                                in_only.push(channel.keys[i].id.clone());
+                            }
+                        } else {
+                            isolated.push(channel.keys[i].id.clone());
+                        }
+                    }
+                }
+            }
+            (out_only, in_only, isolated)
+        };
+        let commands: Vec<Command> = match args["type"].as_str().unwrap_or("") {
             "preset" => {
                 let name = args["preset"].as_str().unwrap_or("");
                 if !pm_eval::easing::PRESETS.iter().any(|(n, _)| *n == name) {
                     return Err(format!("Unknown easing preset {name}"));
                 }
-                KeyframeCommand::SetEasing {
-                    key_ids,
-                    curve: EaseSpec::Preset(name.into()),
+                if all_sides && key_ids.len() > 1 {
+                    key_ids
+                        .into_iter()
+                        .map(|id| {
+                            KeyframeCommand::SetEasing {
+                                key_ids: vec![id],
+                                curve: EaseSpec::Preset(name.into()),
+                            }
+                            .into()
+                        })
+                        .collect()
+                } else {
+                    vec![
+                        KeyframeCommand::SetEasing {
+                            key_ids,
+                            curve: EaseSpec::Preset(name.into()),
+                        }
+                        .into(),
+                    ]
                 }
-                .into()
             }
             "curve" => {
                 let numbers: Vec<f64> = args["curve"]
@@ -1980,30 +2061,83 @@ impl Backend {
                     .map(|n| n.as_f64().filter(|n| n.is_finite()))
                     .collect::<Option<_>>()
                     .ok_or("A curve is four numbers")?;
-                KeyframeCommand::SetEasing {
-                    key_ids,
-                    curve: EaseSpec::Curve([numbers[0], numbers[1], numbers[2], numbers[3]]),
+                let curve = [numbers[0], numbers[1], numbers[2], numbers[3]];
+                if all_sides && key_ids.len() > 1 {
+                    key_ids
+                        .into_iter()
+                        .map(|id| {
+                            KeyframeCommand::SetEasing {
+                                key_ids: vec![id],
+                                curve: EaseSpec::Curve(curve),
+                            }
+                            .into()
+                        })
+                        .collect()
+                } else {
+                    vec![
+                        KeyframeCommand::SetEasing {
+                            key_ids,
+                            curve: EaseSpec::Curve(curve),
+                        }
+                        .into(),
+                    ]
                 }
-                .into()
             }
-            "easyEase" => KeyframeCommand::EasyEase {
-                key_ids,
-                side: side(args)?,
+            "easyEase" => {
+                let side = side(args)?;
+                if all_sides {
+                    vec![KeyframeCommand::EasyEase { key_ids, side }.into()]
+                } else {
+                    let (out_ids, in_ids, iso_ids) = segment_sides(&key_ids);
+                    let mut cmds = Vec::new();
+                    if side != EaseSide::In && !out_ids.is_empty() {
+                        cmds.push(
+                            KeyframeCommand::EasyEase {
+                                key_ids: out_ids,
+                                side: EaseSide::Out,
+                            }
+                            .into(),
+                        );
+                    }
+                    if side != EaseSide::Out && !in_ids.is_empty() {
+                        cmds.push(
+                            KeyframeCommand::EasyEase {
+                                key_ids: in_ids,
+                                side: EaseSide::In,
+                            }
+                            .into(),
+                        );
+                    }
+                    if !iso_ids.is_empty() {
+                        cmds.push(
+                            KeyframeCommand::EasyEase {
+                                key_ids: iso_ids,
+                                side,
+                            }
+                            .into(),
+                        );
+                    }
+                    if cmds.is_empty() {
+                        cmds.push(KeyframeCommand::EasyEase { key_ids, side }.into());
+                    }
+                    cmds
+                }
             }
-            .into(),
-            "interpolation" => KeyframeCommand::SetInterpolation {
-                key_ids,
-                side: side(args)?,
-                interpolation: match args["interpolation"].as_str().unwrap_or("") {
-                    "linear" => Interpolation::Linear,
-                    "bezier" => Interpolation::Bezier,
-                    "hold" => Interpolation::Hold,
-                    "auto" => Interpolation::Auto,
-                    "continuous" => Interpolation::Continuous,
-                    other => return Err(format!("Unknown interpolation {other}")),
-                },
-            }
-            .into(),
+            "interpolation" => vec![
+                KeyframeCommand::SetInterpolation {
+                    key_ids,
+                    side: side(args)?,
+                    interpolation: match args["interpolation"].as_str().unwrap_or("") {
+                        "linear" => Interpolation::Linear,
+                        "bezier" => Interpolation::Bezier,
+                        "hold" => Interpolation::Hold,
+                        "auto" => Interpolation::Auto,
+                        "continuous" => Interpolation::Continuous,
+                        other => return Err(format!("Unknown interpolation {other}")),
+                    },
+                }
+                .into(),
+            ],
             other => return Err(format!("Unknown easing action {other}")),
         };
         Ok(Request::new(
@@ -2011,7 +2145,7 @@ impl Backend {
             Call::Transact {
                 label: Some(if args["type"] == "preset" { format!("Ease: {}", crate::timeline_easing::preset_name(args["preset"].as_str().unwrap_or(""))) } else if let Some(name) = args["name"].as_str().filter(|n| !n.is_empty() && n.chars().count() <= 100) { format!("Ease: {name}") } else { "Adjust easing".into() }),
                 expected_revision: Some(p.revision()),
-                body: WriteBody::Commands(vec![command]),
+                body: WriteBody::Commands(commands),
             },
         ))
     }

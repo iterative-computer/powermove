@@ -7,6 +7,7 @@ import {
   presetGroups,
   selectionKey,
   status,
+  type ApplyScope,
   type Curve,
   type EasingAction,
   type EasingModel,
@@ -92,6 +93,7 @@ export function EasingPanel({ model, bindings }: EasingProps) {
   const [redo, setRedo] = useState<Curve[]>([]);
   const [clipboard, copy] = useState<Curve>();
   const [autoApply, setAutoApply] = useState(true);
+  const [scope, setScope] = useState<ApplyScope>("between");
   const [more, showMore] = useState(false);
   const [coordinates, showCoordinates] = useState(false);
   const [editor, showEditor] = useState<"preset" | "group">();
@@ -150,17 +152,21 @@ export function EasingPanel({ model, bindings }: EasingProps) {
   );
   const group =
     groups.find((g) => g.id === (activeGroup ?? active)) ?? groups[0]!;
-  const selected = group.presets.find((p) => sameCurve(p.curve, curve, 0.0011));
+  const selected = s.mixed
+    ? undefined
+    : group.presets.find((p) => sameCurve(p.curve, curve, 0.0011));
   const caption = hover
     ? `${hover.name} · ${Math.round(hover.curve[0] * 100)}% / ${Math.round((1 - hover.curve[2]) * 100)}%`
     : status(s, message || hint);
+  const withScope = <T extends { scope?: ApplyScope }>(action: T): T =>
+    scope === "all" ? { ...action, scope: "all" } : action;
   const send = (action: EasingAction) => {
     setHint("");
     model.send(action);
   };
   const apply = (
     next: Curve,
-    action: EasingAction = { type: "curve", curve: next },
+    action: EasingAction = withScope({ type: "curve", curve: next }),
   ) => {
     if (!ready) return;
     draftOnly.current = false;
@@ -176,7 +182,8 @@ export function EasingPanel({ model, bindings }: EasingProps) {
       setUndo((history) => [...history.slice(-99), before]);
       setRedo([]);
     }
-    if (ready && (action || (changed && autoApply))) apply(next, action);
+    if (ready && (action || ((changed || s.mixed) && autoApply)))
+      apply(next, action);
     else if (changed) draftOnly.current = true;
   };
   const sample = (next: Curve) => {
@@ -202,14 +209,16 @@ export function EasingPanel({ model, bindings }: EasingProps) {
       side === "out" ? curve[2] : 2 / 3,
       side === "out" ? curve[3] : 1,
     ];
-    edit(next, { type: "easyEase", side });
+    edit(next, withScope({ type: "easyEase", side }));
   };
   const selectPreset = (p: PresetTile) => {
     edit(
       p.curve,
-      p.native
-        ? { type: "preset", preset: p.id }
-        : { type: "curve", curve: p.curve, name: p.name },
+      withScope(
+        p.native
+          ? { type: "preset", preset: p.id }
+          : { type: "curve", curve: p.curve, name: p.name },
+      ),
     );
   };
   const curveValue = (raw: unknown): Curve | undefined =>
@@ -413,7 +422,7 @@ export function EasingPanel({ model, bindings }: EasingProps) {
             disabled={!ready || !clipboard}
             action={() => {
               if (clipboard)
-                edit(clipboard, { type: "curve", curve: clipboard });
+                edit(clipboard, withScope({ type: "curve", curve: clipboard }));
             }}
           />
           <Tool
@@ -445,6 +454,18 @@ export function EasingPanel({ model, bindings }: EasingProps) {
               onChange={(value) => {
                 if (value === "both" || value === "in" || value === "out")
                   easyEase(value);
+              }}
+            />
+            <UI.SegmentedControl
+              id="easing:scope"
+              label="Multi-keyframe scope"
+              value={scope}
+              options={[
+                { id: "between", label: "Between Keys" },
+                { id: "all", label: "All Sides" },
+              ]}
+              onChange={(value) => {
+                if (value === "between" || value === "all") setScope(value);
               }}
             />
             {interpolationControl}

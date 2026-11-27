@@ -30,6 +30,12 @@ describe("Easing panel model", () => {
     expect(status(state(0), "")).toBe("Select keyframes to apply easing");
     expect(status(state(1), "")).toBe("1 keyframe selected");
     expect(status(state(3), "")).toBe("3 keyframes selected");
+    expect(status({ ...state(2), segments: 1 }, "")).toBe(
+      "2 keyframes selected · 1 segment",
+    );
+    expect(status({ ...state(3), segments: 2, mixed: true }, "")).toBe(
+      "3 keyframes selected · 2 segments · Mixed curves",
+    );
     expect(status(state(3), "Refused")).toBe("Refused");
   });
   test("an action runs once, then the panel reads the selection again", async () => {

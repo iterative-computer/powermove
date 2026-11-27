@@ -425,8 +425,8 @@ enum Gesture {
         property_infinite: crate::infinite_drag::InfiniteDrag,
         quick: Option<(Point<Pixels>, f64, usize)>,
         quick_limits: Vec<(f64, f64)>,
-        /// A handle drag: its key's layer start, for layer-local handle times.
-        handle: Option<f64>,
+        /// A handle drag: its key's `(layer_from, key_id, side)`.
+        handle: Option<(f64, String, pm_kernel::commands::keyframes::EaseSide)>,
     },
     /// A ruler scrub and the frame time it last sought.
     Scrub {
@@ -534,6 +534,10 @@ pub struct TimelineSurface {
     transform: Option<TransformBox>,
     /// A key drag in the graph: ⇧ also locks it to its main axis (v1).
     graph_axis: bool,
+    /// Graph element currently hovered under an idle pointer.
+    graph_hover: Option<graph_render::GraphHit>,
+    /// Graph Bézier handle currently pressed or being dragged.
+    graph_active_handle: Option<(String, pm_kernel::commands::keyframes::EaseSide)>,
     /// The drag readout's text and where the pointer is (surface points).
     readout: Option<(String, f64, f64)>,
     frame: Option<Arc<Frame>>,
@@ -709,6 +713,8 @@ impl TimelineSurface {
             graph_view: None,
             transform: None,
             graph_axis: false,
+            graph_hover: None,
+            graph_active_handle: None,
             readout: None,
             frame: None,
             frame_reach: 0.,
@@ -1171,6 +1177,7 @@ impl TimelineSurface {
         self.lit = None;
         self.transform = None;
         self.graph_axis = false;
+        self.graph_active_handle = None;
         self.readout = None;
         self.outline.layer_dragged.set(false);
         match gesture {
@@ -2013,6 +2020,13 @@ impl TimelineSurface {
             return;
         }
         let outline_requested = built.outline_requested;
+        // Graph drags (keys, handles, transform box) never change timeline rows:
+        // update the displayed graph immediately instead of waiting on async
+        // outline reconciliation (up to 150ms fallback lag).
+        if built.graph.is_some() && same_timeline_layout(&self.model, &built.model) {
+            self.install_graph(built.graph.clone());
+            cx.notify();
+        }
         self.pending_scene = Some((built, hold_time_mapping));
         self.show_pending_scene(cx);
         let refresh = self.pending_scene.is_some();
@@ -2169,7 +2183,23 @@ impl TimelineSurface {
     }
 
     fn install_graph(&mut self, graph: Option<Arc<Graph>>) {
-        self.graph = steady_graph(&self.gesture, self.graph.as_deref(), graph.clone());
+        let pending_graph_job = self.queue.iter().any(|job| {
+            matches!(
+                job,
+                Job::Sample(_)
+                    | Job::Finish(_)
+                    | Job::Begin(
+                        Spec::GraphKeys | Spec::Handle { .. } | Spec::Transform { .. },
+                        _
+                    )
+            )
+        });
+        self.graph = steady_graph(
+            &self.gesture,
+            pending_graph_job,
+            self.graph.as_deref(),
+            graph.clone(),
+        );
         // A range the wheel panned to stays for its view.
         let panned = match (&self.graph, &self.graph_view) {
             (Some(g), Some((view, min, max))) if g.view == *view => {
@@ -3093,6 +3123,7 @@ impl TimelineSurface {
         // A new press starts with no graph drag state.
         self.transform = None;
         self.graph_axis = false;
+        self.graph_active_handle = None;
         self.readout = None;
         if let Some(bar) = self.bar()
             && let Some(part) = self.bar_part(x, y)
@@ -3876,10 +3907,9 @@ impl TimelineSurface {
             release: None,
         });
     }
-    /// A press in the graph, in v1's order (`graphDown`): a transform grip,
-    /// then the nearer of a handle and a key (a key wins within 4 points),
-    /// then the selection box (moves the group), then a marquee. A
-    /// double-click on a key edits its value.
+    /// A press in the graph using the single authoritative `Graph::hit_test`:
+    /// legend pills (Value/Speed, Fit), transform grips, Bézier handles,
+    /// keyframe vertices, selection box, or marquee.
     fn press_graph(
         &mut self,
         event: &MouseDownEvent,
@@ -3891,177 +3921,148 @@ impl TimelineSurface {
         let Some(region) = self.graph_region() else {
             return;
         };
-        if y < region.y + graph_render::LEGEND {
+        let (Some(graph), Some(viewport)) = (self.graph.clone(), self.viewport()) else {
             return;
-        }
-        let (graph, viewport) = (self.graph.clone(), self.viewport());
-        let boxed = graph
-            .as_ref()
-            .zip(viewport)
-            .and_then(|(g, v)| g.selection_box(v, region));
-        if let (Some(g), Some(b)) = (graph.as_ref(), boxed)
-            && g.transformable()
-            && let Some(grip) = graph_render::grip_at(b, x, y)
-            && let Some((t0, t1, v0, v1)) = g.selected_span()
-        {
-            let b = TransformBox {
-                t0,
-                t1,
-                v0,
-                v1,
-                grip,
-                centred: event.modifiers.platform || event.modifiers.control,
-            };
-            let (anchor_time, anchor_value) = b.anchor();
-            self.transform = Some(b);
-            self.gesture = Gesture::Pressed(Press {
-                origin: event.position,
-                spec: Some(Spec::Transform {
-                    anchor_time,
-                    anchor_value,
-                }),
-                release: None,
-            });
-            return;
-        }
-        let ops = self.graph_ops(None).unwrap_or_default();
-        let nearest = |prefix: &str| {
-            ops.iter()
-                .filter(|o| o.id.starts_with(prefix))
-                .map(|o| {
-                    let (cx, cy) = (
-                        o.bounds.x + o.bounds.width / 2.,
-                        o.bounds.y + o.bounds.height / 2.,
-                    );
-                    ((cx - x).hypot(cy - y), o.id[prefix.len()..].to_owned())
-                })
-                .min_by(|a, b| a.0.total_cmp(&b.0))
         };
-        let point = nearest("graph-key:");
-        let handle = nearest("graph-handle:");
-        let pd = point.as_ref().map_or(f64::INFINITY, |p| p.0);
-        let hd = handle.as_ref().map_or(f64::INFINITY, |h| h.0);
-        let prefer_point =
-            pd < graph_render::POINT_HIT && (hd >= graph_render::HANDLE_HIT || pd < hd);
-        if hd < graph_render::HANDLE_HIT
-            && !prefer_point
-            && let Some((key, side)) = handle.and_then(|(_, h)| {
-                let (key, side) = h.rsplit_once(':')?;
-                let side = match side {
-                    "in" => pm_kernel::commands::keyframes::EaseSide::In,
-                    _ => pm_kernel::commands::keyframes::EaseSide::Out,
-                };
-                Some((key.to_owned(), side))
-            })
-        {
-            self.gesture = Gesture::Pressed(Press {
-                origin: event.position,
-                spec: Some(Spec::Handle { key, side }),
-                release: None,
-            });
+        if y < region.y + graph_render::LEGEND {
+            match graph.hit_test(viewport, region, x, y) {
+                Some(graph_render::GraphHit::LegendMode) => {
+                    let cmd = if graph.speed { "graph.value" } else { "graph.speed" };
+                    self.command(cmd, self.delegate.time(cx), None, false, cx);
+                }
+                Some(graph_render::GraphHit::LegendFit) => {
+                    self.command("graph.fit", self.delegate.time(cx), None, false, cx);
+                }
+                _ => {}
+            }
             return;
         }
-        if pd >= graph_render::POINT_HIT {
-            if boxed
-                .is_some_and(|b| x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height)
-            {
-                // Inside the box: the selected keys move together.
+        let hit = graph.hit_test(viewport, region, x, y);
+        match hit {
+            Some(graph_render::GraphHit::Grip(grip)) => {
+                if let Some((t0, t1, v0, v1)) = graph.selected_span() {
+                    let b = TransformBox {
+                        t0,
+                        t1,
+                        v0,
+                        v1,
+                        grip,
+                        centred: event.modifiers.platform || event.modifiers.control,
+                    };
+                    let (anchor_time, anchor_value) = b.anchor();
+                    self.transform = Some(b);
+                    self.gesture = Gesture::Pressed(Press {
+                        origin: event.position,
+                        spec: Some(Spec::Transform {
+                            anchor_time,
+                            anchor_value,
+                        }),
+                        release: None,
+                    });
+                }
+            }
+            Some(graph_render::GraphHit::Handle { key, side, .. }) => {
+                self.graph_active_handle = Some((key.clone(), side));
+                self.cursor = CursorStyle::ClosedHand;
+                self.gesture = Gesture::Pressed(Press {
+                    origin: event.position,
+                    spec: Some(Spec::Handle { key, side }),
+                    release: None,
+                });
+                cx.notify();
+            }
+            Some(graph_render::GraphHit::Key { layer: hit_layer, key }) => {
+                let Some((layer, channel, _)) = self
+                    .model
+                    .index
+                    .key_on(&hit_layer, &key)
+                    .or_else(|| self.model.index.key(&key))
+                else {
+                    return;
+                };
+                let (layer, channel) = (layer.id.clone(), channel.path.clone());
+                let selected = self.model.selection.key_selected(&layer, &key);
+                self.queue.push_back(Job::SelectKey {
+                    layer: layer.clone(),
+                    channel: channel.clone(),
+                    key: key.clone(),
+                    additive,
+                    dragging: true,
+                });
+                if event.click_count >= 2 {
+                    self.queue.push_back(Job::Menu {
+                        context: MenuContext::Keys { ids: vec![key] },
+                        action: "keys.value".into(),
+                        time: self.delegate.time(cx),
+                    });
+                    self.pump(cx);
+                    return;
+                }
                 self.graph_axis = true;
+                self.gesture = Gesture::Pressed(Press {
+                    origin: event.position,
+                    spec: Some(Spec::GraphKeys),
+                    release: (additive && selected).then_some(Job::SelectKey {
+                        layer,
+                        channel,
+                        key,
+                        additive,
+                        dragging: false,
+                    }),
+                });
+                self.pump(cx);
+            }
+            Some(graph_render::GraphHit::SelectionBox) => {
+                self.graph_axis = true;
+                self.cursor = CursorStyle::ClosedHand;
                 self.gesture = Gesture::Pressed(Press {
                     origin: event.position,
                     spec: Some(Spec::GraphKeys),
                     release: None,
                 });
-            } else {
+            }
+            _ => {
                 self.gesture = Gesture::Marquee {
                     session: MarqueeSession::begin(&self.model, additive, true),
                     origin: event.position,
                     at: event.position,
                 };
             }
-            return;
         }
-        let Some(key) = point.map(|(_, id)| id) else {
-            return;
-        };
-        let Some((layer, channel, _)) = graph
-            .as_ref()
-            .and_then(|g| g.key_layer(&key))
-            .and_then(|on| self.model.index.key_on(on, &key))
-        else {
-            return;
-        };
-        let (layer, channel) = (layer.id.clone(), channel.path.clone());
-        let selected = self.model.selection.key_selected(&layer, &key);
-        self.queue.push_back(Job::SelectKey {
-            layer: layer.clone(),
-            channel: channel.clone(),
-            key: key.clone(),
-            additive,
-            dragging: true,
-        });
-        if event.click_count >= 2 {
-            // v1: a double-click on a key edits its value.
-            self.queue.push_back(Job::Menu {
-                context: MenuContext::Keys { ids: vec![key] },
-                action: "keys.value".into(),
-                time: self.delegate.time(cx),
-            });
-            self.pump(cx);
-            return;
-        }
-        self.graph_axis = true;
-        self.gesture = Gesture::Pressed(Press {
-            origin: event.position,
-            spec: Some(Spec::GraphKeys),
-            // ⇧-click on a selected key takes it out of the selection on
-            // release; a ⇧-drag moves the selection with it.
-            release: (additive && selected).then_some(Job::SelectKey {
-                layer,
-                channel,
-                key,
-                additive,
-                dragging: false,
-            }),
-        });
-        self.pump(cx);
     }
-    /// The graph drawn into its region; `playhead` marks each curve's value
-    /// there.
+    /// Whether `(x, y)` hits an interactive graph element (not empty background).
     fn graph_point_at(&self, x: f64, y: f64) -> bool {
-        let Some(region) = self.graph_region() else {
+        let (Some(region), Some(graph), Some(viewport)) =
+            (self.graph_region(), self.graph.as_ref(), self.viewport())
+        else {
             return false;
         };
         if y < region.y + graph_render::LEGEND {
             return false;
         }
-        if self
-            .graph
-            .as_ref()
-            .zip(self.viewport())
-            .and_then(|(g, v)| g.selection_box(v, region))
-            .is_some_and(|b| graph_render::grip_at(b, x, y).is_some())
-        {
-            return true;
-        }
-        self.graph_ops(None).is_some_and(|ops| {
-            ops.iter().any(|o| {
-                (o.id.starts_with("graph-key:") || o.id.starts_with("graph-handle:"))
-                    && (x - o.bounds.x - o.bounds.width / 2.)
-                        .hypot(y - o.bounds.y - o.bounds.height / 2.)
-                        < graph_render::POINT_HIT
-            })
-        })
+        matches!(
+            graph.hit_test(viewport, region, x, y),
+            Some(
+                graph_render::GraphHit::Grip(_)
+                    | graph_render::GraphHit::Handle { .. }
+                    | graph_render::GraphHit::Key { .. }
+            )
+        )
     }
     fn graph_ops(&self, playhead: Option<f64>) -> Option<Vec<Op>> {
+        let decor = graph_render::GraphDecor {
+            hover: self.graph_hover.clone(),
+            active_handle: self.graph_active_handle.clone(),
+        };
         self.graph
             .as_ref()?
-            .prepare_with_selection(
+            .prepare_with_state(
                 self.viewport()?,
                 self.graph_region()?,
                 &self.tokens,
                 playhead,
                 self.marquee_selection.as_deref(),
+                Some(&decor),
             )
             .ok()
     }
@@ -4110,14 +4111,12 @@ impl TimelineSurface {
                 && !matches!(self.gesture, Gesture::Idle | Gesture::Pan { .. })
                 && !pm_shell::left_button_held());
         if button_up {
-            if matches!(
-                self.gesture,
-                Gesture::Marquee { .. } | Gesture::Scrub { .. } | Gesture::SwitchPaint { .. }
-            ) {
+            if !matches!(self.gesture, Gesture::Idle) {
+                // Button release must commit the gesture (`on_up`), never
+                // cancel/revert it! (Escape / Right-click handle cancel.)
                 self.on_up(cx);
-                return false;
             }
-            self.cancel_pointer_gesture(cx);
+            return false;
         } else {
             self.last_pointer_activity = std::time::Instant::now();
         }
@@ -4472,12 +4471,12 @@ impl TimelineSurface {
                     }
                 }
                 let handle = match &spec {
-                    Spec::Handle { key, .. } => self
+                    Spec::Handle { key, side } => self
                         .graph
                         .as_ref()
                         .and_then(|g| g.key_layer(key))
                         .and_then(|on| self.model.index.key_on(on, key))
-                        .map(|(l, _, _)| l.from),
+                        .map(|(l, _, _)| (l.from, key.clone(), *side)),
                     _ => None,
                 };
                 let time = self.delegate.time(cx);
@@ -4578,7 +4577,8 @@ impl TimelineSurface {
                         )
                     }
                 });
-                let (origin, proedit, keys, work, handle) = (*origin, *proedit, *keys, *work, *handle);
+                let (origin, proedit, keys, work, handle) =
+                    (*origin, *proedit, *keys, *work, handle.clone());
                 let mut sample = self.sample(origin, event.position, event.modifiers, cx);
                 if let Some(work) = work {
                     let (x, _) = self.local(event.position);
@@ -4587,12 +4587,73 @@ impl TimelineSurface {
                 }
                 (sample.acquire_tolerance, sample.release_tolerance) =
                     pm_panel_timeline::snap::tolerances(keys, self.view.pps);
-                if let (Some(layer_from), Some(area), Some(graph)) =
-                    (handle, self.graph_area(), self.graph.as_ref())
+                let (lx, ly) = self.local(event.position);
+                if let (Some((layer_from, handle_key, handle_side)), Some(area), Some(graph)) =
+                    (handle.as_ref(), self.graph_area(), self.graph.as_ref())
                 {
-                    let (x, y) = self.local(event.position);
-                    sample.handle_time = self.time_at(x) - layer_from;
-                    sample.handle_value = graph.value_at(area, y);
+                    let layer_from = *layer_from;
+                    let handle_side = *handle_side;
+                    sample.handle_time = self.time_at(lx) - layer_from;
+                    let mut raw_v = graph.value_at(area, ly);
+                    // In Speed Graph, magnetically snap within 5px of 0 px/s
+                    // (unless Cmd/Ctrl is held) so horizontal influence drags
+                    // along the bottom zero line stay razor-flat at 0.
+                    if graph.speed && !event.modifiers.platform && !event.modifiers.control {
+                        let zero_band = 5. * graph.value_per_point(area.height);
+                        if raw_v.abs() <= zero_band {
+                            raw_v = 0.;
+                        }
+                    }
+                    sample.handle_value = raw_v;
+                    // Live handle readout pill (influence % + speed/value + modifier cue).
+                    let inf_text = self
+                        .model
+                        .index
+                        .key(handle_key)
+                        .and_then(|(_, ch, k)| {
+                            let idx = ch.keys.iter().position(|x| x.id == k.id)?;
+                            let n = match handle_side {
+                                pm_kernel::commands::keyframes::EaseSide::In => {
+                                    idx.checked_sub(1).map(|i| &ch.keys[i])
+                                }
+                                _ => ch.keys.get(idx + 1),
+                            }?;
+                            let dt = (n.time - k.time).abs();
+                            (dt > 1e-6).then(|| {
+                                let reach = match handle_side {
+                                    pm_kernel::commands::keyframes::EaseSide::In => {
+                                        k.time - sample.handle_time
+                                    }
+                                    _ => sample.handle_time - k.time,
+                                };
+                                let inf = (reach.max(0.) / dt * 100.).clamp(0.1, 100.);
+                                format!("{}%", graph_render::value_text(inf, 1))
+                            })
+                        });
+                    let mut parts = Vec::new();
+                    if let Some(inf) = inf_text {
+                        parts.push(inf);
+                    }
+                    if graph.speed {
+                        let shown_spd = if event.modifiers.shift {
+                            0.
+                        } else if raw_v < 0. && graph.curves().iter().any(|c| c.id.ends_with(":position")) {
+                            0.
+                        } else {
+                            raw_v
+                        };
+                        parts.push(format!("{}/s", graph_render::value_text(shown_spd, 1)));
+                    } else if event.modifiers.shift {
+                        parts.push("Flat".into());
+                    } else {
+                        parts.push(graph_render::value_text(raw_v, 1));
+                    }
+                    if event.modifiers.alt {
+                        parts.push("Split".into());
+                    }
+                    if !parts.is_empty() {
+                        self.readout = Some((parts.join("  ·  "), lx, ly));
+                    }
                 }
                 if let Some(value) = property_delta {
                     sample.value_delta = value;
@@ -4601,7 +4662,6 @@ impl TimelineSurface {
                     // Pro timing takes exact frames: the kernel never snaps subframes.
                     sample.time_delta = frame(sample.time_delta, self.model.index.fps);
                 }
-                let (lx, ly) = self.local(event.position);
                 if let (Some(b), Some(area), Some(graph)) =
                     (self.transform, self.graph_area(), self.graph.as_ref())
                 {
@@ -4622,10 +4682,20 @@ impl TimelineSurface {
                     }
                     self.readout = Some((parts.join("  ·  "), lx, ly));
                 } else if self.graph_axis {
-                    // ⇧ snaps (above) and keeps the drag on its main axis.
-                    if event.modifiers.shift {
-                        let d = event.position - origin;
-                        if f32::from(d.x).abs() >= f32::from(d.y).abs() {
+                    let d = event.position - origin;
+                    let (adx, ady) = (f32::from(d.x).abs(), f32::from(d.y).abs());
+                    let is_speed = self.graph.as_ref().is_some_and(|g| g.speed);
+                    if is_speed {
+                        // In Speed Graph, keep time moves completely isolated from
+                        // speed edits: only a deliberate vertical drag changes speed.
+                        if ady > adx * 2. && ady >= 8. {
+                            sample.time_delta = 0.;
+                        } else {
+                            sample.value_delta = 0.;
+                        }
+                    } else if event.modifiers.shift {
+                        // ⇧ snaps (above) and keeps the drag on its main axis.
+                        if adx >= ady {
                             sample.value_delta = 0.;
                         } else {
                             sample.time_delta = 0.;
@@ -4759,6 +4829,7 @@ impl TimelineSurface {
         self.drag_scene = None;
         if self.audio_up(cx) { return true; }
         self.transform = None;
+        self.graph_active_handle = None;
         self.readout = None;
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Idle => return false,
@@ -4877,12 +4948,13 @@ impl TimelineSurface {
                     self.queue.push_back(job);
                 }
             }
-            Gesture::Dragging { property_motion, .. } => {
-                if property_motion.is_some() {
+            Gesture::Dragging { property_motion, handle, .. } => {
+                if property_motion.is_some() || handle.is_some() {
                     self.cursor = CursorStyle::Arrow;
                 }
                 self.transform = None;
                 self.graph_axis = false;
+                self.graph_active_handle = None;
                 self.readout = None;
                 self.queue.push_back(Job::Finish(true))
             }
@@ -5521,6 +5593,19 @@ impl TimelineSurface {
             cx.notify();
         }
         self.hover_clip = hovered;
+        let next_graph_hover = self
+            .graph_region()
+            .filter(|r| x >= self.view.layer_column && y >= r.y)
+            .and_then(|r| {
+                self.graph
+                    .as_ref()
+                    .zip(self.viewport())
+                    .and_then(|(g, v)| g.hit_test(v, r, x, y))
+            });
+        if next_graph_hover != self.graph_hover {
+            self.graph_hover = next_graph_hover;
+            cx.notify();
+        }
         let m = self.tokens.metrics;
         let cursor = if self.model.edit_tool == pm_panel_timeline::EditTool::Split && self.split_clip_at(x, y).is_some()
             && (x - self.view.layer_column).abs() > m.hit as f64 / 4. {
@@ -5618,40 +5703,29 @@ impl TimelineSurface {
         if y < region.y || x < self.view.layer_column {
             return None;
         }
-        if y < region.y + graph_render::LEGEND {
-            return Some(CursorStyle::Arrow);
-        }
         let graph = self.graph.as_ref()?;
-        let boxed = self.viewport().and_then(|v| graph.selection_box(v, region));
-        if let Some(b) = boxed
-            && graph.transformable()
-            && let Some(grip) = graph_render::grip_at(b, x, y)
-        {
-            return Some(match graph_render::GRIPS[grip] {
+        let viewport = self.viewport()?;
+        let hit = graph.hit_test(viewport, region, x, y);
+        if y < region.y + graph_render::LEGEND {
+            return Some(match hit {
+                Some(graph_render::GraphHit::LegendMode | graph_render::GraphHit::LegendFit) => {
+                    CursorStyle::PointingHand
+                }
+                _ => CursorStyle::Arrow,
+            });
+        }
+        Some(match hit {
+            Some(graph_render::GraphHit::Grip(grip)) => match graph_render::GRIPS[grip] {
                 "n" | "s" => CursorStyle::ResizeUpDown,
                 "e" | "w" => CursorStyle::ResizeLeftRight,
                 "nw" | "se" => CursorStyle::ResizeUpLeftDownRight,
                 _ => CursorStyle::ResizeUpRightDownLeft,
-            });
-        }
-        let ops = self.graph_ops(None).unwrap_or_default();
-        let nearest = |prefix: &str| {
-            ops.iter()
-                .filter(|o| o.id.starts_with(prefix))
-                .map(|o| (o.bounds.x + o.bounds.width / 2. - x).hypot(o.bounds.y + o.bounds.height / 2. - y))
-                .fold(f64::INFINITY, f64::min)
-        };
-        let (pd, hd) = (nearest("graph-key:"), nearest("graph-handle:"));
-        let prefer_point =
-            pd < graph_render::POINT_HIT && (hd >= graph_render::HANDLE_HIT || pd < hd);
-        Some(if hd < graph_render::HANDLE_HIT && !prefer_point {
-            CursorStyle::Crosshair
-        } else if pd < graph_render::POINT_HIT {
-            CursorStyle::Arrow
-        } else if boxed.is_some_and(|b| x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height) {
-            CursorStyle::OpenHand
-        } else {
-            CursorStyle::Crosshair
+            },
+            Some(graph_render::GraphHit::Handle { .. } | graph_render::GraphHit::SelectionBox) => {
+                CursorStyle::OpenHand
+            }
+            Some(graph_render::GraphHit::Key { .. }) => CursorStyle::Arrow,
+            _ => CursorStyle::Crosshair,
         })
     }
     /// v1's marker tooltip (timeline.ts onMove): its name, its time and how
@@ -5828,6 +5902,7 @@ impl TimelineSurface {
 /// another property or graph mode, refits.
 fn steady_graph(
     gesture: &Gesture,
+    pending_graph_job: bool,
     shown: Option<&Graph>,
     next: Option<Arc<Graph>>,
 ) -> Option<Arc<Graph>> {
@@ -5837,14 +5912,15 @@ fn steady_graph(
     if shown.view != next.view {
         return Some(Arc::new(next.clone()));
     }
-    let held = matches!(
-        gesture,
-        Gesture::Dragging { .. }
-            | Gesture::Pressed(Press {
-                spec: Some(Spec::GraphKeys | Spec::Handle { .. } | Spec::Transform { .. }),
-                ..
-            })
-    );
+    let held = pending_graph_job
+        || matches!(
+            gesture,
+            Gesture::Dragging { .. }
+                | Gesture::Pressed(Press {
+                    spec: Some(Spec::GraphKeys | Spec::Handle { .. } | Spec::Transform { .. }),
+                    ..
+                })
+        );
     if held || next.fits_in(shown.min, shown.max) {
         Some(Arc::new(next.clone().with_range(shown.min, shown.max)))
     } else {

@@ -190,10 +190,11 @@ impl TimelineModel {
         let mut result = ids.to_vec();
         for id in ids {
             if let Some((l, c, k)) = resolve(id)
-                && (c.path == "scale.x"
-                    || c.path == "scale.y"
-                    || (l.three_d && c.path == "scale.z")
-                    || (!l.separate_dimensions && c.path.starts_with("position.")))
+                && ((!l.scale_unlinked
+                    && (c.path == "scale.x"
+                        || c.path == "scale.y"
+                        || (l.three_d && c.path == "scale.z")))
+                    || (!l.position_separated && c.path.starts_with("position.")))
             {
                 let path = if c.path.starts_with("position.") {
                     "position"
@@ -204,7 +205,7 @@ impl TimelineModel {
                     .track_channels(&l.id, path)
                     .into_iter()
                     .flat_map(|c| &c.keys)
-                    .filter(|other| other.time == k.time)
+                    .filter(|other| (other.time - k.time).abs() < 1e-9)
                     .map(|k| k.id.clone())
                 {
                     if !result.contains(&id) {
