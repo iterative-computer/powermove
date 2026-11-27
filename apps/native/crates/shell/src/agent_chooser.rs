@@ -465,14 +465,36 @@ fn choose(state: &Rc<RefCell<State>>, index: usize) {
 /// inside its own panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outside {
-    Press { in_chooser: bool },
+    /// A press; `on_part`: on the pill part the menu hangs from.
+    Press {
+        in_chooser: bool,
+        on_part: bool,
+    },
     Escape,
     AppResigned,
     WindowMoved,
     WindowResized,
 }
 pub fn dismisses(event: Outside) -> bool {
-    !matches!(event, Outside::Press { in_chooser: true })
+    !matches!(
+        event,
+        Outside::Press {
+            in_chooser: true,
+            ..
+        }
+    )
+}
+/// The part toggles its menu: a press on the part a menu hangs from closes
+/// it and goes no further, so the part's own click can't open it again. A
+/// press on the other part closes it and goes on (that part opens its menu).
+pub fn swallows(event: Outside) -> bool {
+    matches!(
+        event,
+        Outside::Press {
+            in_chooser: false,
+            on_part: true
+        }
+    )
 }
 
 /// Closes the chooser once: its watchers go, the panel leaves its window,
@@ -1537,13 +1559,27 @@ impl Host {
                     | NSEventMask::OtherMouseDown,
                 &block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
                     let e = event.as_ref();
-                    if dismisses(Outside::Press {
+                    let Some(state) = weak.upgrade() else {
+                        return event.as_ptr();
+                    };
+                    // The part, in screen points as the press is.
+                    let part = state.borrow().around.0;
+                    let at = NSEvent::mouseLocation();
+                    let press = Outside::Press {
                         in_chooser: e.windowNumber() == panel,
-                    }) && let Some(state) = weak.upgrade()
-                    {
+                        on_part: at.x >= part.origin.x
+                            && at.x < part.origin.x + part.size.width
+                            && at.y >= part.origin.y
+                            && at.y < part.origin.y + part.size.height,
+                    };
+                    if dismisses(press) {
                         close(&state);
                     }
-                    event.as_ptr()
+                    if swallows(press) {
+                        std::ptr::null_mut()
+                    } else {
+                        event.as_ptr()
+                    }
                 }),
             )
         };
@@ -1698,9 +1734,19 @@ mod tests {
     }
     #[test]
     fn everything_outside_dismisses_it_but_a_press_inside() {
-        assert!(!dismisses(Outside::Press { in_chooser: true }));
+        assert!(!dismisses(Outside::Press {
+            in_chooser: true,
+            on_part: false
+        }));
         for outside in [
-            Outside::Press { in_chooser: false },
+            Outside::Press {
+                in_chooser: false,
+                on_part: false,
+            },
+            Outside::Press {
+                in_chooser: false,
+                on_part: true,
+            },
             Outside::Escape,
             Outside::AppResigned,
             Outside::WindowMoved,
@@ -1708,6 +1754,28 @@ mod tests {
         ] {
             assert!(dismisses(outside), "{outside:?}");
         }
+    }
+    #[test]
+    fn the_part_toggles_its_menu_and_the_other_part_switches_to_its_own() {
+        // Its own part again: closed, and the press stops there (the part's
+        // click would open it again).
+        let own = Outside::Press {
+            in_chooser: false,
+            on_part: true,
+        };
+        assert!(dismisses(own) && swallows(own));
+        // The other part (or anywhere else): closed, and the press goes on.
+        let other = Outside::Press {
+            in_chooser: false,
+            on_part: false,
+        };
+        assert!(dismisses(other) && !swallows(other));
+        // Inside the menu: neither.
+        let inside = Outside::Press {
+            in_chooser: true,
+            on_part: false,
+        };
+        assert!(!dismisses(inside) && !swallows(inside));
     }
     #[test]
     fn a_menu_hangs_above_its_part_on_the_parts_leading_edge_inside_the_window() {
