@@ -16,6 +16,108 @@ use pm_shell::workspace;
 use serde_json::Value;
 
 const TITLE: &str = "Panel Library";
+/// Shelf layout geometry inspired by the Electron Library: books sit at a shared
+/// proportional scale on a subtle 42px ledge carrying their titles.
+const SIDEBAR_WIDTH: f32 = 222.;
+const GUTTER: f32 = 24.;
+const LEDGE_H: f32 = 42.;
+const LEDGE_INSET: f32 = 12.;
+const SHELF_GAP: f32 = 18.;
+const WORKSPACE_COVER: (f32, f32) = (480., 300.);
+const STORE_INVITE_COVER: (f32, f32) = (360., 240.);
+
+fn book_shadows(t: &pm_design::Tokens, hovered: bool, active_accent: bool) -> Vec<BoxShadow> {
+    let dark = t.scheme == pm_design::Scheme::Dark;
+    let mut shadows = Vec::with_capacity(4);
+    if active_accent {
+        shadows.push(BoxShadow {
+            color: rgb(t.colors.accent).into(),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(2.),
+            inset: true,
+        });
+    } else {
+        shadows.push(BoxShadow {
+            color: kit::ink(
+                t.colors.text,
+                if hovered {
+                    if dark { 0.12 } else { 0.10 }
+                } else if dark {
+                    0.07
+                } else {
+                    0.06
+                },
+            )
+            .into(),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(1.),
+            inset: true,
+        });
+    }
+    if hovered {
+        shadows.push(BoxShadow {
+            color: kit::ink(0x000000, if dark { 0.18 } else { 0.08 }).into(),
+            offset: point(px(0.), px(1.)),
+            blur_radius: px(2.),
+            spread_radius: px(0.),
+            inset: false,
+        });
+        shadows.push(BoxShadow {
+            color: kit::ink(0x000000, if dark { 0.44 } else { 0.20 }).into(),
+            offset: point(px(0.), px(12.)),
+            blur_radius: px(26.),
+            spread_radius: px(-8.),
+            inset: false,
+        });
+    } else {
+        shadows.push(BoxShadow {
+            color: kit::ink(0x000000, if dark { 0.14 } else { 0.06 }).into(),
+            offset: point(px(0.), px(1.)),
+            blur_radius: px(2.),
+            spread_radius: px(0.),
+            inset: false,
+        });
+        shadows.push(BoxShadow {
+            color: kit::ink(0x000000, if dark { 0.30 } else { 0.14 }).into(),
+            offset: point(px(0.), px(6.)),
+            blur_radius: px(18.),
+            spread_radius: px(-8.),
+            inset: false,
+        });
+    }
+    shadows
+}
+
+fn shelf_row(t: &pm_design::Tokens) -> Div {
+    let ledge_alpha = if t.scheme == pm_design::Scheme::Dark {
+        0.055
+    } else {
+        0.045
+    };
+    div()
+        .relative()
+        .flex_none()
+        .flex()
+        .items_end()
+        .gap(px(SHELF_GAP))
+        .px(px(LEDGE_INSET))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .h(px(LEDGE_H))
+                .corner(t, t.radius.lg)
+                .bg(linear_gradient(
+                    180.,
+                    linear_color_stop(kit::ink(t.colors.text, 0.), 0.),
+                    linear_color_stop(kit::ink(t.colors.text, ledge_alpha), 0.75),
+                )),
+        )
+}
 
 fn panel_action(open: bool, elapsed: Option<std::time::Duration>) -> &'static str {
     if open && elapsed.is_some_and(|t| t < std::time::Duration::from_millis(1500)) {
@@ -257,7 +359,7 @@ impl PanelLibrary {
             if cache.len() >= 8 {
                 cache.clear();
             }
-            cache.insert(key.clone(), pack_rows(widths, width, 16.));
+            cache.insert(key.clone(), pack_rows(widths, width, SHELF_GAP));
         }
         cache[&key].clone()
     }
@@ -594,11 +696,48 @@ impl PanelLibrary {
         let keyboard_delete = delete_command.clone();
         let art = card.origin != Origin::BuiltIn;
         let (from, to) = crate::store_window::art(&seed);
-        let preview = div()
+        let just_added = action == "Added ✓";
+        let hovered = hover > 0.08;
+        let clipped = panel_size(&card.id).1 > 540.;
+        let floating_add = if just_added {
+            div()
+                .id(SharedString::from(format!("library-action-{}", card.id)))
+                .h(px(28.))
+                .px(px(9.))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .rounded(px(t.radius.sm))
+                .bg(rgb(c.accent))
+                .elevated(t, pm_design::Elevation::Menu)
+                .text_role(t, Text::Caption)
+                .font_weight(FontWeight(t.typography.medium_weight))
+                .text_color(rgb(c.selected_text))
+                .child(kit.symbol("checkmark", 11., Weight::Semibold, c.selected_text))
+                .child("Added")
+                .into_any_element()
+        } else {
+            kit.icon_button(
+                format!("library-action-{}", card.id),
+                if card.open { "eye" } else { "plus" },
+                label.clone(),
+                false,
+            )
+            .size(px(28.))
+            .rounded(px(t.radius.sm))
+            .bg(rgb(c.floating))
+            .elevated(t, pm_design::Elevation::Menu)
+            .on_click(cx.listener(move |v, _, _, cx| {
+                cx.stop_propagation();
+                v.send(action_command.clone(), cx)
+            }))
+            .into_any_element()
+        };
+        let cover = div()
             .id(SharedString::from(format!("library-panel-{}", card.id)))
             .track_focus(self.focus.get(&card.id).expect("cover focus"))
             .role(Role::Button)
-            .aria_label(label.clone())
+            .aria_label(label)
             .tab_index(0)
             .focus_visible_style(|s| {
                 s.shadow(vec![BoxShadow {
@@ -625,11 +764,13 @@ impl PanelLibrary {
             .w(px(w))
             .h(px(h))
             .overflow_hidden()
+            .corner(t, t.radius.lg)
+            .shadow(book_shadows(t, hovered, false))
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(10.))
+            .gap(px(8.))
             .bg(rgb(c.panel))
             .active_style(|s| {
                 if art {
@@ -651,7 +792,7 @@ impl PanelLibrary {
             })
             .child(kit.symbol(
                 pm_shell::symbol::panel_symbol_with_manifest(&card.id, manifest_icon),
-                24.,
+                26.,
                 Weight::Regular,
                 if art { 0xffffff } else { c.muted },
             ))
@@ -663,9 +804,9 @@ impl PanelLibrary {
                     .text_role(t, Text::Caption)
                     .font_weight(FontWeight(t.typography.medium_weight))
                     .text_color(if art {
-                        kit::ink(0xffffff, 0.92)
+                        kit::ink(0xffffff, 0.94)
                     } else {
-                        rgb(c.muted).into()
+                        rgb(c.secondary).into()
                     })
                     .child(card.title.clone()),
             )
@@ -689,128 +830,91 @@ impl PanelLibrary {
                             .object_fit(ObjectFit::Fill)
                             .opacity(fade),
                     )
+                    .when(clipped, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .h(px(44.))
+                                .bg(linear_gradient(
+                                    180.,
+                                    linear_color_stop(kit::ink(c.panel, 0.), 0.),
+                                    linear_color_stop(kit::ink(c.panel, 0.82), 1.),
+                                )),
+                        )
+                    })
             }))
             .child(
                 div()
                     .absolute()
-                    .top(px(t.space.sm))
-                    .right(px(t.space.sm))
-                    .opacity(hover)
+                    .top(px(8.))
+                    .right(px(8.))
+                    .opacity(if just_added { 1. } else { hover })
                     .flex()
-                    .gap(px(4.))
+                    .items_center()
+                    .gap(px(6.))
                     .children(delete_command.map(|command| {
                         kit.destructive_icon_button(
                             format!("library-delete-{}", card.id),
                             "trash",
                             format!("Delete {}", card.title),
                         )
-                        .rounded(px((t.radius.lg - t.space.sm).max(t.radius.xs)))
+                        .size(px(28.))
+                        .rounded(px(t.radius.sm))
                         .bg(rgb(c.floating))
+                        .elevated(t, pm_design::Elevation::Menu)
                         .on_click(cx.listener(move |v, _, _, cx| {
                             cx.stop_propagation();
                             v.send(command.clone(), cx)
                         }))
-                    })),
+                    }))
+                    .child(floating_add),
             )
             .on_click(cx.listener(move |v, _, _, cx| v.send(click.clone(), cx)));
-        let action_btn = kit
-            .button(
-                format!("library-action-{}", card.id),
-                action,
-                if action == "Added ✓" {
-                    kit::Button::Primary
-                } else if card.open {
-                    kit::Button::Quiet
-                } else {
-                    kit::Button::Neutral
-                },
-                None,
-                None,
-            )
-            .h(px(24.))
-            .px(px(10.))
-            .flex_none()
-            .on_click(cx.listener(move |v, _, _, cx| {
-                cx.stop_propagation();
-                v.send(action_command.clone(), cx)
-            }));
-        let card_shell = div()
+        let book_subline = if let Some(error) = self.errors.get(&card.id) {
+            Some((error.clone(), c.danger))
+        } else if just_added {
+            Some(("Added ✓".to_string(), c.accent_text))
+        } else {
+            subline.map(|s| (s, c.muted))
+        };
+        let book = div()
             .id(SharedString::from(format!("library-panel-card-{}", card.id)))
+            .relative()
             .flex_none()
             .w(px(w))
             .flex()
             .flex_col()
-            .overflow_hidden()
-            .corner(t, t.radius.lg)
-            .bg(rgb(c.raised))
-            .border_1()
-            .border_color(kit::ink(
-                c.text,
-                if hover > 0.1 {
-                    t.translucency.selected
-                } else {
-                    t.translucency.line
-                },
-            ))
-            .elevated(
-                t,
-                if hover > 0.1 {
-                    pm_design::Elevation::Menu
-                } else {
-                    pm_design::Elevation::Raised
-                },
-            )
-            .child(preview)
+            .child(cover)
             .child(
                 div()
                     .w_full()
-                    .h(px(46.))
-                    .px(px(12.))
-                    .border_t_1()
-                    .border_color(kit::ink(c.text, t.translucency.line))
+                    .h(px(LEDGE_H))
+                    .pl(px(14.))
+                    .pr(px(10.))
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.))
+                    .flex_col()
+                    .justify_center()
+                    .gap(px(1.))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .flex()
-                            .flex_col()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_role(t, Text::Body)
-                                    .font_weight(FontWeight(t.typography.medium_weight))
-                                    .text_color(rgb(c.text))
-                                    .child(card.title.clone()),
-                            )
-                            .children(subline.map(|s| {
-                                div()
-                                    .truncate()
-                                    .text_role(t, Text::Caption)
-                                    .text_color(rgb(c.muted))
-                                    .child(s)
-                            })),
+                            .truncate()
+                            .text_role(t, Text::Body)
+                            .font_weight(FontWeight(t.typography.medium_weight))
+                            .text_color(rgb(c.text))
+                            .child(card.title.clone()),
                     )
-                    .child(action_btn),
+                    .children(book_subline.map(|(text, color)| {
+                        div()
+                            .truncate()
+                            .text_role(t, Text::Caption)
+                            .text_color(rgb(color))
+                            .child(text)
+                    })),
             );
-        div()
-            .flex_none()
-            .w(px(w))
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .child(kit.track_hover(card_shell, key))
-            .children(self.errors.get(&card.id).map(|error| {
-                div()
-                    .text_role(t, Text::Caption)
-                    .text_color(rgb(c.danger))
-                    .child(error.clone())
-            }))
-            .into_any_element()
+        kit.track_hover(book, key).into_any_element()
     }
     fn workspace_card(
         &self,
@@ -822,7 +926,7 @@ impl PanelLibrary {
     ) -> AnyElement {
         let t = &kit.t;
         let c = &t.colors;
-        let (w, h) = cover_size((400., 250.), scale, width);
+        let (w, h) = cover_size(WORKSPACE_COVER, scale, width);
         let layout = self
             .editor
             .as_ref()
@@ -835,8 +939,8 @@ impl PanelLibrary {
             })
             .or_else(|| workspace::preset(&card.id).as_ref().map(workspace::layout));
         let names = pm_shell::layout::Panels::new(Vec::new());
-        let map_inset = t.metrics.gap;
-        let mut map = div().size_full().flex().gap(px(t.space.xs)).p(px(map_inset));
+        let map_inset = 6.;
+        let mut map = div().size_full().flex().gap(px(4.)).p(px(map_inset));
         if let Some(layout) = layout {
             for dock in &layout.docks {
                 let mut col = div().h_full().flex().flex_col().gap(px(4.));
@@ -853,21 +957,26 @@ impl PanelLibrary {
                             .min_h(px(0.))
                             .overflow_hidden()
                             .flex()
+                            .flex_col()
                             .items_center()
                             .justify_center()
-                            .gap(px(4.))
+                            .gap(px(3.))
+                            .px(px(2.))
                             .rounded(px(t.radius.nested(t.radius.lg, map_inset)))
                             .bg(kit::ink(c.text, t.translucency.hover))
                             .child(kit.symbol(
                                 pm_shell::symbol::panel_symbol(id),
-                                14.,
+                                12.,
                                 Weight::Regular,
-                                c.secondary,
+                                c.muted,
                             ))
                             .child(
                                 div()
+                                    .max_w_full()
                                     .truncate()
-                                    .text_role(t, Text::Caption)
+                                    .text_size(px(10.))
+                                    .line_height(px(12.))
+                                    .font_weight(FontWeight(t.typography.medium_weight))
                                     .text_color(rgb(c.secondary))
                                     .child(names.title(id).to_owned()),
                             ),
@@ -886,7 +995,8 @@ impl PanelLibrary {
         } else {
             kit.hovered(key)
         };
-        let preview = div()
+        let hovered = hover > 0.08;
+        let cover = div()
             .id(SharedString::from(format!("library-workspace-{}", card.id)))
             .relative()
             .role(Role::Button)
@@ -923,14 +1033,18 @@ impl PanelLibrary {
             }))
             .w(px(w))
             .h(px(h))
+            .overflow_hidden()
+            .corner(t, t.radius.lg)
             .bg(rgb(c.panel))
+            .shadow(book_shadows(t, hovered, card.active))
+            .active_style(|s| s.bg(rgb(pm_design::color::mix(c.panel, c.text, 0.04))))
             .child(map)
             .when(!card.builtin, |d| {
                 d.child(
                     div()
                         .absolute()
-                        .top(px(t.space.sm))
-                        .right(px(t.space.sm))
+                        .top(px(8.))
+                        .right(px(8.))
                         .opacity(hover)
                         .child(
                             kit.destructive_icon_button(
@@ -938,8 +1052,10 @@ impl PanelLibrary {
                                 "trash",
                                 format!("Delete {}", card.name),
                             )
-                            .rounded(px((t.radius.lg - t.space.sm).max(t.radius.xs)))
+                            .size(px(28.))
+                            .rounded(px(t.radius.sm))
                             .bg(rgb(c.floating))
+                            .elevated(t, pm_design::Elevation::Menu)
                             .on_click(cx.listener(
                                 move |v, _, _, cx| {
                                     cx.stop_propagation();
@@ -955,55 +1071,29 @@ impl PanelLibrary {
                 )
             })
             .on_click(cx.listener(move |v, _, _, cx| v.send(activate.clone(), cx)));
-        let card_shell = div()
+        let book = div()
             .id(SharedString::from(format!(
                 "library-workspace-card-{}",
                 card.id
             )))
+            .relative()
             .w(px(w))
             .flex_none()
             .flex()
             .flex_col()
-            .overflow_hidden()
-            .corner(t, t.radius.lg)
-            .bg(rgb(c.raised))
-            .border_1()
-            .border_color(if card.active {
-                rgb(c.accent).into()
-            } else {
-                kit::ink(
-                    c.text,
-                    if hover > 0.1 {
-                        t.translucency.selected
-                    } else {
-                        t.translucency.line
-                    },
-                )
-            })
-            .elevated(
-                t,
-                if hover > 0.1 {
-                    pm_design::Elevation::Menu
-                } else {
-                    pm_design::Elevation::Raised
-                },
-            )
-            .child(preview)
+            .child(cover)
             .child(
                 div()
                     .w_full()
-                    .h(px(46.))
-                    .px(px(12.))
-                    .border_t_1()
-                    .border_color(kit::ink(c.text, t.translucency.line))
+                    .h(px(LEDGE_H))
+                    .pl(px(14.))
+                    .pr(px(10.))
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.))
+                    .flex_col()
+                    .justify_center()
+                    .gap(px(1.))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(0.))
                             .truncate()
                             .text_role(t, Text::Body)
                             .font_weight(FontWeight(t.typography.medium_weight))
@@ -1012,13 +1102,8 @@ impl PanelLibrary {
                     )
                     .child(
                         div()
-                            .flex_none()
+                            .truncate()
                             .text_role(t, Text::Caption)
-                            .font_weight(FontWeight(if card.active {
-                                t.typography.medium_weight
-                            } else {
-                                t.typography.regular_weight
-                            }))
                             .text_color(rgb(if card.active {
                                 c.accent_text
                             } else {
@@ -1031,7 +1116,7 @@ impl PanelLibrary {
                             }),
                     ),
             );
-        kit.track_hover(card_shell, key).into_any_element()
+        kit.track_hover(book, key).into_any_element()
     }
 }
 impl Drop for PanelLibrary {
@@ -1047,11 +1132,12 @@ impl Render for PanelLibrary {
         let t = self.tokens.clone();
         let kit = Kit::new(&t, &self.motion, Self::motion, window, cx);
         let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
-        let (ground, ground_alpha) = t.ground();
+        let (_, ground_alpha) = t.ground();
+        let canvas = pm_design::color::mix(c.panel, c.window, 0.45);
         if self.search.is_none() && pm_shell::text::available(window) {
             let search = cx.new(|cx| {
                 NativeControl::header_search(
-                    "Search panels & workspaces",
+                    "Search",
                     "panel-library-search",
                     &self.query,
                     &t,
@@ -1116,31 +1202,51 @@ impl Render for PanelLibrary {
                 }
             })
         };
+        let search_box = self
+            .search
+            .clone()
+            .map_or_else(
+                || kit.search(None, None).w_full().h(px(34.)),
+                |field| {
+                    div()
+                        .w_full()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .h(px(34.))
+                        .child(field)
+                },
+            );
         let mut sidebar = div()
             .flex()
             .flex_col()
             .flex_none()
             .gap(px(2.))
-            .w(px(m.settings_sidebar))
+            .w(px(SIDEBAR_WIDTH))
             .h_full()
-            .px(px(Kit::SIDEBAR_INSET))
-            .pb(px(m.inset))
-            .border_r_1()
-            .border_color(kit::ink(c.text, t.translucency.line))
-            .bg(pm_shell::view::tint(ground, ground_alpha))
-            .child(drag_bar(div().flex_none().h(px(m.toolbar))));
+            .pl(px(20.))
+            .pr(px(10.))
+            .pb(px(16.))
+            .child(drag_bar(div().flex_none().h(px(m.toolbar))))
+            .child(
+                div()
+                    .flex_none()
+                    .w_full()
+                    .mb(px(10.))
+                    .child(search_box),
+            );
         for page in Page::ALL {
             let heading = match page {
-                Page::Panels(None) => Some(("PANELS", false)),
-                Page::Workspaces(None) => Some(("WORKSPACES", true)),
+                Page::Panels(None) => Some(("Panels", false)),
+                Page::Workspaces(None) => Some(("Workspaces", true)),
                 _ => None,
             };
             if let Some((heading, spaced)) = heading {
                 sidebar = sidebar.child(
                     div()
-                        .pt(px(if spaced { t.space.lg } else { t.space.xs }))
-                        .pb(px(t.space.xs))
-                        .px(px(t.space.md))
+                        .pt(px(if spaced { 14. } else { 4. }))
+                        .pb(px(4.))
+                        .px(px(10.))
                         .text_role(&t, Text::Caption)
                         .font_weight(FontWeight(ty.semibold_weight))
                         .letter_spacing(px(t.text(Text::Caption).size * 0.05))
@@ -1173,19 +1279,23 @@ impl Render for PanelLibrary {
             let selected = self.page == page;
             sidebar = sidebar.child(
                 kit.row(format!("library-page-{page:?}"), selected)
+                    .h(px(32.))
+                    .px(px(10.))
+                    .gap(px(9.))
+                    .rounded(px(t.radius.md))
                     .role(Role::Button)
-                    // A quiet list: the page's name, no count (owner rule).
                     .aria_label(page.title().to_string())
                     .tab_index(0)
                     .child(kit.symbol(
                         symbol,
-                        m.symbol_panel,
+                        15.,
                         Weight::Regular,
                         if selected { c.text } else { c.muted },
                     ))
                     .child(
                         div()
                             .flex_1()
+                            .truncate()
                             .font_weight(FontWeight(if selected {
                                 ty.medium_weight
                             } else {
@@ -1193,6 +1303,17 @@ impl Render for PanelLibrary {
                             }))
                             .text_color(rgb(if selected { c.text } else { c.secondary }))
                             .child(page.title()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_role(&t, Text::Caption)
+                            .font_features(FontFeatures(std::sync::Arc::new(vec![(
+                                "tnum".into(),
+                                1,
+                            )])))
+                            .text_color(rgb(if selected { c.muted } else { c.faint }))
+                            .child(count.to_string()),
                     )
                     .on_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| {
                         if e.keystroke.key == "enter" {
@@ -1205,20 +1326,26 @@ impl Render for PanelLibrary {
         }
         sidebar = sidebar.child(div().flex_1()).child(
             kit.row("library-store", false)
+                .h(px(36.))
+                .px(px(10.))
+                .gap(px(9.))
+                .rounded(px(t.radius.md))
+                .bg(rgb(c.floating))
                 .role(Role::Button)
                 .aria_label("Browse the Store")
                 .tab_index(0)
-                .child(kit.symbol("basket", m.symbol_panel, Weight::Regular, c.muted))
+                .child(kit.symbol("basket", 15., Weight::Regular, c.muted))
                 .child(
                     div()
                         .flex_1()
+                        .truncate()
                         .text_color(rgb(c.secondary))
                         .child("Browse the Store"),
                 )
                 .on_click(cx.listener(|v, _, _, cx| v.send("store".into(), cx))),
         );
         let width =
-            (f32::from(window.viewport_size().width) - m.settings_sidebar - 2. * (m.inset + m.gap))
+            (f32::from(window.viewport_size().width) - SIDEBAR_WIDTH - 2. * (GUTTER + LEDGE_INSET))
                 .max(200.);
         let scale = shelf_scale(width);
         let mut shelf = div()
@@ -1228,15 +1355,10 @@ impl Render for PanelLibrary {
             .aria_label(self.page.title())
             .flex()
             .flex_col()
-            .gap(px(28.));
-        let (empty, item_count) = match self.page {
+            .gap(px(30.));
+        let empty = match self.page {
             Page::Panels(origin) => {
                 let shown = shown_panels(&panels, origin, &self.query);
-                let count_label = format!(
-                    "{} {}",
-                    shown.len(),
-                    if shown.len() == 1 { "panel" } else { "panels" }
-                );
                 for source in [Origin::BuiltIn, Origin::Yours, Origin::Store] {
                     if origin.is_some_and(|o| o != source) {
                         continue;
@@ -1245,51 +1367,70 @@ impl Render for PanelLibrary {
                     if books.is_empty() && source != Origin::Store {
                         continue;
                     }
-                    let mut section = div().flex_none().flex().flex_col().gap(px(14.));
+                    let mut section = div().flex_none().flex().flex_col().gap(px(12.));
                     if origin.is_none() {
                         section = section.child(
                             div()
+                                .px(px(LEDGE_INSET))
                                 .flex()
-                                .items_center()
+                                .items_baseline()
                                 .gap(px(8.))
-                                .text_role(&t, Text::Title)
-                                .font_weight(FontWeight(ty.semibold_weight))
-                                .child(Page::Panels(Some(source)).title()),
+                                .child(
+                                    div()
+                                        .text_role(&t, Text::Title)
+                                        .font_weight(FontWeight(ty.semibold_weight))
+                                        .text_color(rgb(c.text))
+                                        .child(Page::Panels(Some(source)).title()),
+                                )
+                                .when(!books.is_empty(), |d| {
+                                    d.child(
+                                        div()
+                                            .text_role(&t, Text::Caption)
+                                            .font_features(FontFeatures(std::sync::Arc::new(vec![
+                                                ("tnum".into(), 1),
+                                            ])))
+                                            .text_color(rgb(c.faint))
+                                            .child(books.len().to_string()),
+                                    )
+                                }),
                         );
                     }
+                    let (store_w, store_h) = cover_size(STORE_INVITE_COVER, scale, width);
                     let mut widths: Vec<_> = books
                         .iter()
                         .map(|p| cover_size(panel_size(&p.id), scale, width).0)
                         .collect();
                     if source == Origin::Store && self.query.trim().is_empty() {
-                        widths.push(196.);
+                        widths.push(store_w);
                     }
+                    let mut rows_col = div().flex_none().flex().flex_col().gap(px(24.));
                     for row in self.rows(&widths, width) {
-                        section = section.child(
-                            div()
-                                .flex_none()
-                                .flex()
-                                .items_end()
-                                .gap(px(16.))
-                                .children(row.into_iter().map(|i| {
-                                    if i < books.len() {
-                                        self.panel_card(books[i], &kit, scale, width, cx)
-                                    } else {
-                                        div()
-                                            .flex_none()
-                                            .w(px(196.))
-                                            .flex()
-                                            .flex_col()
-                                            .overflow_hidden()
-                                            .corner(&t, t.radius.lg)
-                                            .border_1()
-                                            .border_color(kit::ink(c.text, t.translucency.line))
-                                            .bg(rgb(c.raised))
-                                            .child(
-                                                kit.row("library-find-store", false)
-                                                    .w_full()
-                                                    .h(px(172.))
+                        rows_col = rows_col.child(shelf_row(&t).children(row.into_iter().map(
+                            |i| {
+                                if i < books.len() {
+                                    self.panel_card(books[i], &kit, scale, width, cx)
+                                } else {
+                                    let store_key = kit::key("library-find-store-cover");
+                                    div()
+                                        .relative()
+                                        .flex_none()
+                                        .w(px(store_w))
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            kit.wash(
+                                                div()
+                                                    .id("library-find-store")
+                                                    .role(Role::Button)
+                                                    .aria_label("Find panels in the Store")
+                                                    .w(px(store_w))
+                                                    .h(px(store_h))
+                                                    .overflow_hidden()
+                                                    .corner(&t, t.radius.lg)
+                                                    .bg(rgb(c.fill))
+                                                    .flex()
                                                     .flex_col()
+                                                    .items_center()
                                                     .justify_center()
                                                     .gap(px(8.))
                                                     .px(px(16.))
@@ -1303,43 +1444,42 @@ impl Render for PanelLibrary {
                                                         div()
                                                             .text_center()
                                                             .text_role(&t, Text::Body)
+                                                            .font_weight(FontWeight(
+                                                                ty.medium_weight,
+                                                            ))
                                                             .text_color(rgb(c.secondary))
                                                             .child("Find panels in the Store"),
                                                     )
                                                     .on_click(cx.listener(|v, _, _, cx| {
                                                         v.send("store".into(), cx)
                                                     })),
-                                            )
-                                            .into_any_element()
-                                    }
-                                })),
-                        );
+                                                store_key,
+                                                t.radius.lg,
+                                            ),
+                                        )
+                                        .child(div().w_full().h(px(LEDGE_H)))
+                                        .into_any_element()
+                                }
+                            },
+                        )));
                     }
+                    section = section.child(rows_col);
                     shelf = shelf.child(section);
                 }
-                (shown.is_empty(), count_label)
+                shown.is_empty()
             }
             Page::Workspaces(builtin) => {
                 let shown = shown_workspaces(&workspaces, builtin, &self.query);
-                let count_label = format!(
-                    "{} {}",
-                    shown.len(),
-                    if shown.len() == 1 {
-                        "workspace"
-                    } else {
-                        "workspaces"
-                    }
-                );
-                let widths = vec![cover_size((400., 250.), scale, width).0; shown.len()];
+                let widths = vec![cover_size(WORKSPACE_COVER, scale, width).0; shown.len()];
+                let mut rows_col = div().flex_none().flex().flex_col().gap(px(24.));
                 for row in self.rows(&widths, width) {
-                    shelf = shelf.child(
-                        div().flex_none().flex().items_end().gap(px(16.)).children(
-                            row.into_iter()
-                                .map(|i| self.workspace_card(&shown[i], &kit, scale, width, cx)),
-                        ),
-                    );
+                    rows_col = rows_col.child(shelf_row(&t).children(
+                        row.into_iter()
+                            .map(|i| self.workspace_card(&shown[i], &kit, scale, width, cx)),
+                    ));
                 }
-                (shown.is_empty(), count_label)
+                shelf = shelf.child(rows_col);
+                shown.is_empty()
             }
         };
         let fade = if t.accessibility.reduce_motion {
@@ -1421,66 +1561,36 @@ impl Render for PanelLibrary {
                 .flex_1()
                 .overflow_y_scroll()
                 .track_scroll(&self.scroll)
-                .px(px(m.inset + m.gap))
-                .pt(px(t.space.lg))
-                .pb(px(m.inset + t.space.lg))
+                .px(px(GUTTER))
+                .pt(px(6.))
+                .pb(px(32.))
                 .opacity(fade)
                 .child(shelf)
                 .into_any_element()
         };
-        let search_box = self
-            .search
-            .clone()
-            .map_or_else(
-                || kit.search(None, None),
-                |field| {
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .h(px(m.control))
-                        .child(field)
-                },
-            )
-            .w(px(220.));
         let header = drag_bar(
             div()
                 .flex()
                 .flex_none()
                 .items_center()
                 .justify_between()
-                .gap(px(m.inset))
-                .h(px(m.toolbar))
-                .px(px(m.inset + m.gap))
-                .border_b_1()
-                .border_color(kit::ink(c.text, t.translucency.line)),
+                .gap(px(10.))
+                .h(px(54.))
+                .px(px(GUTTER + LEDGE_INSET)),
         )
         .child(
             div()
-                .flex()
-                .items_baseline()
-                .gap(px(t.space.md))
-                .child(
-                    div()
-                        .text_role(&t, Text::Headline)
-                        .child(self.page.title()),
-                )
-                .child(
-                    div()
-                        .text_role(&t, Text::Caption)
-                        .text_color(rgb(c.muted))
-                        .child(item_count),
-                ),
+                .text_role(&t, Text::Headline)
+                .font_weight(FontWeight(ty.semibold_weight))
+                .child(self.page.title()),
         )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(t.space.sm))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(search_box)
-                .when(matches!(self.page, Page::Workspaces(_)), |d| {
-                    d.child(
+        .when(matches!(self.page, Page::Workspaces(_)), |d| {
+            d.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
                         kit.button(
                             "library-save",
                             "Save Current as New",
@@ -1494,21 +1604,25 @@ impl Render for PanelLibrary {
                                 v.send("layout:save".into(), cx)
                             }))
                         }),
-                    )
-                }),
-        );
+                    ),
+            )
+        });
         let content = div()
             .flex_1()
             .min_w(px(0.))
             .h_full()
             .flex()
             .flex_col()
-            .bg(rgb(c.panel))
             .child(header)
             .child(body);
         div()
             .size_full()
             .id("panel-library-root")
+            .bg(if t.translucent() {
+                pm_shell::view::tint(canvas, ground_alpha)
+            } else {
+                rgb(canvas).into()
+            })
             .tab_group()
             .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "tab" {
@@ -1645,10 +1759,7 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
             .window_min_size(Some(size(px(720.), px(400.))))
             .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
                 point(px(m.toolbar), px(m.toolbar)),
-                size(
-                    px(m.settings_width + m.settings_sidebar),
-                    px(m.settings_height),
-                ),
+                size(px(1180.), px(740.)),
             )))),
         |window, cx| {
             if tokens.translucent() {
