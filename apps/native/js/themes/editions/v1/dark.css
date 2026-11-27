@@ -6,36 +6,36 @@
   color-scheme:dark;
 }
 :root{
-  --ink-rgb:245 245 245;
+  --ink-rgb:242 242 242;
   --paper-rgb:255 255 255;
-  --bg-window:#0a0a0a;
-  --bg-rail:#0a0a0a;
+  --bg-window:#111111;
+  --bg-rail:#111111;
   --bg-panel:#1a1a1a;
-  --bg-panel-2:#131313;
-  --bg-sunken:#080808;
+  --bg-panel-2:#161616;
+  --bg-sunken:#0e0e0e;
   --bg-row:color-mix(in srgb,var(--tx) 4%,var(--bg-panel));
-  --bg-row-hi:#2d2d2d;
+  --bg-row-hi:#232323;
   --bg-field:#262626;
-  --bg-float:#262626;
+  --bg-float:#2c2c2c;
   --ink-1:rgb(var(--ink-rgb) / .045);
   --ink-2:rgb(var(--ink-rgb) / .08);
   --ink-3:rgb(var(--ink-rgb) / .16);
-  --line:#343434;
+  --line:#303030;
   --line-2:rgb(var(--ink-rgb) / .11);
   --line-strong:rgb(var(--ink-rgb) / .2);
   --section-line:rgb(var(--ink-rgb) / .09);
-  --tx:#f5f5f5;
-  --tx-2:#b3b3b3;
-  --tx-3:#9d9d9d;
+  --tx:#f2f2f2;
+  --tx-2:#b4b4b4;
+  --tx-3:#949494;
   --tx-4:rgb(var(--ink-rgb) / .32);
-  --accent:#fa6310;
+  --accent:#ff6019;
   --accent-hover:color-mix(in srgb,var(--accent) 90%,white);
   --accent-dim:color-mix(in srgb,var(--accent) 12%,transparent);
   --accent-tx:color-mix(in oklab,var(--accent) 82%,var(--tx));
   --on-accent:#ffffff;
   --danger:#f36357;
-  --warning:#f59e0a;
-  --success:#40cf8e;
+  --warning:#f59e0b;
+  --success:#3fcf8e;
   --blue:#2B6FE3;
   --blue-deep:#2B4FD8;
   --cream:#A89B76;
@@ -45,9 +45,9 @@
   --green:var(--success);
   --red:var(--danger);
   --yellow:var(--warning);
-  --r-base:4px;
-  --r-xs:6px;
-  --r-sm:calc(var(--r-base) * 2);
+  --r-base:2.6666666666666665px;
+  --r-xs:4px;
+  --r-sm:calc(var(--r-base) * 2.25);
   --r-md:calc(var(--r-base) * 2);
   --r-lg:calc(var(--r-base) * 3);
   --r-xl:calc(var(--r-base) * 4);
@@ -78,7 +78,7 @@
   --ctl-raised:var(--ink-1);
   --ctl-edge-inset:inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .06),
     inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1);
-  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px #999999;
+  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px #9a9a9a;
   --shadow-raise:none;
   --shadow-panel:0 0 0 var(--hairline) rgb(var(--ink-rgb) / .09),
     0 1px 1px rgb(var(--ink-rgb) / .04),
@@ -112,35 +112,35 @@
   --gap:8px;
 }
 :root[data-theme="dark"]{
-  --ink-rgb:245 245 245;
+  --ink-rgb:242 242 242;
   --paper-rgb:255 255 255;
-  --bg-window:#0a0a0a;
-  --bg-rail:#0a0a0a;
+  --bg-window:#111111;
+  --bg-rail:#111111;
   --bg-panel:#1a1a1a;
-  --bg-panel-2:#131313;
-  --bg-sunken:#080808;
+  --bg-panel-2:#161616;
+  --bg-sunken:#0e0e0e;
   --bg-row:color-mix(in srgb,var(--tx) 4%,var(--bg-panel));
-  --bg-row-hi:#2d2d2d;
+  --bg-row-hi:#232323;
   --bg-field:#262626;
-  --bg-float:#262626;
+  --bg-float:#2c2c2c;
   --ink-1:rgb(var(--ink-rgb) / .05);
   --ink-2:rgb(var(--ink-rgb) / .09);
   --ink-3:rgb(var(--ink-rgb) / .18);
-  --line:#343434;
+  --line:#303030;
   --line-2:rgb(var(--ink-rgb) / .11);
   --line-strong:rgb(var(--ink-rgb) / .2);
   --section-line:rgb(var(--ink-rgb) / .08);
-  --tx:#f5f5f5;
-  --tx-2:#b3b3b3;
-  --tx-3:#9d9d9d;
+  --tx:#f2f2f2;
+  --tx-2:#b4b4b4;
+  --tx-3:#949494;
   --tx-4:rgb(var(--ink-rgb) / .28);
-  --accent:#fa6310;
+  --accent:#ff6019;
   --accent-hover:color-mix(in srgb,var(--accent) 90%,white);
   --accent-dim:color-mix(in srgb,var(--accent) 12%,transparent);
   --accent-tx:color-mix(in oklab,var(--accent) 82%,var(--tx));
   --danger:#f36357;
-  --warning:#f59e0a;
-  --success:#40cf8e;
+  --warning:#f59e0b;
+  --success:#3fcf8e;
   --blue:#4C8DFF;
   --blue-deep:#3B62E8;
   --cream:#E8E2CF;
@@ -151,7 +151,7 @@
   --ctl-raised:var(--ink-1);
   --ctl-edge-inset:inset 0 var(--hairline) 0 rgb(0 0 0 / .3),
     inset 0 calc(var(--hairline) * -1) 0 rgb(var(--ink-rgb) / .08);
-  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px #999999;
+  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px #9a9a9a;
   --shadow-raise:none;
   --shadow-panel:0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1),
     0 1px 1px rgb(0 0 0 / .3),
@@ -164,15 +164,15 @@
   --ui-corner-smoothing:superellipse(1.6);
 }
 :root{
-  --bg-window-solid:#0a0a0a;
-  --bg-window:#0a0a0a;
+  --bg-window-solid:#111111;
+  --bg-window:#111111;
 }
 :root[data-theme="dark"]{
-  --bg-window-solid:#0a0a0a;
-  --bg-window:#0a0a0a;
+  --bg-window-solid:#111111;
+  --bg-window:#111111;
 }
 :root[data-theme="dark"]{
-  --bg-float:#262626;
+  --bg-float:#2c2c2c;
 }
 :root{
   --bg-content:color-mix(in srgb,color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid)) 94%,transparent);

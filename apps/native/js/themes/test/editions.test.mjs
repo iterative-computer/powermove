@@ -326,7 +326,7 @@ test("density, source specificity, inline/workspace, important and radius alias 
   assert.equal(values["--bg-panel"], "#1a1a1a"); // dark specificity beats later :root
   assert.equal(values["--row-h"], "24px");
   assert.equal(scalar(values["--r-lg"]).value, 24);
-  assert.equal(scalar(values["--r-sm"]).value, 16);
+  assert.equal(scalar(values["--r-sm"]).value, 18);
   assert.equal(result.surfaces.panel.base.style.background, "#123456");
   assert.equal(result.surfaces.panel.base.style.padding, "7px");
   assert.equal(edition.rootAttributes["data-corpus"], "enabled");
@@ -600,11 +600,7 @@ test("accessibility modes compose and preserve explicit authored colours", () =>
   assert.equal(values["--line-strong"], values["--line"]);
   assert.equal(values["--dur-1"], "75ms"); // existing extension media/motion rules remain in charge
   assert.equal(values["--hairline"], "0.5px");
-  const focus = input.colors.focus.toString(16).padStart(6, "0");
-  assert.equal(
-    values["--focus-ring"],
-    `0 0 0 2px #123456,0 0 0 5px #${focus}`,
-  );
+  assert.equal(values["--focus-ring"], "0 0 0 2px #123456,0 0 0 5px #e0e0e0");
 });
 
 test("bad native inputs and unresolved fixed scheme fail visibly", () => {
