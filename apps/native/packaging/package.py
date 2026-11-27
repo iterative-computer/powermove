@@ -129,6 +129,12 @@ def info(channel, version, build, sparkle_feed=None, sparkle_key=None, bundle_id
     return value
 
 
+def rpaths(binary):
+    """LC_RPATH entries of a Mach-O file (otool -l)."""
+    text = subprocess.run(["otool", "-l", str(binary)], check=True, capture_output=True, text=True).stdout
+    return sorted(set(re.findall(r"^\s*path (.+?) \(offset \d+\)$", text, re.M)))
+
+
 def new_destination(path):
     path = Path(path).absolute()
     if path.exists() or path.is_symlink():
@@ -211,6 +217,22 @@ def bundle(executable, destination, channel, version, build,
         if compile_assets:
             run(["install_name_tool", "-rpath", "@executable_path/../lib",
                  "@executable_path/../Frameworks", target])
+    # The app and the tools link FFmpeg's libraries by @rpath (libavformat.63.dylib
+    # and so on): each goes into Frameworks under that name, and the executable
+    # loses the build machine's absolute rpath so it loads only what it carries.
+    frameworks = contents / "Frameworks"
+    frameworks.mkdir()
+    libraries = sorted(p for p in (ffmpeg_dir / "lib").glob("lib*.dylib")
+                       if re.fullmatch(r"lib\w+\.\d+\.dylib", p.name))
+    if not libraries:
+        raise ValueError("FFmpeg libraries are missing from PM_FFMPEG_DIR/lib")
+    for library in libraries:
+        shutil.copyfile(library.resolve(strict=True), frameworks / library.name)
+        (frameworks / library.name).chmod(0o755)
+    if compile_assets:
+        for rpath in rpaths(contents / "MacOS" / "powermove-native"):
+            if not rpath.startswith(("@executable_path", "@loader_path")):
+                run(["install_name_tool", "-delete_rpath", rpath, contents / "MacOS" / "powermove-native"])
     # sign() discovers both Mach-O tools and signs them with the other helpers.
     # The layout provider discovery reads: <name>/bin/<name> under Resources.
     if claude_runtime:
@@ -245,7 +267,6 @@ def bundle(executable, destination, channel, version, build,
              "--output-partial-info-plist", resources / "asset-info.plist",
              resources / "Assets.xcassets"])
     if sparkle_framework:
-        (contents / "Frameworks").mkdir()
         shutil.copytree(framework, contents / "Frameworks" / "Sparkle.framework", symlinks=True)
     return destination
 
@@ -288,6 +309,9 @@ def sign(app, identity=None, *, adhoc_proof=False):
                             info.get("CFBundleIdentifier", "")):
             raise ValueError("ad-hoc proof signing is limited to proof and dev bundles")
     timestamp = "--timestamp=none" if adhoc_proof else "--timestamp"
+    # Ad-hoc code has no Team ID, so the hardened runtime's library validation
+    # would refuse the app's own dylibs and Sparkle; Developer ID always has it.
+    runtime = [] if adhoc_proof else ["--options", "runtime"]
     proof_requirement = ["--requirements", '=designated => identifier "' + info["CFBundleIdentifier"] + '"'] if adhoc_proof else []
     if not (app / "Contents" / "Resources" / "Assets.car").is_file():
         raise ValueError("compile the asset catalog before distribution signing")
@@ -295,9 +319,9 @@ def sign(app, identity=None, *, adhoc_proof=False):
     for target in nested_code(app):
         if target == app / "Contents" / "MacOS" / "powermove-native":
             continue  # app signing seals its executable with the main entitlements
-        run(["codesign", "--force", timestamp, "--options", "runtime", "--sign", identity,
+        run(["codesign", "--force", timestamp, *runtime, "--sign", identity,
              "--preserve-metadata=identifier,entitlements", target])
-    run(["codesign", "--force", timestamp, "--options", "runtime", "--sign", identity,
+    run(["codesign", "--force", timestamp, *runtime, "--sign", identity,
          "--entitlements", HERE / "entitlements" / "app.plist", *proof_requirement, app])
     run(["codesign", "--verify", "--deep", "--strict", "--all-architectures", app])
 

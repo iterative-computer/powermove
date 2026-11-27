@@ -41,6 +41,10 @@ class PackagingTests(unittest.TestCase):
         (self.ffmpeg_dir / "bin").mkdir(parents=True)
         for tool in ("ffmpeg", "ffprobe"):
             shutil.copy2(self.binary, self.ffmpeg_dir / "bin" / tool)
+        (self.ffmpeg_dir / "lib").mkdir()
+        shutil.copy2(self.binary, self.ffmpeg_dir / "lib/libavformat.63.1.102.dylib")
+        (self.ffmpeg_dir / "lib/libavformat.63.dylib").symlink_to("libavformat.63.1.102.dylib")
+        (self.ffmpeg_dir / "lib/libavformat.dylib").symlink_to("libavformat.63.1.102.dylib")
         patch.dict(os.environ, {"PM_FFMPEG_DIR": str(self.ffmpeg_dir)}).start()
         self.app = self.root / "Powermove.app"
 
@@ -54,6 +58,19 @@ class PackagingTests(unittest.TestCase):
             run.assert_any_call(["install_name_tool", "-rpath", "@executable_path/../lib",
                 "@executable_path/../Frameworks", target])
             self.assertIn(target, package.nested_code(self.app))
+
+    def test_ffmpeg_libraries_travel_under_their_install_names(self):
+        with patch.object(package, "macos"), patch.object(package, "run") as run, \
+                patch.object(package, "rpaths", return_value=["/build/ffmpeg/out/lib", "@executable_path/../Frameworks"]):
+            package.bundle(self.binary, self.app, "cutover", "2.0.0", "12")
+        frameworks = self.app / "Contents/Frameworks"
+        self.assertEqual(sorted(p.name for p in frameworks.iterdir()), ["libavformat.63.dylib"])
+        self.assertFalse((frameworks / "libavformat.63.dylib").is_symlink())
+        self.assertIn(frameworks / "libavformat.63.dylib", package.nested_code(self.app))
+        run.assert_any_call(["install_name_tool", "-delete_rpath", "/build/ffmpeg/out/lib",
+                             self.app / "Contents/MacOS/powermove-native"])
+        self.assertNotIn(["install_name_tool", "-delete_rpath", "@executable_path/../Frameworks",
+                          self.app / "Contents/MacOS/powermove-native"], [c.args[0] for c in run.call_args_list])
 
     def test_missing_media_tool_refuses_bundle(self):
         (self.ffmpeg_dir / "bin/ffprobe").unlink()
@@ -224,7 +241,9 @@ class PackagingTests(unittest.TestCase):
         with patch.object(package, "macos"), patch.object(package, "run") as run:
             package.sign(self.app, "synthetic identity selector")
         calls = [[str(x) for x in c.args[0]] for c in run.call_args_list]
-        self.assertEqual(calls[0][-1], str(helper))
+        nested = [c[-1] for c in calls[:-2]]
+        self.assertIn(str(helper), nested)  # inside out: nested code before the app
+        self.assertIn(str(self.app / "Contents/Frameworks/libavformat.63.dylib"), nested)
         self.assertEqual(calls[-2][-1], str(self.app))
         self.assertIn("--entitlements", calls[-2])
         self.assertIn("--all-architectures", calls[-1])
@@ -355,6 +374,7 @@ class AdhocProofSafetyTests(unittest.TestCase):
                 package.sign(app, identity="must-never-use", adhoc_proof=True)
                 sign = calls.call_args_list[0].args[0]
                 self.assertIn("--timestamp=none", sign)
+                self.assertNotIn("runtime", sign)
                 self.assertEqual(sign[sign.index("--sign") + 1], "-")
 
 
