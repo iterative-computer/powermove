@@ -1775,7 +1775,31 @@ impl Controller {
             nudge_idle: None,
         }
     }
+    pub(crate) fn sync_export_toolbar(&self) {
+        let activity = {
+            let tasks = self.builtins.export_tasks.lock().unwrap();
+            crate::export_coordinator::toolbar_activity(self.builtins.export_job.as_deref(), &tasks)
+        };
+        self.host.borrow_mut().set_export_progress(activity);
+    }
+
     pub fn initialize(&mut self, opening: Option<crate::entry::Pending>, cx: &mut Context<Self>) {
+        self.sync_export_toolbar();
+        cx.spawn(async move |this, cx| {
+            let mut sequence = None;
+            loop {
+                let current = this.update(cx, |v, _| {
+                    let current = v.builtins.export_tasks.lock().unwrap().sequence();
+                    if sequence != Some(current) {
+                        v.sync_export_toolbar();
+                    }
+                    current
+                });
+                let Ok(current) = current else { break };
+                sequence = Some(current);
+                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+            }
+        }).detach();
         self.load_recent(cx);
         match opening {
             Some(pending) => self.apply_pending(pending, cx),

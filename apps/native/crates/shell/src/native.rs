@@ -3130,6 +3130,85 @@ fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
         objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(points, weight);
     image.imageWithSymbolConfiguration(&config).unwrap_or(image)
 }
+/// The export activity shown in the toolbar. An absent activity means idle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExportActivity {
+    pub percent: Option<u8>,
+    pub count: usize,
+}
+
+impl ExportActivity {
+    fn title(self) -> String {
+        match (self.percent, self.count) {
+            (Some(percent), _) => format!("Exporting {percent}%"),
+            (None, count) if count > 1 => format!("Exporting ({count})…"),
+            (None, _) => "Exporting…".into(),
+        }
+    }
+
+    fn tooltip(self) -> String {
+        let progress = match self.percent {
+            Some(percent) => format!("Exporting · {percent}%"),
+            None => "Exporting…".into(),
+        };
+        let count = if self.count > 1 {
+            format!(" · {} exports", self.count)
+        } else {
+            String::new()
+        };
+        format!("{progress}{count} — Click to view Export")
+    }
+}
+
+#[test]
+fn export_toolbar_formats_activity() {
+    let preparing = ExportActivity { percent: None, count: 1 };
+    assert_eq!(preparing.title(), "Exporting…");
+    assert_eq!(preparing.tooltip(), "Exporting… — Click to view Export");
+
+    let multiple = ExportActivity { count: 2, ..preparing };
+    assert_eq!(multiple.title(), "Exporting (2)…");
+    let rendering = ExportActivity { percent: Some(42), ..multiple };
+    assert_eq!(rendering.title(), "Exporting 42%");
+    assert_eq!(rendering.tooltip(), "Exporting · 42% · 2 exports — Click to view Export");
+}
+
+fn export_progress_image(percent: Option<u8>) -> Retained<NSImage> {
+    let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
+        let center = NSPoint::new(
+            rect.origin.x + rect.size.width / 2.,
+            rect.origin.y + rect.size.height / 2.,
+        );
+        let radius = 6.;
+        let ring = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            NSPoint::new(center.x - radius, center.y - radius),
+            NSSize::new(radius * 2., radius * 2.),
+        ));
+        let ink = NSColor::whiteColor();
+        ring.setLineWidth(1.75);
+        ink.colorWithAlphaComponent(0.28).setStroke();
+        ring.stroke();
+        let sweep = percent.map_or(270., |p| f64::from(p.min(100)) * 3.6);
+        ink.setStroke();
+        if sweep >= 360. {
+            ring.stroke();
+        } else if sweep > 0. {
+            let arc = NSBezierPath::bezierPath();
+            arc.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise(
+                center, radius, 90., 90. - sweep, true,
+            );
+            arc.setLineWidth(1.75);
+            arc.setLineCapStyle(objc2_app_kit::NSLineCapStyle::Round);
+            arc.stroke();
+        }
+        objc2::runtime::Bool::YES
+    });
+    let image = NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(16., 16.), false, &draw);
+    image.setTemplate(true);
+    image.setAccessibilityDescription(Some(objc2_foundation::ns_string!("Export progress")));
+    image
+}
+
 impl ToolbarDelegate {
     fn new(mtm: MainThreadMarker, target: Retained<Target>, tokens: Tokens) -> Retained<Self> {
         unsafe {
@@ -3397,6 +3476,29 @@ fn agent_launcher_button(toolbar: &NSToolbar) -> Option<Retained<AgentButton>> {
 }
 
 impl Host {
+    pub fn set_export_progress(&mut self, activity: Option<ExportActivity>) {
+        let previous = self.export_activity;
+        if previous == activity {
+            return;
+        }
+        let Some(item) = self._delegate.make_cached(objc2_foundation::ns_string!("export")) else {
+            return;
+        };
+        self.export_activity = activity;
+        if let Some(activity) = activity {
+            let title = activity.title();
+            if previous.map(ExportActivity::title).as_deref() != Some(title.as_str()) {
+                item.setTitle(&NSString::from_str(&title));
+            }
+            item.setToolTip(Some(&NSString::from_str(&activity.tooltip())));
+            if previous.map(|state| state.percent) != Some(activity.percent) {
+                item.setImage(Some(&export_progress_image(activity.percent)));
+            }
+        } else {
+            self.apply_toolbar_appearance(&item);
+        }
+    }
+
     pub fn set_agent_launcher(&mut self, snapshot: crate::agent_launcher::Snapshot) {
         if let Some(button) = agent_launcher_button(&self._toolbar) {
             button.publish(snapshot, self.tokens.clone());
@@ -3551,6 +3653,10 @@ impl Host {
         };
         let mods = state.mods.borrow();
         let patch = mods.iter().find(|patch| patch.target == target);
+        if target == "export" && self.export_activity.is_some() {
+            item.setHidden(self.aside() || toolbar_hidden(&mods, &target));
+            return;
+        }
         let task = (target == "tasks")
             .then_some(self.shown_task_status.as_ref())
             .flatten();
@@ -4746,6 +4852,7 @@ pub struct Host {
     /// Last published viewer geometry (`Some(None)` = hidden); `None` before the first frame.
     last_geometry: Option<Option<SlotGeometry>>,
     _toolbar: Retained<NSToolbar>,
+    export_activity: Option<ExportActivity>,
     /// What the toolbar's Agent item shows, and the timer that turns its
     /// working ring.
     agent_status: AgentStatus,
@@ -4985,6 +5092,7 @@ impl Host {
             viewer_crop: Rc::new(Cell::new(None)),
             last_geometry: None,
             _toolbar: toolbar,
+            export_activity: None,
             agent_status: AgentStatus::default(),
             task_status: None,
             shown_task_status: None,
@@ -7109,6 +7217,9 @@ impl Host {
             popup.borrow_mut().update_tokens(&t, surface);
         }
         self.tokens = t;
+        if let Some(item) = self._delegate.make_cached(objc2_foundation::ns_string!("export")) {
+            item.setBackgroundTintColor(Some(&native_color(self.tokens.colors.accent)));
+        }
         if let Some(launcher) = agent_launcher_button(&self._toolbar) {
             launcher.set_tokens(self.tokens.clone());
         }

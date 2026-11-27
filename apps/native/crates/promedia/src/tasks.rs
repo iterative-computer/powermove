@@ -310,10 +310,13 @@ impl BackgroundTasks {
     pub fn get(&self, id: TaskId) -> Option<&Task> {
         self.tasks.get(&id)
     }
-    /// Every task, in id (queue) order: the Background Tasks window lists
-    /// all of them, grouped by project.
+    /// Every task in queue order.
+    pub fn iter(&self) -> impl Iterator<Item = &Task> {
+        self.tasks.values()
+    }
+    /// A snapshot of every task for the Background Tasks window.
     pub fn all(&self) -> Vec<Task> {
-        self.tasks.values().cloned().collect()
+        self.iter().cloned().collect()
     }
     pub fn snapshot(&self, window: &str) -> Vec<Task> {
         self.tasks
