@@ -24,4 +24,6 @@ interface CloudflareBindings {
   ANTHROPIC_API_KEY?: string;
   AERO_OPENAI_BASE_URL?: string;
   AERO_ANTHROPIC_BASE_URL?: string;
+  /** One Durable Object per Aero call (src/aero/call.ts): it owns the provider stream and settles the call. */
+  AERO_CALLS?: DurableObjectNamespace;
 }

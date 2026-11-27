@@ -12,6 +12,7 @@ import { Pool } from 'pg';
 import { databaseUrl, ports, stack, workerUrl } from './lib/local-env';
 import { FAKE_SECRET_KEY, FAKE_WEBHOOK_SECRET, startFakeStripe } from './fake-stripe';
 import { startAiSimulator } from './ai-simulator';
+import { CREDIT_NANO_USD } from '../src/aero/catalogue';
 
 const cloud = resolve(import.meta.dir, '..');
 const children: Array<ReturnType<typeof Bun.spawn>> = [];
@@ -83,9 +84,9 @@ if (mara.credits.used === 0) {
     for (const [day, credits, model] of [[0, 46, 'anthropic/claude-opus-5-5'], [1, 0, null], [2, 92, 'openai/gpt-6.2-sol'], [3, 31, 'openai/gpt-6-luna']] as const) {
       if (!model) continue;
       await pool.query(
-        `insert into credit_ledger (user_id, kind, idempotency_key, credits, model, input_tokens, output_tokens, created_at)
-         values ($1, 'spend', $2, $3, $4, $5, $6, $7) on conflict (idempotency_key) do nothing`,
-        [rows[0]!.id, `request:${rows[0]!.id}:seed-day-${day}`, credits, model, credits * 400, credits * 20, new Date(start + day * 86_400_000 + 3_600_000)],
+        `insert into credit_ledger (user_id, kind, idempotency_key, credits, period_start, period_end, model, input_tokens, fresh_input_tokens, output_tokens, cost_nano_usd, usage_source, created_at)
+         values ($1, 'spend', $2, 0, $3, $4, $5, $6, $6, $7, $8, 'reported', $9) on conflict (idempotency_key) do nothing`,
+        [rows[0]!.id, `request:${rows[0]!.id}:seed-day-${day}`, mara.period.start, mara.period.end, model, credits * 400, credits * 20, credits * CREDIT_NANO_USD, new Date(start + day * 86_400_000 + 3_600_000)],
       );
     }
   } finally { await pool.end(); }

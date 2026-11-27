@@ -1,5 +1,5 @@
 {
-  "id": "7e49b9c4-b61e-4a35-94f1-bf272ee77994",
+  "id": "fcaea369-f754-4291-bc22-19c141da1cf0",
   "prevId": "53a29bd0-932f-4a38-9392-f635e114cb89",
   "version": "7",
   "dialect": "postgresql",
@@ -156,13 +156,13 @@
           "name": "period_start",
           "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "period_end": {
           "name": "period_end",
           "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "model": {
           "name": "model",
@@ -172,6 +172,13 @@
         },
         "input_tokens": {
           "name": "input_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "fresh_input_tokens": {
+          "name": "fresh_input_tokens",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
@@ -191,6 +198,13 @@
           "notNull": true,
           "default": 0
         },
+        "cache_write_long_tokens": {
+          "name": "cache_write_long_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
         "output_tokens": {
           "name": "output_tokens",
           "type": "integer",
@@ -198,12 +212,50 @@
           "notNull": true,
           "default": 0
         },
-        "cost_micro_usd": {
-          "name": "cost_micro_usd",
+        "reasoning_tokens": {
+          "name": "reasoning_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "cost_nano_usd": {
+          "name": "cost_nano_usd",
           "type": "bigint",
           "primaryKey": false,
           "notNull": true,
           "default": 0
+        },
+        "hold_nano_usd": {
+          "name": "hold_nano_usd",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "hold_expires_at": {
+          "name": "hold_expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "output_cap": {
+          "name": "output_cap",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "usage_source": {
+          "name": "usage_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "price_version": {
+          "name": "price_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "estimated": {
           "name": "estimated",
@@ -221,8 +273,8 @@
         }
       },
       "indexes": {
-        "credit_ledger_user_created_idx": {
-          "name": "credit_ledger_user_created_idx",
+        "credit_ledger_user_period_idx": {
+          "name": "credit_ledger_user_period_idx",
           "columns": [
             {
               "expression": "user_id",
@@ -231,7 +283,7 @@
               "nulls": "last"
             },
             {
-              "expression": "created_at",
+              "expression": "period_start",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2187,7 +2239,8 @@
       "schema": "public",
       "values": [
         "grant",
-        "spend"
+        "spend",
+        "hold"
       ]
     },
     "public.moderation": {

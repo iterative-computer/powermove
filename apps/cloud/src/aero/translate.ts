@@ -66,6 +66,7 @@ function text(content: z.infer<typeof Content> | null | undefined): string {
   return typeof content === 'string' ? content : content.filter(part => part.type === 'text').map(part => (part as { text: string }).text).join('\n');
 }
 
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const DATA_URL = /^data:([a-z]+\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i;
 function userContent(content: z.infer<typeof Content>): UserModelMessage['content'] {
   if (typeof content === 'string') return content;
@@ -74,6 +75,8 @@ function userContent(content: z.infer<typeof Content>): UserModelMessage['conten
     // Only inline images: the backend never fetches a URL a client names.
     const match = DATA_URL.exec(part.image_url.url);
     if (!match) throw new UnsupportedRequest('image');
+    // Images only: a document (a PDF, anything else) is refused, never passed on as a file.
+    if (!IMAGE_TYPES.has(match[1]!.toLowerCase())) throw new UnsupportedRequest('file');
     return { type: 'image' as const, image: match[2]!, mediaType: match[1]!.toLowerCase() };
   });
 }

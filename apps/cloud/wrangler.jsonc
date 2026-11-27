@@ -6,7 +6,7 @@
   "preview_urls": false,
   "routes": [{ "pattern": "cloud.trypowermove.com", "custom_domain": true }],
   "compatibility_date": "2026-09-01",
-  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal", "durable_object_io_tasks_prevent_eviction"],
   "alias": { "@better-auth/kysely-adapter": "./src/kysely-unavailable.ts" },
   "account_id": "98dbb6e46f4901896327e5ff4035d637",
   "r2_buckets": [
@@ -20,6 +20,8 @@
     { "name": "RL_AUTH", "type": "ratelimit", "namespace_id": "2", "simple": { "limit": 10, "period": 60 } },
     { "name": "RL_ADMIN", "type": "ratelimit", "namespace_id": "3", "simple": { "limit": 120, "period": 60 } }
   ] },
+  "durable_objects": { "bindings": [{ "name": "AERO_CALLS", "class_name": "AeroCall" }] },
+  "migrations": [{ "tag": "aero-calls", "new_sqlite_classes": ["AeroCall"] }],
   "triggers": { "crons": ["0 */6 * * *"] },
   // LOCAL_POSTGRES is intentionally unset here. Set it to "1" in .dev.vars only.
   // ADMIN_ORIGIN is the admin panel (apps/admin); web sign-in hands its token back only there.

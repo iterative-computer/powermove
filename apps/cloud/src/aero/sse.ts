@@ -21,8 +21,6 @@ export class ChunkEncoder {
   private role = false;
   private readonly tools = new Map<string, { index: number; arguments: string }>();
   private readonly reasoning = new Map<string, { text: string; metadata: Record<string, unknown> }>();
-  /** Characters streamed so far, for the estimate when a stream is cut off before the provider reports usage. */
-  streamedChars = 0;
   finishReason: 'stop' | 'tool_calls' | 'length' | 'content_filter' | null = null;
   usage: Usage | null = null;
   failed = false;
@@ -39,7 +37,6 @@ export class ChunkEncoder {
     switch (part.type) {
       case 'text-delta':
         if (!part.text) return [];
-        this.streamedChars += part.text.length;
         return [this.chunk({ content: part.text })];
       case 'reasoning-start':
         this.reasoning.set(part.id, { text: '', metadata: { ...part.providerMetadata?.[this.provider] } });
@@ -50,7 +47,6 @@ export class ChunkEncoder {
         Object.assign(block.metadata, part.providerMetadata?.[this.provider]);
         this.reasoning.set(part.id, block);
         if (!part.text) return [];
-        this.streamedChars += part.text.length;
         return [this.chunk({ reasoning_content: part.text })];
       }
       case 'reasoning-end': {
@@ -71,7 +67,6 @@ export class ChunkEncoder {
         const call = this.tools.get(part.id);
         if (!call || !part.delta) return [];
         call.arguments += part.delta;
-        this.streamedChars += part.delta.length;
         return [this.chunk({ tool_calls: [{ index: call.index, function: { arguments: part.delta } }] })];
       }
       case 'tool-call': {

@@ -27,7 +27,10 @@ them on the desktop.
 - `src/aero/` the model catalogue and credit prices (`catalogue.ts`; 1 credit =
   $0.005 of list price), Chat Completions in to AI SDK `streamText` out
   (`translate.ts`, prompt caching for both providers), and AI SDK stream parts
-  back to Chat Completions SSE in the subset fx parses (`sse.ts`).
+  back to Chat Completions SSE in the subset fx parses (`sse.ts`). Each call runs in
+  a Durable Object of its own (`call.ts`, binding `AERO_CALLS`) that reserves, calls the
+  provider once and settles in exact nano-USD (`meter.ts`); uncertain bills take the whole
+  hold, and a period never spends past its grant.
 - `src/lifecycle.ts` is the state table (visibility × moderation × tombstone
   × yank). Every read decides through it.
 - `src/objects/` presence, references (the one reachability predicate shared
