@@ -26,20 +26,23 @@ export async function currentSubscription(db: Db, userId: string) {
 
 export interface Credits { included: number; used: number; remaining: number }
 export interface Period { start: Date; end: Date }
-/** A period's money in exact nano-USD: what its grants include, what requests have cost (settled spends, and what
-    running or abandoned ones have proven so far), and what running requests hold on top of that. */
+/** A period's money in exact nano-USD: what its grants include, what its requests have spent, and what running
+    requests hold. */
 export interface Balance { includedNano: number; usedNano: number; heldNano: number; remainingNano: number }
 
-/** The current period's requests: holds and spends made inside it. */
-const inPeriod = (period: Period) => sql`${creditLedger.kind} in ('spend', 'hold') and ${creditLedger.createdAt} >= ${period.start.toISOString()}::timestamptz and ${creditLedger.createdAt} < ${period.end.toISOString()}::timestamptz`;
-/** What a live hold reserves beyond its proven cost. An expired hold reserves nothing (its request died unsettled). */
-const reserved = sql`case when ${creditLedger.kind} = 'hold' and ${creditLedger.holdExpiresAt} > now() then greatest(${creditLedger.holdNanoUsd} - ${creditLedger.costNanoUsd}, 0) else 0 end`;
+/** The period's requests: the holds and spends admitted in it, wherever they settle. */
+const inPeriod = (period: Period) => sql`${creditLedger.kind} in ('spend', 'hold') and ${creditLedger.periodStart} = ${period.start.toISOString()}::timestamptz`;
+/** A request's share of the balance. A spend is its cost. A hold counts in full until it settles: a live one as
+    reserved, one older than its expiry (its call never settled) as spent, the safe side. */
+const live = sql`${creditLedger.kind} = 'hold' and ${creditLedger.holdExpiresAt} > now()`;
+const spent = sql`case when ${creditLedger.kind} = 'spend' then ${creditLedger.costNanoUsd} when ${live} then 0 else ${creditLedger.holdNanoUsd} end`;
+const reserved = sql`case when ${live} then ${creditLedger.holdNanoUsd} else 0 end`;
 
 /** The period's balance: its grants minus the requests made inside it. Nothing carries over. */
 export async function periodBalance(db: Db, userId: string, period: Period): Promise<Balance> {
   const [row] = await db.select({
     included: sql<string>`coalesce(sum(${creditLedger.credits}) filter (where ${creditLedger.kind} = 'grant' and ${creditLedger.periodStart} = ${period.start.toISOString()}::timestamptz), 0)`,
-    used: sql<string>`coalesce(sum(${creditLedger.costNanoUsd}) filter (where ${inPeriod(period)}), 0)`,
+    used: sql<string>`coalesce(sum(${spent}) filter (where ${inPeriod(period)}), 0)`,
     held: sql<string>`coalesce(sum(${reserved}) filter (where ${inPeriod(period)}), 0)`,
   }).from(creditLedger).where(eq(creditLedger.userId, userId));
   const includedNano = Number(row?.included ?? 0) * CREDIT_NANO_USD, usedNano = Number(row?.used ?? 0), heldNano = Number(row?.held ?? 0);
@@ -78,7 +81,7 @@ export async function billingState(db: Db, userId: string, now = new Date()): Pr
   const balance = await periodBalance(db, userId, period);
   const rows = await db.select({
     date: sql<string>`to_char(${creditLedger.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`,
-    nano: sql<string>`sum(${creditLedger.costNanoUsd})`,
+    nano: sql<string>`sum(${spent})`,
   }).from(creditLedger).where(and(eq(creditLedger.userId, userId), inPeriod(period)))
     .groupBy(sql`1`);
   const byDay = new Map(rows.map(row => [row.date, Number(row.nano)]));
@@ -104,19 +107,21 @@ export async function billingState(db: Db, userId: string, now = new Date()): Pr
   };
 }
 
-/** The subscription an Aero request spends against (the live plan), or null: Free, ended or unpaid-and-gone. */
-export async function spendingSubscription(db: Db, userId: string) {
+/** The subscription and period an Aero request spends against now: a live plan whose period hasn't ended. Past
+    the period's end, before the renewal arrives, there is nothing to spend against. */
+export async function spendingPeriod(db: Db, userId: string, now = new Date()): Promise<{ subscriptionId: string; period: Period } | null> {
   const sub = await currentSubscription(db, userId);
   const status = sub ? publicStatus(sub.status) : null;
-  return sub && (status === 'active' || status === 'past_due') ? sub : null;
+  if (!sub || (status !== 'active' && status !== 'past_due')) return null;
+  if (now < sub.currentPeriodStart || now >= sub.currentPeriodEnd) return null;
+  return { subscriptionId: sub.id, period: { start: sub.currentPeriodStart, end: sub.currentPeriodEnd } };
 }
 
-/** What an Aero request may spend now, in nano-USD: the live plan's period balance less running holds, or nothing. */
-export async function spendable(db: Db, userId: string): Promise<{ remainingNano: number; subscriptionId: string | null; period: Period | null }> {
-  const sub = await spendingSubscription(db, userId);
-  if (!sub) return { remainingNano: 0, subscriptionId: null, period: null };
-  const period = { start: sub.currentPeriodStart, end: sub.currentPeriodEnd };
-  return { remainingNano: (await periodBalance(db, userId, period)).remainingNano, subscriptionId: sub.id, period };
+/** What an Aero request may spend now, in nano-USD: the current period's balance less running holds, or nothing. */
+export async function spendable(db: Db, userId: string, now = new Date()): Promise<{ remainingNano: number; subscriptionId: string | null; period: Period | null }> {
+  const current = await spendingPeriod(db, userId, now);
+  if (!current) return { remainingNano: 0, subscriptionId: null, period: null };
+  return { remainingNano: (await periodBalance(db, userId, current.period)).remainingNano, ...current };
 }
 
 /** Grants a period's credits, once per key (the invoice id). */
