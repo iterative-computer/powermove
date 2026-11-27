@@ -9,7 +9,6 @@ pub mod storage;
 pub mod store;
 pub mod surface_backing;
 pub mod surfaces;
-pub mod updater;
 pub mod worker;
 
 #[cfg(test)]
