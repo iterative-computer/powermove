@@ -1,5 +1,7 @@
 # Native distribution plumbing
 
+> **Superseded (2026-11-27).** Releases and updates now follow [release.md](release.md): Sparkle 2's standard updater for V2, V1's electron-updater for V1 → V2. `pm-update-policy`, `pm-distribution` and `update-config.json` described below were removed.
+
 Current implementation: see [beta3 preparation](beta2-readiness.md#beta3-implementation-preparation).
 `pm-update-policy::sparkle` now owns the supported asynchronous public-API bridge
 behind `sparkle-macos`; the synchronous `Installer` contract below remains for
