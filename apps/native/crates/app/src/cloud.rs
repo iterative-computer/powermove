@@ -1114,7 +1114,7 @@ pub(crate) fn code_error(code: &str, verifying: bool) -> String {
     let error = match (verifying, code) {
         (_, "api:rate_limited") => AuthError::RateLimited,
         (_, "api:client_too_old") => AuthError::OldClient,
-        (false, "network") => AuthError::Offline,
+        (_, "network") => AuthError::Offline,
         (false, _) => AuthError::EmailRejected,
         (true, "api:unauthorized" | "api:bad_request") => AuthError::WrongCode,
         (true, "api:gone") => AuthError::ExpiredCode,

@@ -284,7 +284,7 @@ fn sheet_frame(flow: &SignInFlow) -> Frame {
         return Frame {
             surface: "sign-in".into(),
             title: "Verify in your browser…".into(),
-            line: "Complete the quick check in your browser, then come back here.".into(),
+            line: "Finish the quick check in your browser.".into(),
             busy: true,
             buttons: vec![Button::new("cancel_verify", "Cancel")],
             default: None,

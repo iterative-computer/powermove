@@ -1238,7 +1238,10 @@ impl WelcomeView {
                 let height = f32::from(bounds.size.height);
                 if (height - content.get()).abs() > 0.5 {
                     content.set(height);
-                    window.refresh();
+                    // A refresh asked for while painting is dropped: the
+                    // fit waited for the next input event. Ask for the
+                    // next frame instead.
+                    window.on_next_frame(|window, _| window.refresh());
                 }
             },
             |_, _, _, _| {},
@@ -1262,8 +1265,13 @@ impl WelcomeView {
             .items_center()
             .pt(px(wt().sheet_padding))
             .child(
+                // Its natural height, never squeezed by the window: the
+                // measure reads what the step needs, so the window can grow
+                // to it (squeezed, it read the window's own height and an
+                // error line pushed Continue out of the sheet).
                 div()
                     .relative()
+                    .flex_none()
                     .flex()
                     .flex_col()
                     .items_center()

@@ -1459,7 +1459,7 @@ fn a_wrong_or_expired_code_shakes_clears_and_says_so() {
     assert!(!s.retry);
     assert_eq!(
         wrong.error.as_deref(),
-        Some("That code didn’t match. Check it, or send a new one.")
+        Some("That code didn’t match. Try again.")
     );
     // Typing again takes the line away.
     flow.action("field:code:1");
@@ -1489,7 +1489,7 @@ fn network_errors_stay_inline_with_try_again() {
     titled(&offline, "Create your account");
     assert_eq!(
         offline.error.as_deref(),
-        Some("Couldn’t send a code. Check your connection and try again.")
+        Some("Can’t reach Powermove. Try again in a moment.")
     );
     assert!(sign_in(&offline).retry);
     assert!(!offline.busy);

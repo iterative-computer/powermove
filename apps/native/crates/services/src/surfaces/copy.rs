@@ -73,29 +73,22 @@ pub enum AuthError {
 pub fn auth_error(error: AuthError, provider: &str, handle: &str) -> String {
     match error {
         AuthError::Browser => format!("Couldn’t open {provider}. Try again."),
-        AuthError::EmailRejected => {
-            "Couldn’t send a code to this address. Check it and try again.".into()
-        }
-        AuthError::Offline => "Couldn’t send a code. Check your connection and try again.".into(),
-        AuthError::RateLimited => "Too many attempts. Wait a minute, then try again.".into(),
-        AuthError::OldClient => {
-            "This version of Powermove is too old to sign in. Update Powermove, then try again."
-                .into()
-        }
+        // One line each in the sign-in sheet's column.
+        AuthError::EmailRejected => "Couldn’t send a code to this address.".into(),
+        // No answer at all: offline, or Powermove itself is down.
+        AuthError::Offline => "Can’t reach Powermove. Try again in a moment.".into(),
+        AuthError::RateLimited => "Too many tries. Wait a minute, then try again.".into(),
+        AuthError::OldClient => "Update Powermove to sign in.".into(),
         AuthError::ReturnLink => "Couldn’t finish signing in. Try again.".into(),
-        AuthError::WrongCode => "That code didn’t match. Check it, or send a new one.".into(),
+        AuthError::WrongCode => "That code didn’t match. Try again.".into(),
         AuthError::ExpiredCode => "That code has expired. Send a new one.".into(),
-        AuthError::CheckCode => {
-            "Couldn’t check the code. Check your connection and try again.".into()
-        }
+        AuthError::CheckCode => "Couldn’t check the code. Try again.".into(),
         AuthError::InvalidHandle => {
             "Use 2 to 39 characters, starting with a letter or number.".into()
         }
         AuthError::HandleTaken => format!("@{handle} is taken. Try another."),
         AuthError::HandleReserved => format!("@{handle} is reserved. Try another."),
-        AuthError::SaveHandle => {
-            "Couldn’t save your handle. Check your connection and try again.".into()
-        }
+        AuthError::SaveHandle => "Couldn’t save your handle. Try again.".into(),
     }
 }
 pub fn resend(seconds: u64) -> String {
