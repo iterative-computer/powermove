@@ -42,7 +42,10 @@ test('11. API routes take the bearer alone: a session cookie is never a fallback
     expect((await app.request('/v1/me', { headers: user.headers }, env)).status).toBe(200);
     for (const path of ['/v1/me', '/v2/billing']) {
       expect([path, (await app.request(path, { headers: { cookie } }, env)).status]).toEqual([path, 401]);
-      expect([path, (await app.request(path, { headers: { cookie, authorization: 'Bearer not-a-real-token' } }, env)).status]).toEqual([path, 401]);
+      // Bearers that better-auth would otherwise skip in favour of the cookie: empty, blank, or dotted and invalid.
+      for (const authorization of ['Bearer not-a-real-token', 'Bearer ', 'Bearer  ', 'Bearer a.b']) {
+        expect([path, authorization, (await app.request(path, { headers: { cookie, authorization } }, env)).status]).toEqual([path, authorization, 401]);
+      }
     }
   }));
 
