@@ -409,7 +409,11 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
             Value::Array(request.files.clone())
         );
     }
-    request.prompt = crate::context::assemble(&request.prompt);
+    // Aero carries its own instructions (aero/instructions.md): this brief
+    // names the MCP tools of the CLI providers, and would ride every call.
+    if request.provider != Provider::Aero {
+        request.prompt = crate::context::assemble(&request.prompt);
+    }
     let authority = Authority::new(request.access, request.approval, request.computer_consent)?;
     let grant = grants::issue_for_workspace(
         &request.run,

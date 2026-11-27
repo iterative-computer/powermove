@@ -666,6 +666,21 @@ pub fn run_effect(
     let mut observation = (String::new(), Vec::new());
     let observation_environment = link.environment.shared().clone();
     if let EffectKind::Send {
+        attachments,
+        settings,
+        steer: false,
+        ..
+    } = &effect.kind
+        && settings.provider == Provider::Aero
+    {
+        // Aero's session sends the project and its updates itself (aero.rs)
+        // and renders frames with its look tool: the observation below would
+        // repeat them, tens of thousands of tokens, on every model call.
+        let document = kernel
+            .published(&effect.target.project)
+            .map_or(0, |p| p.snapshot.doc_id);
+        observation.0 = pm_agents::context::targets(attachments, &effect.target.project, document);
+    } else if let EffectKind::Send {
         text,
         attachments,
         steer: false,
@@ -754,8 +769,11 @@ pub fn run_effect(
                 })
                 .and_then(|launched| aero_checked(link, launched))
                 .and_then(|(environment, mut request)| {
-                    request.prompt =
-                        pm_agents::context::with_observation(&request.prompt, &observation.0, text);
+                    request.prompt = if request.provider == Provider::Aero {
+                        format!("{}{}", request.prompt, observation.0)
+                    } else {
+                        pm_agents::context::with_observation(&request.prompt, &observation.0, text)
+                    };
                     request.images.extend(observation.1.clone());
                     state.panel.host_admitted_request(
                         &effect.target.thread,

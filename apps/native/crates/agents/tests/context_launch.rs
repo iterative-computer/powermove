@@ -101,3 +101,42 @@ fn ordinary_provider_launch_receives_task_creative_response_and_authoring_guidan
     }
     assert!(user_prompt.ends_with("Create an effect panel and theme"));
 }
+
+/// Aero brings its own instructions and project context (aero.rs): the CLI
+/// providers' brief, which names tools Aero does not have, never rides its
+/// prompt, so it is not resent on every model call (w119).
+#[test]
+fn an_aero_launch_receives_the_request_without_the_cli_brief() {
+    let temp = support::Temp::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tx = Mutex::new(tx);
+    let env = Environment {
+        profile: temp.0.join("isolated-profile"),
+        aero: Some(pm_agents::aero::Launcher(Arc::new(move |request, _, _| {
+            let _ = tx.lock().unwrap().send(request.prompt.clone());
+            Err("captured".into())
+        }))),
+        ..Environment::default()
+    };
+    let _handle = launch::launch(
+        &env,
+        Request {
+            run: "aero-context-fixture".into(),
+            prompt: "Create an effect panel and theme".into(),
+            provider: Provider::Aero,
+            model: Some(pm_agents::inference::FAKE_MODEL.into()),
+            effort: None,
+            access: Access::Project,
+            approval: ApprovalMode::Auto,
+            computer_consent: false,
+            workspace: temp.0.clone(),
+            images: vec![],
+            role: None,
+            files: vec![],
+            project: Some("synthetic".into()),
+        },
+    )
+    .unwrap();
+    let prompt = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(prompt, "Create an effect panel and theme");
+}
