@@ -54,6 +54,7 @@ pub struct Options3d {
     pub studio: Option<provider::Settings>,
     pub studio_final: bool,
     pub view: Option<View3d>,
+    pub(crate) plane_camera: Option<pm_eval::space3d::Camera3d>,
     /// Definition snapshots of mesh layers (`renderer.kind === 'mesh'`), by
     /// definition id. The built-in OBJ model layer is known by default.
     pub mesh_definitions: Arc<std::collections::HashMap<String, legacy::MeshDefinition>>,
@@ -72,6 +73,7 @@ impl Options3d {
                 .as_ref()
                 .filter(|_| !request.export)
                 .map(View3d::from_override),
+            plane_camera: self.plane_camera.filter(|_| !request.export),
             mesh_definitions: self.mesh_definitions.clone(),
         }
     }
@@ -83,6 +85,7 @@ impl Default for Options3d {
             studio: None,
             studio_final: false,
             view: None,
+            plane_camera: None,
             mesh_definitions: Arc::new(legacy::builtin_mesh_definitions()),
         }
     }

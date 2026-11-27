@@ -84,13 +84,11 @@ pub struct Connection {
     session: McpSession,
 }
 impl Connection {
-    /// UI open/close and MCP requests fence session identity without blocking
-    /// the main thread. Ordinary UI edits and gestures never take this fence.
-    /// A running export reads a frozen snapshot, so it does not hold the fence
-    /// through its long wait and the user can still close the project.
-    /// Library and Store reads never touch the open project, so they also run
-    /// while an open waits on a person (a recovery choice).
-    fn admit(&self, name: &str) -> Result<Option<Operation>> {
+    /// UI open/close and session-changing MCP requests take the exclusive
+    /// fence; inspection, capture, panel, and render tools take a shared fence
+    /// so parallel agent calls and subagents never reject each other with
+    /// "A project operation is in progress".
+    fn admit(&self, name: &str, wait: bool) -> Result<Option<Operation>> {
         const UNFENCED: [&str; 9] = [
             "export_video",
             "apply_commands",
@@ -102,14 +100,42 @@ impl Connection {
             "store_extension",
             "store_source",
         ];
+        const EXCLUSIVE: [&str; 4] = [
+            "open_project",
+            "create_project",
+            "manage_project",
+            "save_project",
+        ];
+        let acquire = || {
+            if EXCLUSIVE.contains(&name) {
+                self.host.try_operation()
+            } else {
+                self.host.try_shared_operation()
+            }
+        };
         let operation = if UNFENCED.contains(&name) {
             None
+        } else if let Some(op) = acquire() {
+            Some(op)
+        } else if wait
+            && !self.host.closing.load(Ordering::Acquire)
+            && !self.host.is_awaiting_recovery()
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut acquired = None;
+            while std::time::Instant::now() < deadline {
+                if self.host.closing.load(Ordering::Acquire) || self.host.is_awaiting_recovery() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                if let Some(op) = acquire() {
+                    acquired = Some(op);
+                    break;
+                }
+            }
+            Some(acquired.ok_or_else(|| self.host.fenced())?)
         } else {
-            Some(
-                self.host
-                    .try_operation()
-                    .ok_or_else(|| self.host.fenced())?,
-            )
+            Some(acquire().ok_or_else(|| self.host.fenced())?)
         };
         if self.host.closing.load(Ordering::Acquire) {
             return Err(Error::conflict(
@@ -120,7 +146,7 @@ impl Connection {
     }
     #[cfg(test)]
     pub fn dispatch(&mut self, name: &str, args: &Value) -> Result<Value> {
-        let _operation = self.admit(name)?;
+        let _operation = self.admit(name, false)?;
         self.session.dispatch(name, args)
     }
 }
@@ -135,7 +161,7 @@ impl ToolConnection for Connection {
         if name != "finish_session" {
             self.session.wait_for_pause()?;
         }
-        Ok(match self.admit(name) {
+        Ok(match self.admit(name, true) {
             Ok(_operation) => self.session.call(name, args),
             Err(error) => pm_mcp::failure(error),
         })
@@ -191,9 +217,14 @@ fn completion_on(
 ) -> std::result::Result<Value, String> {
     // MCP thread/delegation calls already hold this lease. Read-only checks
     // and private receipt bookkeeping must not reacquire it recursively.
-    let _operation = if matches!(operation, "apply" | "undo" | "openPanel") {
+    let _operation = if matches!(operation, "apply" | "undo") {
         Some(
             host.try_operation()
+                .ok_or("The project is changing. Try this action again.")?,
+        )
+    } else if operation == "openPanel" {
+        Some(
+            host.try_shared_operation()
                 .ok_or("The project is changing. Try this action again.")?,
         )
     } else {

@@ -147,6 +147,18 @@ fn set_content(
             }
         }
     }
+    if layer_type == "text"
+        && cx.origin().is_human()
+        && let Some(size @ Value::Number(_)) = patch.get("size")
+    {
+        let previous = cx
+            .layer_node(&loc)?
+            .get("d")
+            .and_then(|d| d.get("size"))
+            .map(pm_model::Node::to_value);
+        let local = track::local_time(&layer, values::finite(time, "time")?);
+        properties::resize_text_anchor(&mut layer, previous.as_ref(), size, local, fps);
+    }
     if patch.contains_key("speed") {
         let old_duration = values::num(&layer, "dur").unwrap_or(0.);
         properties::resize_video_for_speed(&mut layer, speed_before, fps);

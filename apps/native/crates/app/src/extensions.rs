@@ -41,6 +41,14 @@ const V4_COMMAND: &str = "extension.v4:";
 const V4_OWNER: &str = "v4-extension:";
 /// `extension.v4theme:<panel>:<id>`, or `…:default` for the built-in look.
 const V4_THEME: &str = "extension.v4theme:";
+/// Layer 1: toolbar buttons `extension.v4toolbar:<panel>:<id>`.
+const V4_TOOLBAR: &str = "extension.v4toolbar:";
+/// Layer 1: panel header pills `extension.v4header:<owner>:<key>`.
+const V4_HEADER: &str = "extension.v4header:";
+/// Layer 1: menu bar items `extension.v4menubar:<panel>:<key>`.
+const V4_MENUBAR: &str = "extension.v4menubar:";
+/// Layer 2: interactive viewer tools `extension.v4tool:<panel>:<id>`.
+pub(crate) const V4_TOOL: &str = "extension.v4tool:";
 /// `extension.choice:<token>:<index>`: a built-in row of a menu that also
 /// carries extension items; its own callback runs.
 const CHOICE: &str = "extension.choice:";
@@ -225,6 +233,13 @@ pub struct Extensions {
     v4_choices: Vec<Choice>,
     v4_seen: u64,
     v4_theme_choices: Vec<Choice>,
+    v4_tool_choices: Vec<Choice>,
+    v4_toolbar_seen: u64,
+    v4_headers_seen: u64,
+    v4_menubar_seen: u64,
+    v4_tools_seen: u64,
+    /// Layer 1: `(target_panel_id, button)` for `panelHeader.contribute`.
+    pub(crate) v4_panel_headers: Vec<(String, pm_shell::integration::PanelHeaderButton)>,
     /// The active v1–3 theme's timeline surface inputs, per scheme.
     pub v1_timeline: Value,
     /// The viewport last sent to the compat realm.
@@ -278,6 +293,9 @@ pub struct Extensions {
     /// Whether the open composition waits on such effects, for a document
     /// revision and resource generation.
     awaiting: std::cell::Cell<Option<(AwaitKey, bool)>>,
+    /// `(doc_id, revision, resource_generation)` last reconciled for stale
+    /// persisted `"missing": true` flags on effects and transitions.
+    reconciled: Option<(u64, u64, u64)>,
 }
 impl Default for Extensions {
     fn default() -> Self {
@@ -317,6 +335,12 @@ impl Default for Extensions {
             v4_choices: vec![],
             v4_seen: 0,
             v4_theme_choices: vec![],
+            v4_tool_choices: vec![],
+            v4_toolbar_seen: 0,
+            v4_headers_seen: 0,
+            v4_menubar_seen: 0,
+            v4_tools_seen: 0,
+            v4_panel_headers: vec![],
             v4_theme_requested: None,
             viewport: None,
             v1_timeline: Value::Null,
@@ -350,6 +374,7 @@ impl Default for Extensions {
             focus_text: None,
             settle_after: None,
             awaiting: Default::default(),
+            reconciled: None,
         }
     }
 }
@@ -367,9 +392,15 @@ impl Extensions {
         self.forks.clear();
         self.v4_seen = u64::MAX;
         self.v4_themes_seen = u64::MAX;
+        self.v4_toolbar_seen = u64::MAX;
+        self.v4_headers_seen = u64::MAX;
+        self.v4_menubar_seen = u64::MAX;
+        self.v4_tools_seen = u64::MAX;
         self.v4_theme_requested = None;
         self.v4_choices.clear();
         self.v4_theme_choices.clear();
+        self.v4_tool_choices.clear();
+        self.v4_panel_headers.clear();
         self.seen = 0;
     }
     fn palette_choices(&self) -> Vec<Choice> {
@@ -377,6 +408,7 @@ impl Extensions {
             .iter()
             .chain(&self.v4_choices)
             .chain(&self.v4_theme_choices)
+            .chain(&self.v4_tool_choices)
             .cloned()
             .collect()
     }
@@ -517,6 +549,53 @@ fn builtin_effects() -> &'static BTreeSet<String> {
             .collect()
     });
     &BUILTIN
+}
+/// Transition types the engine draws without any extension.
+fn builtin_transitions() -> &'static BTreeSet<String> {
+    static BUILTIN: std::sync::LazyLock<BTreeSet<String>> = std::sync::LazyLock::new(|| {
+        pm_render::effects::versions::builtin_snapshot()
+            .definitions
+            .into_iter()
+            .filter(|d| d.kind == pm_protocol::definitions::DefinitionKind::Transition)
+            .map(|d| d.id.as_str().to_owned())
+            .collect()
+    });
+    &BUILTIN
+}
+/// Fast check: does the document contain any persisted `"missing": true` flag
+/// on an effect or transition? Avoids queuing a kernel call for clean files.
+fn document_has_missing_flags(document: &pm_model::Document) -> bool {
+    use pm_model::{Node, NodeKind};
+    let Some(root) = document.root() else {
+        return false;
+    };
+    let layers_have_missing = |layers: &[Node]| {
+        layers.iter().any(|layer| {
+            let fx_missing = matches!(layer.get("fx").map(Node::kind), Some(NodeKind::Array(fxs))
+                if fxs.iter().any(|fx| matches!(fx.get("missing").map(Node::kind), Some(NodeKind::Bool(true)))));
+            fx_missing
+                || ["transitionIn", "transitionOut"].iter().any(|field| {
+                    layer.get(*field).is_some_and(|tr| {
+                        matches!(tr.get("missing").map(Node::kind), Some(NodeKind::Bool(true)))
+                    })
+                })
+        })
+    };
+    if let Some(NodeKind::Array(layers)) = root.get("layers").map(Node::kind)
+        && layers_have_missing(layers)
+    {
+        return true;
+    }
+    if let Some(NodeKind::Object(comps)) = root.get("comps").map(Node::kind) {
+        for (_, comp) in comps.iter() {
+            if let Some(NodeKind::Array(layers)) = comp.get("layers").map(Node::kind)
+                && layers_have_missing(layers)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 /// Canvas text for an extension realm, from the fonts `broker` knows: a
 /// window's host and a pageless one measure and draw text alike.
@@ -707,6 +786,7 @@ impl Controller {
         }
         let mut shell = self.host.borrow_mut();
         shell.native_present = None;
+        shell.native_pending = None;
         shell.native_accessibility = vec![];
         drop(shell);
         // Dropping the host closes the realm off the main thread.
@@ -748,6 +828,7 @@ impl Controller {
             }
             let mut shell = self.host.borrow_mut();
             shell.native_present = None;
+            shell.native_pending = None;
             shell.native_accessibility = vec![];
             drop(shell);
             self.project_extension_scope = None;
@@ -773,9 +854,13 @@ impl Controller {
     pub(crate) fn start_extensions_for(&mut self, project: String, cx: &mut Context<Self>) {
         let mut shell = self.host.borrow_mut();
         shell.native_present = None;
+        shell.native_pending = None;
         shell.native_accessibility = vec![];
         drop(shell);
         self.reset_extensions();
+        // Automatically 3-way rebase any user built-in forks when the shipped
+        // built-ins changed across a software update (zero-breakage updates).
+        crate::fork_auto_rebase::ensure_rebased_async(self.profile.clone());
         let project_name = project.clone();
         let (wake_tx, wake_rx) = async_channel::bounded(1);
         let (clock_tx, clock_rx) = async_channel::bounded(64);
@@ -1819,6 +1904,49 @@ impl Controller {
         self.extensions.awaiting.set(Some((key, awaiting)));
         awaiting
     }
+    /// Clears stale persisted `"missing": true` flags on effects and transitions
+    /// whose provider is currently registered (matching Electron's hydrate pass).
+    pub(crate) fn reconcile_missing_definitions(&mut self) {
+        let (Some(session), Some(published)) = (&self.session, &self.published) else {
+            return;
+        };
+        let key = (
+            published.snapshot.doc_id,
+            published.revision(),
+            self.extensions.resources.generation,
+        );
+        if self.extensions.reconciled == Some(key) {
+            return;
+        }
+        self.extensions.reconciled = Some(key);
+        if !document_has_missing_flags(&published.snapshot.document) {
+            return;
+        }
+        let mut effects = BTreeSet::new();
+        let mut transitions = builtin_transitions().clone();
+        for def in &self.extensions.resources.definitions {
+            match def.kind {
+                pm_protocol::definitions::DefinitionKind::Effect => {
+                    effects.insert(def.id.as_str().to_owned());
+                }
+                pm_protocol::definitions::DefinitionKind::Transition => {
+                    transitions.insert(def.id.as_str().to_owned());
+                }
+                _ => {}
+            }
+        }
+        let _ = self.kernel.call(
+            &session.project,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::Call::ReconcileMissingDefinitions {
+                    effects,
+                    builtin_effects: builtin_effects().clone(),
+                    transitions,
+                },
+            ),
+        );
+    }
     /// Every live viewer of this window (the editor's, the popout's) renders
     /// the same contributed definitions, now and after each change.
     pub fn apply_extension_resources(&mut self) {
@@ -1828,6 +1956,7 @@ impl Controller {
         {
             self.message = error.to_string();
         }
+        self.reconcile_missing_definitions();
     }
     pub fn extension_command(&mut self, cmd: &ShellCommand, cx: &mut Context<Self>) -> bool {
         if cmd.name == UNDO {
@@ -1893,6 +2022,92 @@ impl Controller {
                     Err(message) => self.errors.borrow_mut().tell("Theme", &message),
                 },
                 (Some(_), None) => {}
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_TOOLBAR) {
+            if let (Some(runtime), Some((panel, id))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, id) = (panel.to_owned(), id.to_owned());
+                cx.spawn(async move |this, cx| {
+                    let ticket = cx
+                        .background_executor()
+                        .spawn(async move { runtime.run_toolbar(&panel, &id) })
+                        .await;
+                    let result = match ticket {
+                        Ok(ticket) => ticket.await.map(drop),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let _ = this.update(cx, |v, cx| {
+                            v.message = format!("Toolbar action failed: {error}");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_HEADER) {
+            if let (Some(runtime), Some((panel, key))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, key) = (panel.to_owned(), key.to_owned());
+                cx.spawn(async move |this, cx| {
+                    let ticket = cx
+                        .background_executor()
+                        .spawn(async move { runtime.run_panel_header(&panel, &key) })
+                        .await;
+                    let result = match ticket {
+                        Ok(ticket) => ticket.await.map(drop),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let _ = this.update(cx, |v, cx| {
+                            v.message = format!("Panel header action failed: {error}");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_MENUBAR) {
+            if let (Some(runtime), Some((panel, key))) =
+                (self.builtins.runtime.clone(), target.split_once(':'))
+            {
+                let (panel, key) = (panel.to_owned(), key.to_owned());
+                cx.spawn(async move |this, cx| {
+                    let ticket = cx
+                        .background_executor()
+                        .spawn(async move { runtime.run_menu_bar(&panel, &key) })
+                        .await;
+                    let result = match ticket {
+                        Ok(ticket) => ticket.await.map(drop),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let _ = this.update(cx, |v, cx| {
+                            v.message = format!("Menu action failed: {error}");
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            return true;
+        }
+        if let Some(target) = cmd.name.strip_prefix(V4_TOOL) {
+            if let Some((panel, tool_id)) = target.split_once(':') {
+                self.tool = cmd.name.clone();
+                if let Some(runtime) = &self.builtins.runtime {
+                    runtime.set_active_tool(Some((panel, tool_id)));
+                    runtime.emit_event("tool", &json!({"tool": self.tool}));
+                }
+                cx.notify();
             }
             return true;
         }
@@ -2044,6 +2259,154 @@ impl Controller {
         let mut shell = self.host.borrow_mut();
         shell.contributed_choices = self.extensions.palette_choices();
         shell.set_contributed_bindings(V4_OWNER, bindings);
+    }
+    /// Layer 1 & Layer 2: synchronizes v4 extension toolbar items, panel header
+    /// actions, macOS menu bar items, and interactive viewer tools.
+    pub fn sync_v4_chrome(&mut self, runtime: &pm_builtins::Builtins, cx: &mut Context<Self>) {
+        if let Some((rev, list)) = runtime.toolbar_items_since(self.extensions.v4_toolbar_seen) {
+            self.extensions.v4_toolbar_seen = rev;
+            let items: Vec<pm_shell::ExtensionToolbarItem> = list
+                .iter()
+                .filter_map(|item| {
+                    let panel = item["panel"].as_str()?;
+                    let id = item["id"].as_str()?;
+                    let label = item["label"].as_str().unwrap_or(id).to_owned();
+                    Some(pm_shell::ExtensionToolbarItem {
+                        id: id.to_owned(),
+                        tooltip: item["tooltip"].as_str().unwrap_or(&label).to_owned(),
+                        label,
+                        icon: item["icon"].as_str().map(str::to_owned),
+                        active: item["active"] == true,
+                        badge: item["badge"].as_str().map(str::to_owned),
+                        command: format!("{V4_TOOLBAR}{panel}:{id}"),
+                    })
+                })
+                .collect();
+            self.host.borrow_mut().set_extension_toolbar(&items);
+        }
+        if let Some((rev, list)) = runtime.panel_headers_since(self.extensions.v4_headers_seen) {
+            self.extensions.v4_headers_seen = rev;
+            self.extensions.v4_panel_headers = list
+                .iter()
+                .filter_map(|item| {
+                    let owner = item["owner"].as_str()?;
+                    let target_panel = item["panelId"].as_str()?.to_owned();
+                    let key = item["key"].as_str()?;
+                    let id = item["id"].as_str()?.to_owned();
+                    let label = item["label"].as_str().map(str::to_owned);
+                    let tooltip = item["tooltip"]
+                        .as_str()
+                        .or(label.as_deref())
+                        .unwrap_or(&id)
+                        .to_owned();
+                    Some((
+                        target_panel,
+                        pm_shell::integration::PanelHeaderButton {
+                            id,
+                            label,
+                            icon: item["icon"].as_str().map(str::to_owned),
+                            tooltip,
+                            active: item["active"] == true,
+                            command: format!("{V4_HEADER}{owner}:{key}"),
+                        },
+                    ))
+                })
+                .collect();
+            cx.notify();
+        }
+        if let Some((rev, list)) = runtime.menu_bar_since(self.extensions.v4_menubar_seen) {
+            self.extensions.v4_menubar_seen = rev;
+            fn parse_items(panel: &str, arr: &[Value]) -> Vec<pm_shell::ExtensionMenuItem> {
+                arr.iter()
+                    .map(|raw| {
+                        if raw == "-" {
+                            return pm_shell::ExtensionMenuItem {
+                                separator: true,
+                                label: String::new(),
+                                key: None,
+                                checked: false,
+                                disabled: false,
+                                command: None,
+                                submenu: vec![],
+                            };
+                        }
+                        let submenu = raw["submenu"]
+                            .as_array()
+                            .map(|sub| parse_items(panel, sub))
+                            .unwrap_or_default();
+                        pm_shell::ExtensionMenuItem {
+                            separator: false,
+                            label: raw["label"].as_str().unwrap_or_default().to_owned(),
+                            key: raw["key"].as_str().map(str::to_owned),
+                            checked: raw["checked"] == true,
+                            disabled: raw["disabled"] == true,
+                            command: raw["actionKey"]
+                                .as_str()
+                                .map(|k| format!("{V4_MENUBAR}{panel}:{k}")),
+                            submenu,
+                        }
+                    })
+                    .collect()
+            }
+            let sections: Vec<pm_shell::ExtensionMenuSection> = list
+                .iter()
+                .filter_map(|entry| {
+                    let panel = entry["panel"].as_str()?;
+                    let menu_name = entry["menuName"].as_str()?.to_owned();
+                    let items = parse_items(panel, entry["items"].as_array()?);
+                    Some(pm_shell::ExtensionMenuSection { menu_name, items })
+                })
+                .collect();
+            pm_shell::set_extension_menus(&sections);
+        }
+        if let Some((rev, list)) = runtime.tools_since(self.extensions.v4_tools_seen) {
+            self.extensions.v4_tools_seen = rev;
+            let mut choices = Vec::new();
+            let mut bindings = Vec::new();
+            for tool in &list {
+                let (Some(panel), Some(id), Some(title)) = (
+                    tool["panel"].as_str(),
+                    tool["id"].as_str(),
+                    tool["title"].as_str(),
+                ) else {
+                    continue;
+                };
+                let cmd = format!("{V4_TOOL}{panel}:{id}");
+                choices.push(Choice {
+                    label: format!("Tool: {title}"),
+                    command: cmd.clone(),
+                    ..Default::default()
+                });
+                if let Some(chord) = tool["shortcut"].as_str().filter(|s| !s.is_empty()) {
+                    bindings.push(Binding {
+                        id: format!("{V4_OWNER}tool:{panel}:{id}"),
+                        chord: chord.to_owned(),
+                        command: cmd,
+                        args: vec![],
+                        priority: 300,
+                        in_fields: false,
+                        repeat: false,
+                        loose: false,
+                    });
+                }
+            }
+            self.extensions.v4_tool_choices = choices;
+            let mut shell = self.host.borrow_mut();
+            shell.contributed_choices = self.extensions.palette_choices();
+            shell.set_contributed_bindings("v4-tools:", bindings);
+        }
+    }
+    /// Layer 1: trailing panel header action buttons contributed for `panel_id`.
+    pub fn extension_panel_header_actions(
+        &self,
+        panel_id: &str,
+    ) -> Vec<pm_shell::integration::PanelHeaderButton> {
+        self.extensions
+            .v4_panel_headers
+            .iter()
+            .filter(|(target, _)| target == panel_id || target == "*")
+            .map(|(_, btn)| btn.clone())
+            .collect()
     }
     /// Puts back what the newest agent extension change replaced, for this
     /// project or an app-wide run. Files move on a worker; windows reload.
@@ -2367,6 +2730,13 @@ impl Controller {
             let m = &shell.tokens.metrics;
             f64::from((m.panel_radius - m.border.max(m.splitter_reach)).max(0.))
         };
+        let pending_views = views.clone();
+        shell.native_pending = Some(Rc::new(move || {
+            pending_views
+                .borrow()
+                .values()
+                .any(|page| page.try_borrow().is_ok_and(|host| host.composition_dirty()))
+        }));
         shell.native_present = Some(Rc::new(move |width, height| {
             let viewport = Rect::new(0., 0., width, height);
             let bodies = bodies.borrow();

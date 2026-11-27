@@ -211,8 +211,7 @@ fn cube_between_2d_layers(cube_first: bool) {
 }
 
 /// Where a point of the scene lands in a `size`-pixel square frame seen by
-/// the default camera (no camera layer): at (3, 2, 6), aimed at the origin,
-/// 45° vertical field of view.
+/// a 3/4 camera at (3, 2, 6), aimed at the origin, 45° vertical field of view.
 fn pixel(p: [f64; 3], size: u32) -> (u32, u32) {
     let eye = [3., 2., 6.];
     let norm = |a: [f64; 3]| {
@@ -255,7 +254,20 @@ fn the_menu_cube_shadow_side_reads_against_its_lit_side() {
         pm_panel_studio3d::properties::add_layer(&published, 0., "box", "cube").unwrap();
     transact(&actor, commands);
     let published = actor.handle().published("p").unwrap();
+    let (_, commands, _) =
+        pm_panel_studio3d::properties::add_layer(&published, 0., "camera", "cam").unwrap();
+    transact(&actor, commands);
+    let published = actor.handle().published("p").unwrap();
     let mut root = from_model(&published.snapshot.root().unwrap().to_value()).unwrap();
+    if let Some(cam) = layers(&mut root).iter_mut().find(|l| l["id"] == "cam") {
+        cam["p"]["position.x"]["v"] = json!(3.);
+        cam["p"]["position.y"]["v"] = json!(2.);
+        cam["p"]["position.z"]["v"] = json!(6.);
+        cam["p"]["camera.fov"]["v"] = json!(45.);
+        cam["p"]["camera.targetX"]["v"] = json!(0.);
+        cam["p"]["camera.targetY"]["v"] = json!(0.);
+        cam["p"]["camera.targetZ"]["v"] = json!(0.);
+    }
     let cube = layers(&mut root)
         .iter()
         .find(|l| l["id"] == "cube")

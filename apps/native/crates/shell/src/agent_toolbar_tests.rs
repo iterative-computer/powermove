@@ -66,7 +66,8 @@ fn pm546_done_keeps_the_compact_undo_next_to_the_label() {
     use super::{Accessibility, Scheme, Tokens, coedit_presence};
 
     let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
-    let done = coedit_presence::layout(&AgentStatus::default(), &tokens, true);
+    let status = AgentStatus { undo_available: true, ..Default::default() };
+    let done = coedit_presence::layout(&status, &tokens, true);
     assert_eq!(done.title.string().to_string(), "Done");
     assert!(done.actions.is_none());
     let (button, undo) = done.undo.unwrap();
@@ -77,6 +78,38 @@ fn pm546_done_keeps_the_compact_undo_next_to_the_label() {
     );
     assert_eq!(button.size.width - undo.size().width.ceil(), 10.);
     assert!((120. ..=124.).contains(&done.width));
+}
+
+#[test]
+fn undo_feedback_hides_the_action_until_it_can_be_retried() {
+    use super::{Accessibility, Scheme, Tokens, coedit_presence};
+
+    let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+    for (feedback, label, available) in [
+        (None, "Done", false),
+        (Some(AgentStatus::UNDOING), "Undoing…", true),
+        (Some(AgentStatus::UNDONE), "Undone", false),
+        (Some("Nothing to undo"), "Nothing to undo", false),
+    ] {
+        let status = AgentStatus {
+            undo_available: available,
+            undo_feedback: feedback,
+            ..Default::default()
+        };
+        let pill = coedit_presence::layout(&status, &tokens, true);
+        assert_eq!(pill.title.string().to_string(), label);
+        assert!(pill.undo.is_none());
+        assert!(pill.actions.is_none());
+    }
+    let retry = AgentStatus {
+        undo_available: true,
+        undo_feedback: Some("Finish the active edit first"),
+        ..Default::default()
+    };
+    let pill = coedit_presence::layout(&retry, &tokens, true);
+    assert_eq!(pill.title.string().to_string(), "Finish the active edit first");
+    assert!(pill.undo.is_some());
+    assert!(pill.actions.is_none());
 }
 
 /// Compositor-independent 2x foregrounds, for placing onto real toolbar chrome.
@@ -107,6 +140,7 @@ fn pm546_capture_coedit_chip_without_windows() {
                 progress: Some("I’ll find the wavy dither effect in the library and check how the composition uses it.".into()),
                 ..Default::default()
             };
+            let undo = AgentStatus { undo_available: true, ..Default::default() };
             for (state, status, hover, undo_hot) in [
                 ("idle", None, false, false),
                 ("running", Some(running.clone()), false, false),
@@ -129,8 +163,8 @@ fn pm546_capture_coedit_chip_without_windows() {
                     false,
                     false,
                 ),
-                ("done-undo", Some(AgentStatus::default()), false, false),
-                ("undo-hover", Some(AgentStatus::default()), false, true),
+                ("done-undo", Some(undo.clone()), false, false),
+                ("undo-hover", Some(undo), false, true),
                 (
                     "two-runs",
                     Some(AgentStatus {

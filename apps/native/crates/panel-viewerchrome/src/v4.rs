@@ -85,21 +85,34 @@ impl Session {
             None => pm_model::JsString::from(""),
             _ => return Err(Error::Invalid("composition name")),
         };
-        let empty = match comp.get("layers").map(Node::kind) {
-            Some(NodeKind::Array(layers)) => layers.is_empty(),
+        let layers = match comp.get("layers").map(Node::kind) {
+            Some(NodeKind::Array(layers)) => layers,
             _ => return Err(Error::Invalid("layers")),
         };
-        // A composition with Studio 3D layers shows the Fast/Quality preview
-        // control (3d-studio.md §2); without them the bar is unchanged.
-        let studio = match comp.get("layers").map(Node::kind) {
-            Some(NodeKind::Array(layers)) => layers.iter().any(|l| {
-                matches!(
-                    l.get("d").and_then(|d| d.get("definition")).map(Node::kind),
-                    Some(NodeKind::String(s)) if s.to_string_lossy().starts_with("powermove.3d.")
-                )
-            }),
-            _ => false,
-        };
+        let empty = layers.is_empty();
+        let mut studio = false;
+        let mut studio_3d = false;
+        for layer in layers.iter() {
+            let data = layer.get("d");
+            let definition = data.and_then(|d| d.get("definition")).and_then(node_text);
+            let plane = matches!(
+                layer.get("threeD").map(Node::kind),
+                Some(NodeKind::Bool(true))
+            );
+            studio |= plane || definition.is_some_and(|id| id.starts_with("powermove.3d."));
+            studio_3d |= definition == Some("powermove.3d.object")
+                || (plane
+                    && matches!(
+                        layer.get("type").and_then(node_text),
+                        Some("text" | "shape")
+                    )
+                    && matches!(
+                        data.and_then(|d| d.get("extrusion"))
+                            .and_then(|e| e.get("enabled"))
+                            .map(Node::kind),
+                        Some(NodeKind::Bool(true))
+                    ));
+        }
         let ticket = self
             .ticket
             .checked_add(1)
@@ -157,6 +170,44 @@ impl Session {
         }
         value.insert("compositions", Value::Array(compositions));
 
+        // Focused group chain inside the active composition (outermost to innermost).
+        let focused_group = model
+            .ui
+            .timeline
+            .get("nativeModel")
+            .and_then(|v| v.get("focusedGroup"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        if let Some(mut cur) = focused_group {
+            let layers = pm_kernel::model::list_layers(root, model.composition.as_deref());
+            let mut chain = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            while seen.insert(cur.to_owned()) {
+                let Some(layer) = layers.iter().find(|l| l.id == cur && l.kind == "group") else {
+                    break;
+                };
+                let mut item = Map::new();
+                item.insert("id", Value::from(layer.id.as_str()));
+                item.insert(
+                    "name",
+                    Value::from(if layer.name.is_empty() {
+                        "Group"
+                    } else {
+                        layer.name.as_str()
+                    }),
+                );
+                chain.push(Value::Object(item));
+                match layer.group.as_deref() {
+                    Some(parent) => cur = parent,
+                    None => break,
+                }
+            }
+            if !chain.is_empty() {
+                chain.reverse();
+                value.insert("focusedGroups", Value::Array(chain));
+            }
+        }
+
         value.insert("fit", Value::Bool(model.chrome.navigation.fit));
         value.insert("shownZoom", Value::Number(shown));
         value.insert("quality", Value::from(model.chrome.quality.id()));
@@ -185,6 +236,7 @@ impl Session {
                 };
                 let mut m = Map::new();
                 m.insert("tier", Value::from(tier));
+                m.insert("hasScene", Value::Bool(studio_3d));
                 m.insert("tool", read("studioTool", "move"));
                 m.insert("look", read("studioLook", "camera"));
                 m.insert("axes", read("studioAxes", "scene"));

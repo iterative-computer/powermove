@@ -52,6 +52,9 @@ pub(crate) struct Models {
         Value,
     )>,
     pub project: ProjectBridge,
+    project_catalog: Option<(u64, Catalog)>,
+    transition_registry:
+        Option<std::sync::Arc<BTreeMap<String, Vec<pm_kernel::state::Registration>>>>,
     pub facts: Value,
     pub fields: BTreeMap<String, String>,
     pub platform: Vec<(String, Value)>,
@@ -121,6 +124,24 @@ fn retained_outline(rows: &[Row], track_headers: Option<usize>) -> Option<usize>
 }
 
 impl Models {
+    fn refresh_project(&mut self, published: &Published) -> Result<(), String> {
+        if self.project_catalog.as_ref().is_none_or(|(metadata, catalog)| {
+            catalog.stamp.document != published.snapshot.doc_id
+                || catalog.stamp.revision != published.revision()
+                || *metadata != published.metadata_revision
+        }) {
+            self.project_catalog = Some((
+                published.metadata_revision,
+                Catalog::published(published).map_err(|e| format!("{e:?}"))?,
+            ));
+        }
+        self.project.refresh(
+            &self.project_catalog.as_ref().expect("project catalog").1,
+            &self.media_runtime,
+        );
+        Ok(())
+    }
+
     /// The timeline client, made on first use ([`Models::timeline_source`]).
     pub(crate) fn ensure_timeline(&mut self) -> Result<(), String> {
         if self.timeline.is_none()
@@ -166,6 +187,8 @@ impl Models {
             tab_switch: None,
             viewer_projection: None,
             project: ProjectBridge::default(),
+            project_catalog: None,
+            transition_registry: None,
             facts: json!({"time":0.,"playing":false,"stage":[640.,360.],"light":false}),
             fields: BTreeMap::new(),
             platform: vec![],
@@ -272,58 +295,65 @@ impl Backend {
         self.native
             .properties
             .focus_part(&self.native.facts["focusPart"]);
-        let transitions = registered_transitions(&self.kernel.state());
-        if self.native.properties.transitions != transitions {
-            self.native.properties.transitions = transitions;
+        let state = self.kernel.state();
+        if self
+            .native
+            .transition_registry
+            .as_ref()
+            .is_none_or(|previous| !std::sync::Arc::ptr_eq(previous, &state.registries))
+        {
+            self.native.properties.transitions = registered_transitions(&state);
+            self.native.transition_registry = Some(state.registries.clone());
         }
         if self.native.properties.originals != self.native.originals {
             self.native.properties.originals = self.native.originals.clone();
         }
         let started = std::time::Instant::now();
-        let snapshot = self.native.properties.snapshot(
-            self.model.as_mut().ok_or("No open project")?,
-            time,
-            playing,
-        );
+        let model = self.model.as_mut().ok_or("No open project")?;
+        model.begin_readout();
+        let snapshot = self.native.properties.snapshot(model, time, playing);
+        // The Studio light readout can evaluate its target on a different layer.
+        self.properties_reads_time = model.reads_time()
+            || model.primary()
+                .and_then(|id| model.layer_node(id).ok())
+                .and_then(pm_eval::address::layer3d_role)
+                == Some(pm_eval::address::Layer3dRole::Light);
         crate::trace(json!({"properties": "sections", "ms": crate::ms(started.elapsed())}));
         snapshot
     }
     pub(crate) fn timeline_frame(&mut self, request: &Value) -> Result<Value, String> {
         self.sync()?;
-        self.native.ensure_timeline()?;
         let time = self.time();
         let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
         let p = self.published().ok_or("closed")?;
         let outline = self.native.timeline_outline.shared().clone();
-        let client = self
-            .native
-            .timeline
-            .as_mut()
-            .ok_or("timeline action in flight")?;
         let first = request["first"].as_u64().ok_or("first row")? as usize;
         let visible = request["visible"]
             .as_u64()
             .filter(|n| *n > 0 && *n <= 512)
             .ok_or("visible rows")? as usize;
-        self.model
-            .as_mut()
-            .ok_or("No open project")?
-            .sync(p.clone());
         let editing = match &self.native.timeline_editor {
             Some(TimelineEditor::Property(l, p)) => Some((l.clone(), p.clone())),
             _ => None,
         };
         // A hosted outline decorates the same immutable model as the canvas.
-        let timeline = if let Some(outline) = outline.as_deref().filter(|m| m.follows_publication(&p)) {
-            outline
-        } else {
-            client.model.sync(&p);
-            if client.model.editing_property != editing {
-                client.model.editing_property = editing;
-                client.model.rebuild_rows();
-            }
-            &client.model
-        };
+        let timeline =
+            if let Some(outline) = outline.as_deref().filter(|m| m.follows_publication(&p)) {
+                outline
+            } else {
+                self.native.ensure_timeline()?;
+                let client = self
+                    .native
+                    .timeline
+                    .as_mut()
+                    .ok_or("timeline action in flight")?;
+                client.model.sync(&p);
+                if client.model.editing_property != editing {
+                    client.model.editing_property = editing;
+                    client.model.rebuild_rows();
+                }
+                &client.model
+            };
         // Retain modest outlines across scrolls. Only the native host mounts rows;
         // wheel input must never wait for another JS publication. Property
         // rows carry more controls and readouts than ordinary layer rows.
@@ -365,7 +395,7 @@ impl Backend {
                 ));
                 row["canOpen"] = json!(timeline.layer_disclosable(&layer));
                 row["transformable"] = json!(l.kind != "audio");
-                row["parent"] = json!({"name":l.parent.as_deref().and_then(|p|timeline.index.layer(p)).map(|p|p.name.to_string_lossy()).unwrap_or_default(),"set":l.parent.is_some()});
+                row["parent"] = json!({"name":l.parent.as_deref().and_then(|p|timeline.index.layer(p)).map(|p|p.name.to_string_lossy()).unwrap_or_else(|| "None".into()),"set":l.parent.is_some()});
                 if self.native.timeline_editor == Some(TimelineEditor::Name(layer.clone())) {
                     row["nameEditor"] = json!({
                         "value": l.name.to_string_lossy(),
@@ -524,28 +554,43 @@ impl Backend {
         if self.native.tab_switch.is_none() && !self.native.composition_tabs.contains(&active) {
             self.native.composition_tabs.push(active.clone());
         }
-        let closable = self.native.composition_tabs.len() > 1;
-        frame["tabs"] = json!(
-            self.native
-                .composition_tabs
-                .iter()
-                .map(|id| {
-                    let comp = if id == "root" {
-                        Some(root)
-                    } else {
-                        root.get("comps").and_then(|c| c.get(id))
-                    };
-                    let name = comp
-                        .and_then(|c| c.get("name"))
-                        .and_then(|node| match node.kind() {
-                            pm_model::NodeKind::String(text) => text.as_str(),
-                            _ => None,
-                        })
-                        .unwrap_or("Composition");
-                    json!({"id":id,"name":name,"active":id == &active,"showClose":closable})
+        let group_chain = timeline.focused_group_chain();
+        let has_group_focus = !group_chain.is_empty();
+        let comp_closable = self.native.composition_tabs.len() > 1;
+        let mut tabs = Vec::with_capacity(self.native.composition_tabs.len() + group_chain.len());
+        for id in &self.native.composition_tabs {
+            let comp = if id == "root" {
+                Some(root)
+            } else {
+                root.get("comps").and_then(|c| c.get(id))
+            };
+            let name = comp
+                .and_then(|c| c.get("name"))
+                .and_then(|node| match node.kind() {
+                    pm_model::NodeKind::String(text) => text.as_str(),
+                    _ => None,
                 })
-                .collect::<Vec<_>>()
-        );
+                .unwrap_or("Composition");
+            tabs.push(json!({
+                "id": id,
+                "name": name,
+                "active": !has_group_focus && id == &active,
+                "showClose": comp_closable
+            }));
+            if id == &active {
+                for (index, group) in group_chain.iter().enumerate() {
+                    let gname = group.name.to_string_lossy();
+                    tabs.push(json!({
+                        "id": format!("group:{}", group.id),
+                        "name": if gname.is_empty() { "Group".to_owned() } else { gname },
+                        "active": index + 1 == group_chain.len(),
+                        "showClose": true,
+                        "kind": "group"
+                    }));
+                }
+            }
+        }
+        frame["tabs"] = json!(tabs);
         frame["renderSummary"] = json!("");
         frame["feedback"] = json!({});
         Ok(frame)
@@ -657,16 +702,14 @@ impl Backend {
     }
     pub(crate) fn project_view(&mut self, request: Option<Value>) -> Result<Value, String> {
         let p = self.published().ok_or("closed")?;
-        let catalog = Catalog::published(&p).map_err(|e| format!("{e:?}"))?;
-        self.native
-            .project
-            .refresh(&catalog, &self.native.media_runtime);
+        self.native.refresh_project(&p)?;
+        let catalog = &self.native.project_catalog.as_ref().expect("project catalog").1;
         if let Some(request) = request {
             let reply = self
                 .native
                 .project
                 .request(
-                    &catalog,
+                    catalog,
                     &self.native.media_runtime,
                     serde_json::from_value(request).map_err(|e| e.to_string())?,
                 )
@@ -683,7 +726,7 @@ impl Backend {
             serde_json::to_value(
                 self.native
                     .project
-                    .view(&catalog, &self.native.media_runtime)
+                    .view(catalog, &self.native.media_runtime)
                     .map_err(|e| format!("{e:?}"))?,
             )
             .map_err(|e| e.to_string())
@@ -691,10 +734,8 @@ impl Backend {
     }
     fn project_command(&mut self, args: &Value) -> Result<NativeCommand, String> {
         let p = self.published().ok_or("closed")?;
-        let catalog = Catalog::published(&p).map_err(|e| format!("{e:?}"))?;
-        self.native
-            .project
-            .refresh(&catalog, &self.native.media_runtime);
+        self.native.refresh_project(&p)?;
+        let catalog = &self.native.project_catalog.as_ref().expect("project catalog").1;
         if std::mem::take(&mut self.native.show_missing) {
             // Project-wide: from the top folder, every missing file, flat.
             let filter = pm_panel_media::Filter {
@@ -703,14 +744,14 @@ impl Backend {
             };
             self.native
                 .project
-                .apply_host_filter(&catalog, &self.native.media_runtime, filter)
+                .apply_host_filter(catalog, &self.native.media_runtime, filter)
                 .map_err(|e| format!("{e:?}"))?;
         }
         let mut reply = self
             .native
             .project
             .request(
-                &catalog,
+                catalog,
                 &self.native.media_runtime,
                 serde_json::from_value(args.clone()).map_err(|e| e.to_string())?,
             )
@@ -1164,6 +1205,7 @@ impl Backend {
                 // The editor's own timeline fits its view to the curves.
                 HostEffect::FitCurves(..) => json!({"kind":"command","name":"graph.fit"}),
                 HostEffect::OpenComposition(id) => json!({"kind":"openComposition","id":id}),
+                HostEffect::FocusGroup(id) => json!({"kind":"focusGroup","id":id}),
                 // The empty composition's buttons: the app's own commands.
                 HostEffect::Run(name) => json!({"kind":"command","name":name}),
                 // Import… from the timeline: File › Import…, at the playhead.
@@ -1202,7 +1244,12 @@ impl Backend {
         use pm_panel_timeline::{RowId, v4};
         let done = |v: Value| Ok(NativeCommand::Value(v));
         match args["type"].as_str() {
-            Some("tab") if args["close"] == true => {
+            Some("tab")
+                if args["close"] == true
+                    && !args["id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("group:")) =>
+            {
                 let id = args["id"].as_str().ok_or("composition id")?;
                 if self.native.composition_tabs.len() <= 1 {
                     return done(Value::Null);
@@ -1228,6 +1275,14 @@ impl Backend {
             }
             Some("tabMenu") => {
                 let id = args["id"].as_str().ok_or("composition id")?.to_owned();
+                if id.starts_with("group:") {
+                    return match args["action"].as_str() {
+                        Some("close") => {
+                            Ok(NativeCommand::Timeline(json!({"type":"tab","id":id,"close":true})))
+                        }
+                        _ => Err("Unknown group tab action".into()),
+                    };
+                }
                 if !self.native.composition_tabs.contains(&id) {
                     return Err("Unknown composition tab".into());
                 }
@@ -1327,6 +1382,12 @@ impl Backend {
     fn timeline_menu(&mut self, args: &Value) -> Result<Value, String> {
         if args["type"] == "tabContext" {
             let id = args["id"].as_str().ok_or("composition id")?;
+            if id.starts_with("group:") {
+                let row = |action: &str, label: &str| {
+                    json!({"id":action,"label":label,"intent":{"type":"tabMenu","id":id,"action":action}})
+                };
+                return Ok(json!([row("close", "Close")]));
+            }
             if !self.native.composition_tabs.iter().any(|tab| tab == id) {
                 return Err("Unknown composition tab".into());
             }
@@ -1858,60 +1919,138 @@ impl Backend {
         }
     }
     /// The Easing panel's view: how many keyframes are selected (what its
-    /// actions change) and the preset curves it offers, in v1's order.
+    /// actions change) and the kernel preset curves it offers.
     pub(crate) fn easing_state(&mut self) -> Result<Value, String> {
-        self.sync()?;
         let Some(p) = self.published() else {
             return Ok(json!({"open": false, "count": 0, "presets": easing_presets(), "library": crate::timeline_easing::inspect(&self.kernel)}));
         };
-        let (curve, mixed) = p.snapshot.root().map(|root| crate::timeline_easing::selected_curve(root, p.selection.keys())).unwrap_or((None, false));
-        let interpolation = p.selection.keys().first().and_then(|id| {
-            let index = pm_panel_timeline::TimelineIndex::from_snapshot(&p.snapshot);
-            let key = wire(&index.key(id)?.2.stored.to_value());
-            Some(if key["autoBezier"] == true { "auto".to_owned() }
-                else if key["hold"] == true { "hold".to_owned() }
-                else { key["outInterp"].as_str().unwrap_or("linear").to_owned() })
-        });
+        let selected = p
+            .snapshot
+            .root()
+            .map(|root| crate::timeline_easing::selected_ease(root, &p.selection))
+            .unwrap_or_default();
         Ok(json!({
             "open": true,
-            "curve": curve,
-            "mixed": mixed,
-            "interpolation": interpolation,
+            "curve": selected.curve,
+            "mixed": selected.mixed,
+            "interpolation": selected.interpolation,
+            "mixedInterpolation": selected.mixed_interpolation,
+            "segments": selected.segments,
             "count": p.selection.keys().len(),
+            "selection": [p.snapshot.doc_id, p.selection.keys(), p.selection.key_layers()],
             "revision": p.revision().to_string(),
             "presets": easing_presets(),
             "library": crate::timeline_easing::inspect(&self.kernel),
         }))
     }
     /// An Easing panel action on the selected keyframes, as one Undo step:
-    /// `{type:"preset", preset}`, `{type:"curve", curve:[x1,y1,x2,y2]}`,
-    /// `{type:"easyEase", side:"both"|"in"|"out"}` or
+    /// `{type:"preset", preset, scope?}`, `{type:"curve", curve:[x1,y1,x2,y2], scope?}`,
+    /// `{type:"easyEase", side:"both"|"in"|"out", scope?}` or
     /// `{type:"interpolation", interpolation:"linear"|"bezier"|"hold"|"auto"|"continuous"}`.
     pub(crate) fn easing_intent(&mut self, args: &Value) -> Result<Request, String> {
         use pm_kernel::commands::keyframes::{EaseSide, EaseSpec, Interpolation};
         self.sync()?;
         let p = self.published().ok_or("No open project")?;
-        let key_ids: Vec<String> = p.selection.keys().to_vec();
-        if key_ids.is_empty() {
+        let raw_keys: Vec<String> = p.selection.keys().to_vec();
+        if raw_keys.is_empty() {
             return Err("Select keyframes to apply easing".into());
         }
+        // Resolve selected keys on unlocked layers and expand linked scale /
+        // combined position sibling keys so multi-keyframe & multi-layer easing
+        // updates every selected track cleanly without failing on a locked layer
+        // when unlocked keyframes are also selected.
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&p.snapshot);
+        let mut model = pm_panel_timeline::TimelineModel::default();
+        model.sync(&p);
+        let expanded = model.expand_graph_keys(&raw_keys);
+        let mut unlocked_keys: Vec<String> = Vec::with_capacity(expanded.len());
+        for id in &expanded {
+            if let Some((layer, _, _)) = index.key(id) {
+                if !layer.effectively_locked {
+                    unlocked_keys.push(id.clone());
+                }
+            } else {
+                unlocked_keys.push(id.clone());
+            }
+        }
+        let key_ids = if unlocked_keys.is_empty() {
+            raw_keys
+        } else {
+            unlocked_keys
+        };
+        let all_sides = args["scope"].as_str() == Some("all");
         let side = |v: &Value| match v["side"].as_str().unwrap_or("both") {
             "in" => Ok(EaseSide::In),
             "out" => Ok(EaseSide::Out),
             "both" => Ok(EaseSide::Both),
             _ => Err("Unknown easing side".to_string()),
         };
-        let command: Command = match args["type"].as_str().unwrap_or("") {
+        // Partition consecutive selected pairs vs isolated keys for Easy Ease
+        // so clicking Easy Ease / Ease In / Ease Out on a selected span never
+        // corrupts adjacent unselected segments.
+        let segment_sides = |ids: &[String]| -> (Vec<String>, Vec<String>, Vec<String>) {
+            let id_set: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+            let mut out_only = Vec::new();
+            let mut in_only = Vec::new();
+            let mut isolated = Vec::new();
+            for layer in &index.layers {
+                if layer.effectively_locked {
+                    continue;
+                }
+                for channel in &layer.channels {
+                    let sel: Vec<bool> = channel
+                        .keys
+                        .iter()
+                        .map(|k| id_set.contains(k.id.as_str()))
+                        .collect();
+                    let len = channel.keys.len();
+                    for i in 0..len {
+                        if !sel[i] {
+                            continue;
+                        }
+                        let prev_sel = i > 0 && sel[i - 1];
+                        let next_sel = i + 1 < len && sel[i + 1];
+                        if prev_sel || next_sel {
+                            if next_sel {
+                                out_only.push(channel.keys[i].id.clone());
+                            }
+                            if prev_sel {
+                                in_only.push(channel.keys[i].id.clone());
+                            }
+                        } else {
+                            isolated.push(channel.keys[i].id.clone());
+                        }
+                    }
+                }
+            }
+            (out_only, in_only, isolated)
+        };
+        let commands: Vec<Command> = match args["type"].as_str().unwrap_or("") {
             "preset" => {
                 let name = args["preset"].as_str().unwrap_or("");
                 if !pm_eval::easing::PRESETS.iter().any(|(n, _)| *n == name) {
                     return Err(format!("Unknown easing preset {name}"));
                 }
-                KeyframeCommand::SetEasing {
-                    key_ids,
-                    curve: EaseSpec::Preset(name.into()),
+                if all_sides && key_ids.len() > 1 {
+                    key_ids
+                        .into_iter()
+                        .map(|id| {
+                            KeyframeCommand::SetEasing {
+                                key_ids: vec![id],
+                                curve: EaseSpec::Preset(name.into()),
+                            }
+                            .into()
+                        })
+                        .collect()
+                } else {
+                    vec![
+                        KeyframeCommand::SetEasing {
+                            key_ids,
+                            curve: EaseSpec::Preset(name.into()),
+                        }
+                        .into(),
+                    ]
                 }
-                .into()
             }
             "curve" => {
                 let numbers: Vec<f64> = args["curve"]
@@ -1922,30 +2061,83 @@ impl Backend {
                     .map(|n| n.as_f64().filter(|n| n.is_finite()))
                     .collect::<Option<_>>()
                     .ok_or("A curve is four numbers")?;
-                KeyframeCommand::SetEasing {
-                    key_ids,
-                    curve: EaseSpec::Curve([numbers[0], numbers[1], numbers[2], numbers[3]]),
+                let curve = [numbers[0], numbers[1], numbers[2], numbers[3]];
+                if all_sides && key_ids.len() > 1 {
+                    key_ids
+                        .into_iter()
+                        .map(|id| {
+                            KeyframeCommand::SetEasing {
+                                key_ids: vec![id],
+                                curve: EaseSpec::Curve(curve),
+                            }
+                            .into()
+                        })
+                        .collect()
+                } else {
+                    vec![
+                        KeyframeCommand::SetEasing {
+                            key_ids,
+                            curve: EaseSpec::Curve(curve),
+                        }
+                        .into(),
+                    ]
                 }
-                .into()
             }
-            "easyEase" => KeyframeCommand::EasyEase {
-                key_ids,
-                side: side(args)?,
+            "easyEase" => {
+                let side = side(args)?;
+                if all_sides {
+                    vec![KeyframeCommand::EasyEase { key_ids, side }.into()]
+                } else {
+                    let (out_ids, in_ids, iso_ids) = segment_sides(&key_ids);
+                    let mut cmds = Vec::new();
+                    if side != EaseSide::In && !out_ids.is_empty() {
+                        cmds.push(
+                            KeyframeCommand::EasyEase {
+                                key_ids: out_ids,
+                                side: EaseSide::Out,
+                            }
+                            .into(),
+                        );
+                    }
+                    if side != EaseSide::Out && !in_ids.is_empty() {
+                        cmds.push(
+                            KeyframeCommand::EasyEase {
+                                key_ids: in_ids,
+                                side: EaseSide::In,
+                            }
+                            .into(),
+                        );
+                    }
+                    if !iso_ids.is_empty() {
+                        cmds.push(
+                            KeyframeCommand::EasyEase {
+                                key_ids: iso_ids,
+                                side,
+                            }
+                            .into(),
+                        );
+                    }
+                    if cmds.is_empty() {
+                        cmds.push(KeyframeCommand::EasyEase { key_ids, side }.into());
+                    }
+                    cmds
+                }
             }
-            .into(),
-            "interpolation" => KeyframeCommand::SetInterpolation {
-                key_ids,
-                side: side(args)?,
-                interpolation: match args["interpolation"].as_str().unwrap_or("") {
-                    "linear" => Interpolation::Linear,
-                    "bezier" => Interpolation::Bezier,
-                    "hold" => Interpolation::Hold,
-                    "auto" => Interpolation::Auto,
-                    "continuous" => Interpolation::Continuous,
-                    other => return Err(format!("Unknown interpolation {other}")),
-                },
-            }
-            .into(),
+            "interpolation" => vec![
+                KeyframeCommand::SetInterpolation {
+                    key_ids,
+                    side: side(args)?,
+                    interpolation: match args["interpolation"].as_str().unwrap_or("") {
+                        "linear" => Interpolation::Linear,
+                        "bezier" => Interpolation::Bezier,
+                        "hold" => Interpolation::Hold,
+                        "auto" => Interpolation::Auto,
+                        "continuous" => Interpolation::Continuous,
+                        other => return Err(format!("Unknown interpolation {other}")),
+                    },
+                }
+                .into(),
+            ],
             other => return Err(format!("Unknown easing action {other}")),
         };
         Ok(Request::new(
@@ -1953,7 +2145,7 @@ impl Backend {
             Call::Transact {
                 label: Some(if args["type"] == "preset" { format!("Ease: {}", crate::timeline_easing::preset_name(args["preset"].as_str().unwrap_or(""))) } else if let Some(name) = args["name"].as_str().filter(|n| !n.is_empty() && n.chars().count() <= 100) { format!("Ease: {name}") } else { "Adjust easing".into() }),
                 expected_revision: Some(p.revision()),
-                body: WriteBody::Commands(vec![command]),
+                body: WriteBody::Commands(commands),
             },
         ))
     }
@@ -2091,6 +2283,9 @@ impl Backend {
                             HostAction::OpenComposition(id) => {
                                 json!({"kind":"openComposition","id":id})
                             }
+                            HostAction::FocusGroup(id) => {
+                                json!({"kind":"focusGroup","id":id})
+                            }
                             HostAction::Command { id, args } => {
                                 json!({"kind":"command","name":id,"args":args.iter().map(wire).collect::<Vec<_>>()})
                             }
@@ -2174,16 +2369,19 @@ impl Backend {
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
                     if action["type"] == "openMedia" {
-                        // Only a file or address one of this thread's replies names.
+                        // Only a file or address one of this thread's replies
+                        // (archived conversation or live active-run trace) names.
                         let path = action["path"].as_str().unwrap_or_default();
                         let home = reply_home();
-                        let media = state
+                        let session = state
                             .panel
                             .session(&thread)
-                            .map_err(|e| format!("{e:?}"))?
+                            .map_err(|e| format!("{e:?}"))?;
+                        let media = session
                             .conversation
                             .values()
                             .flat_map(prose_rows)
+                            .chain(session.trace.rows.values())
                             .flat_map(|row| reply_media(row, &home))
                             .find(|m| m.path == path)
                             .ok_or("This file can't be opened from here.")?;

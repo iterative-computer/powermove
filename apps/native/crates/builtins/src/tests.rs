@@ -1942,8 +1942,8 @@ fn the_viewer_shows_transport_only_when_no_timeline_is_shown() {
 
 /// "When I adjust position of the camera, it rotates the view" (Chike,
 /// 2026-11-14): a camera aims at its point of interest, so moving it re-aims
-/// it. Properties now shows that point and an Auto-Orient choice; Off keeps
-/// the view exactly when switched, and from then on Position only slides it.
+/// it. Properties shows the point in target mode and rotation in both modes.
+/// The Studio command still switches modes without moving the view.
 #[test]
 fn camera_position_only_translates_once_auto_orient_is_off() {
     let actor = actor();
@@ -2031,6 +2031,22 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
             panic!("{value}: {e}");
         }
     };
+    let orient = |mode: &str| {
+        let published = kernel.published("synthetic").unwrap();
+        let (label, commands) =
+            pm_panel_studio3d::properties::command(&published, 0., "3d.autoOrient", json!(mode))
+                .unwrap();
+        let request = Request::new(
+            Caller::native(),
+            pm_kernel::Call::Transact {
+                label: Some(label),
+                expected_revision: None,
+                body: pm_kernel::WriteBody::Commands(commands),
+            },
+        );
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    };
     // Where the shot camera stands and which way it looks.
     let view = || {
         let p = kernel.published("synthetic").unwrap();
@@ -2048,85 +2064,131 @@ fn camera_position_only_translates_once_auto_orient_is_off() {
     };
     let close = |a: [f64; 3], b: [f64; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-9);
 
-    // Aiming at its point of interest: Properties shows the point, and moving
-    // the camera turns it (the reported behaviour, now explained).
-    let (mut model, p) = publish(&mut presenter);
-    assert_eq!(transform(&p), ["Position", "Point of Interest"]);
-    assert_eq!(
-        row(&p, "3d.autoOrient").unwrap()["control"]["value"],
-        "target"
-    );
-    let (_, straight) = view();
-    write(
-        &presenter,
-        &mut model,
-        &row(&p, "position").unwrap(),
-        0,
-        json!(8.),
-    );
-    let (_, turned) = view();
-    assert!(
-        !close(straight, turned),
-        "a two-node camera re-aims when it moves"
-    );
-
-    // Auto-Orient Off keeps that turned view exactly (a real yaw, so the
-    // rotation it writes is checked), and shows Rotation instead.
-    let before = view();
-    let (mut model, p) = publish(&mut presenter);
-    write(
-        &presenter,
-        &mut model,
-        &row(&p, "3d.autoOrient").unwrap(),
-        0,
-        json!("off"),
-    );
-    let after = view();
-    assert!(
-        close(before.0, after.0) && close(before.1, after.1),
-        "{before:?} -> {after:?}"
-    );
+    // Cameras are rotation-only (no Point of Interest): Position only slides
+    // the camera without re-aiming it.
     let (mut model, p) = publish(&mut presenter);
     assert_eq!(transform(&p), ["Position", "Rotation"]);
-
-    // Now Position only slides the camera: the view direction is unchanged
-    // and the camera moved by exactly the edit.
+    assert!(row(&p, "3d.autoOrient").is_none());
+    let rotation = row(&p, "rotation3d").unwrap();
+    let axes = rotation["control"]["axes"].as_array().unwrap();
+    assert_eq!(axes.len(), 3);
+    for (axis, (label, path)) in
+        axes.iter()
+            .zip([("X", "rotation.x"), ("Y", "rotation.y"), ("Z", "rotation")])
+    {
+        assert_eq!(axis["axis"], label);
+        assert_eq!(axis["binding"]["channels"], json!([path]));
+        assert_eq!(axis["unit"], "°");
+        assert_eq!(axis["precision"], 2);
+    }
+    let before = view();
     write(
         &presenter,
         &mut model,
         &row(&p, "position").unwrap(),
         0,
-        json!(16.),
+        json!(8.25),
     );
     let moved = view();
     assert!(
-        close(moved.1, after.1),
-        "orientation unchanged: {:?} -> {:?}",
-        after.1,
+        close(moved.1, before.1),
+        "orientation unchanged when moving camera: {:?} -> {:?}",
+        before.1,
         moved.1
     );
     assert!(
-        close(moved.0, [after.0[0] + 8., after.0[1], after.0[2]]),
+        close(moved.0, [8.25, before.0[1], before.0[2]]),
         "{:?}",
         moved.0
     );
 
-    // Back toward a point of interest, the view still doesn't jump.
-    let (mut model, p) = publish(&mut presenter);
-    write(
-        &presenter,
-        &mut model,
-        &row(&p, "3d.autoOrient").unwrap(),
-        0,
-        json!("target"),
-    );
+    let (_, p) = publish(&mut presenter);
+    let position = row(&p, "position").unwrap();
+    assert_eq!(position["control"]["axes"][0]["value"], 8.25);
+    assert_eq!(position["control"]["axes"][0]["precision"], 2);
+    assert_eq!(position["control"]["axes"][2]["axis"], "Z");
+
+    // Legacy autoOrient command still keeps the view without jumping, while
+    // Properties stays rotation-only without Point of Interest.
+    orient("target");
     let back = view();
     assert!(
         close(back.0, moved.0) && close(back.1, moved.1),
         "{moved:?} -> {back:?}"
     );
     let (_, p) = publish(&mut presenter);
-    assert_eq!(transform(&p), ["Position", "Point of Interest"]);
+    assert_eq!(transform(&p), ["Position", "Rotation"]);
+
+    let (mut model, _) = publish(&mut presenter);
+    let request = presenter
+        .intent(
+            &mut model,
+            Caller::native(),
+            &json!({"type":"key","row":"rotation3d"}),
+            0.,
+        )
+        .unwrap()
+        .unwrap();
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    let (_, p) = publish(&mut presenter);
+    let rotation = row(&p, "rotation3d").unwrap();
+    assert_eq!(rotation["animation"], "key-at-playhead");
+    assert!(
+        rotation["control"]["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|axis| axis["animation"] == "key-at-playhead")
+    );
+
+    let request = Request::new(
+        Caller::native(),
+        pm_kernel::Call::Transact {
+            label: None,
+            expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(
+                ["position.x", "rotation.y"]
+                    .into_iter()
+                    .map(|channel| {
+                        pm_kernel::PropertyCommand::SetExpression {
+                            layer_id: "cam".into(),
+                            channel: channel.into(),
+                            expression: Some("value + 0.25".into()),
+                        }
+                        .into()
+                    })
+                    .collect(),
+            ),
+        },
+    );
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(
+        !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+        "{:?}",
+        ack.reply
+    );
+    let (mut model, p) = publish(&mut presenter);
+    for id in ["position", "rotation3d"] {
+        assert_eq!(row(&p, id).unwrap()["expression"]["source"], "value + 0.25");
+    }
+    let request = presenter
+        .intent(
+            &mut model,
+            Caller::native(),
+            &json!({"type":"row-action","row":"position","action":"separate-dimensions"}),
+            0.,
+        )
+        .unwrap()
+        .unwrap();
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(
+        !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+        "{:?}",
+        ack.reply
+    );
+    let (_, p) = publish(&mut presenter);
+    assert_eq!(row(&p, "position").unwrap()["separateDimensions"], true);
 }
 
 #[test]
@@ -4304,6 +4366,35 @@ fn type_settings_list_a_variable_fonts_axes_and_saved_axes_of_a_missing_font() {
     assert!(section("system", &mut presenter).0.is_none());
 }
 
+#[test]
+fn properties_omit_3d_scene_for_an_empty_composition() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let project = pm_model::json::parse(
+        r#"{"id":"synthetic","name":"Empty","w":640,"h":360,"fps":30,"dur":5,"layers":[],"assets":{},"comps":{}}"#,
+    )
+    .unwrap();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let p = properties::Properties::default()
+        .snapshot(&mut model, 0., false)
+        .unwrap();
+    assert!(
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["id"] != "3d.scene")
+    );
+}
+
 /// 3d-studio.md §8 through the Properties presenter: each role's sections,
 /// a channel row writing like any property, and pop-ups and checkboxes
 /// going through the Studio's typed edits.
@@ -4337,7 +4428,8 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     };
     run(json!({"operation":"add_object","id":"model","object":{"source":{"primitive":"box"}}}));
     run(json!({"operation":"add_light","id":"lamp","light":{"type":"area"}}));
-    run(json!({"operation":"add_camera","id":"cam"}));
+    // This saved camera has optional bokeh channels authored.
+    run(json!({"operation":"add_camera","id":"cam","camera":{"p":{"irisShape":0,"irisRoundness":0}}}));
     let mut presenter = properties::Properties::default();
     let publish = |presenter: &mut properties::Properties, id: &str| {
         select_layer(&kernel, id);
@@ -4592,21 +4684,30 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     );
 
     let (mut model, p) = publish(&mut presenter, "cam");
-    assert_eq!(titles(&p), ["Camera", "Depth of Field", "Environment", "Shot"]);
+    assert_eq!(p["target"]["first"]["typeLabel"], "Camera");
+    assert_eq!(titles(&p), ["Camera", "Depth of Field", "Environment"]);
+    let sections = p["sections"].as_array().unwrap();
     assert_eq!(
-        labels(&p, "Camera"),
+        sections
+            .iter()
+            .take(4)
+            .map(|s| (
+                s["title"].as_str().unwrap(),
+                s["collapsed"].as_bool().unwrap()
+            ))
+            .collect::<Vec<_>>(),
         [
-            "Projection",
-            "Auto-Orient",
-            "Field of View",
-            "Clip Start",
-            "Clip End",
+            ("Transform", false),
+            ("Camera", false),
+            ("Depth of Field", true),
+            ("Environment", true),
         ]
     );
     assert_eq!(
-        labels(&p, "Depth of Field"),
-        ["Depth of Field"]
+        labels(&p, "Camera"),
+        ["Projection", "Field of View", "Clip Start", "Clip End",]
     );
+    assert_eq!(labels(&p, "Depth of Field"), ["Enabled"]);
     assert_eq!(
         labels(&p, "Environment"),
         [
@@ -4617,6 +4718,65 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
             "Background"
         ]
     );
+    let collapsed = |p: &Value, id: &str| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .unwrap()["collapsed"]
+            .as_bool()
+            .unwrap()
+    };
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.dof.enabled").unwrap(),
+        json!(true),
+    );
+    let (mut model, p) = publish(&mut presenter, "cam");
+    assert!(!collapsed(&p, "3d.depth-of-field"));
+    assert_eq!(
+        labels(&p, "Depth of Field"),
+        ["Enabled", "Focus Distance", "Blur"]
+    );
+    assert!(row(&p, "3d.dof.focusTarget").is_none());
+    assert!(row(&p, "3d.dof.irisShape").is_none());
+    for id in ["camera.focusDistance", "camera.blur", "environment.exposure"] {
+        let request = presenter
+            .intent(&mut model, Caller::native(), &json!({"type":"key","row":id}), 0.)
+            .unwrap()
+            .unwrap();
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert!(
+            !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+            "{:?}",
+            ack.reply
+        );
+        model.sync(kernel.published("synthetic").unwrap());
+    }
+    write(
+        &presenter,
+        &mut model,
+        &row(&p, "3d.dof.enabled").unwrap(),
+        json!(false),
+    );
+    let (mut model, p) = publish(&mut presenter, "cam");
+    assert_eq!(labels(&p, "Depth of Field"), ["Enabled"]);
+    assert!(!collapsed(&p, "3d.depth-of-field"));
+    assert!(!collapsed(&p, "3d.environment"));
+    assert!(presenter
+        .intent(
+            &mut model,
+            Caller::native(),
+            &json!({"type":"collapse","section":"3d.environment","collapsed":true}),
+            0.,
+        )
+        .unwrap()
+        .is_none());
+    let (mut model, p) = publish(&mut presenter, "cam");
+    assert!(collapsed(&p, "3d.environment"));
+
     write(
         &presenter,
         &mut model,
@@ -4624,15 +4784,13 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
         json!("orthographic"),
     );
     let (_, p) = publish(&mut presenter, "cam");
-    assert_eq!(labels(&p, "Camera")[2], "Zoom");
-    // The camera shows the composition's Render Quality, not a second sampler.
+    assert_eq!(labels(&p, "Camera")[1], "Zoom");
+    assert!(labels(&p, "Depth of Field").is_empty());
     assert!(row(&p, "3d.samples").is_none());
-    assert_eq!(
-        row(&p, "3d.scene.quality").unwrap()["control"]["value"],
-        "production"
-    );
-    // With nothing selected, the composition's 3D Scene section sets quality
-    // and sky for the whole scene.
+    assert!(row(&p, "3d.scene.quality").is_none());
+    assert!(labels(&p, "Shot").is_empty());
+
+    // With nothing selected, the composition's 3D Scene section controls the sky.
     kernel
         .call(
             "synthetic",
@@ -4652,14 +4810,16 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
         Default::default(),
     );
     let p = presenter.snapshot(&mut model, 0., false).unwrap();
-    let scene = row(&p, "3d.scene.quality").unwrap();
-    write(&presenter, &mut model, &scene, json!("final"));
-    let p = presenter.snapshot(&mut model, 0., false).unwrap();
-    assert_eq!(
-        row(&p, "3d.scene.quality").unwrap()["control"]["value"],
-        "final"
-    );
+    let scene = p["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "3d.scene")
+        .unwrap();
+    assert!(scene["action"].is_null());
+    assert_eq!(labels(&p, "3D Scene"), ["Sky"]);
     assert_eq!(row(&p, "3d.scene.sky").unwrap()["control"]["value"], "none");
+
     // A 2D shape has no 3D section, only Extrude, off.
     let (mut model, p) = publish(&mut presenter, "a");
     assert_eq!(titles(&p), ["Extrude"]);
@@ -6028,41 +6188,88 @@ fn properties_select_model_nodes_and_keyframe_their_transform() {
             .cloned()
             .unwrap()
     };
+    let parts = |p: &Value| {
+        p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|section| section["id"] == "3d.part")
+            .unwrap()
+            .clone()
+    };
+    let send = |presenter: &mut properties::Properties, intent: Value, time: f64| {
+        let request = presenter
+            .intent(&mut inspector(), native, &intent, time)
+            .unwrap()
+            .unwrap();
+        run(request);
+    };
+    let select = |value| json!({"type":"set-value","row":"3d.part.select","value":value});
     let p = presenter.snapshot(&mut inspector(), 0., false).unwrap();
-    let selector = row(&p, "3d.part.select");
-    assert_eq!(selector["control"]["options"][0]["label"], "Whole Model");
-    assert_eq!(selector["control"]["options"][1]["v"], "0");
-    let handle = selector["control"]["binding"]["handle"].as_str().unwrap();
-    run(presenter
-        .write(
-            &mut inspector(),
-            native,
-            handle,
-            data::model(&json!("0")).unwrap(),
-            0.,
-        )
-        .unwrap());
+    let section = parts(&p);
+    assert_eq!(section["title"], "Parts");
+    assert_eq!(section["parts"]["layer"], "model");
+    assert_eq!(section["parts"]["active"], Value::Null);
+    assert_eq!(section["rows"], json!([]));
+    let item = section["parts"]["items"][0].clone();
+    let name = item["label"].as_str().unwrap();
+    assert_eq!(
+        item,
+        json!({
+            "v":"0","label":name,"parent":null,"depth":0,"children":0,"visible":true,"edited":false,
+        })
+    );
+    send(&mut presenter, select(json!("0")), 0.);
 
     let p = presenter.snapshot(&mut inspector(), 0., false).unwrap();
-    assert_eq!(row(&p, "3d.part.select")["control"]["value"], "0");
-    assert_eq!(
-        row(&p, "3d.part.0.scale")["control"]["axes"][0]["value"],
-        100.
-    );
+    assert_eq!(parts(&p)["parts"]["active"], "0");
+    assert_eq!(parts(&p)["parts"]["activeName"], name);
+    assert_eq!(parts(&p)["parts"]["activeEdited"], false);
+    assert_eq!(parts(&p)["rows"].as_array().unwrap().len(), 3);
+    let position = row(&p, "3d.part.0.position");
+    let rotation = row(&p, "3d.part.0.rotation");
+    let scale = row(&p, "3d.part.0.scale");
+    for (index, (axis, path)) in [("X", "x"), ("Y", "y"), ("Z", "z")].into_iter().enumerate() {
+        let field = &position["control"]["axes"][index];
+        assert_eq!(field["axis"], axis);
+        assert_eq!(
+            field["binding"]["channels"],
+            json!([format!("3d.part.0.{path}")])
+        );
+        assert_eq!(field["step"], 0.01);
+        assert_eq!(field["precision"], 2);
+        assert_eq!(rotation["control"]["axes"][index]["axis"], axis);
+        assert_eq!(rotation["control"]["axes"][index]["unit"], "°");
+    }
+    assert_eq!(scale["control"]["axes"][0]["value"], 100.);
+    assert_eq!(scale["control"]["axes"][0]["unit"], "%");
+    assert_eq!(scale["control"]["axes"][0]["min"], 0);
+    assert_eq!(scale["control"]["axes"][0]["max"], 10000);
     assert!(row(&p, "3d.part.0.roughness")["control"].is_object());
-    run(presenter
-        .intent(
-            &mut inspector(),
-            native,
-            &json!({"type":"key","row":"3d.part.0.x"}),
-            0.,
-        )
-        .unwrap()
-        .unwrap());
+
+    let visibility = |value| json!({"type":"set-value","row":"3d.part.0.visible","value":value});
+    send(&mut presenter, visibility(false), 0.);
+    let p = presenter.snapshot(&mut inspector(), 0., false).unwrap();
+    assert_eq!(parts(&p)["parts"]["items"][0]["visible"], false);
+    assert_eq!(parts(&p)["parts"]["items"][0]["edited"], true);
+    assert_eq!(parts(&p)["parts"]["activeEdited"], true);
+    run(Request::new(native, pm_kernel::HistoryCall::Undo));
+    let p = presenter.snapshot(&mut inspector(), 0., false).unwrap();
+    assert_eq!(parts(&p)["parts"]["items"][0]["visible"], true);
+    assert_eq!(parts(&p)["parts"]["activeEdited"], false);
+
+    let key = json!({"type":"key","row":"3d.part.0.position"});
+    send(&mut presenter, key.clone(), 0.);
+    let p = presenter.snapshot(&mut inspector(), 0., false).unwrap();
+    assert_eq!(
+        row(&p, "3d.part.0.position")["animation"],
+        "key-at-playhead"
+    );
+    assert_eq!(row(&p, "3d.part.0.rotation")["animation"], "static");
     let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
-    let x = row(&p, "3d.part.0.x");
-    assert_eq!(x["animation"], "animated");
-    let handle = x["control"]["axes"][0]["binding"]["handle"]
+    let position = row(&p, "3d.part.0.position");
+    assert_eq!(position["animation"], "animated");
+    let handle = position["control"]["axes"][0]["binding"]["handle"]
         .as_str()
         .unwrap();
     run(presenter
@@ -6075,12 +6282,59 @@ fn properties_select_model_nodes_and_keyframe_their_transform() {
         )
         .unwrap());
     let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
-    assert_eq!(row(&p, "3d.part.0.x")["control"]["axes"][0]["value"], 2.);
-    assert_eq!(row(&p, "3d.part.0.x")["animation"], "key-at-playhead");
-    let history = pm_kernel::HistoryCall::Undo;
-    run(Request::new(native, history));
+    assert_eq!(
+        row(&p, "3d.part.0.position")["control"]["axes"][0]["value"],
+        2.
+    );
+    assert_eq!(row(&p, "3d.part.0.position")["animation"], "animated");
+    send(&mut presenter, key.clone(), 1.);
     let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
-    assert_eq!(row(&p, "3d.part.0.x")["control"]["axes"][0]["value"], 0.);
+    assert_eq!(
+        row(&p, "3d.part.0.position")["animation"],
+        "key-at-playhead"
+    );
+    assert_eq!(
+        row(&p, "3d.part.0.position")["control"]["axes"][0]["value"],
+        2.
+    );
+    send(&mut presenter, key, 1.);
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(row(&p, "3d.part.0.position")["animation"], "animated");
+    run(Request::new(native, pm_kernel::HistoryCall::Undo));
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(
+        row(&p, "3d.part.0.position")["animation"],
+        "key-at-playhead"
+    );
+
+    send(&mut presenter, visibility(false), 1.);
+    send(&mut presenter, visibility(true), 1.);
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(parts(&p)["parts"]["items"][0]["visible"], true);
+    send(
+        &mut presenter,
+        json!({"type":"set-value","row":"3d.part.0.reset","value":null}),
+        1.,
+    );
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(parts(&p)["parts"]["activeEdited"], false);
+    assert_eq!(row(&p, "3d.part.0.position")["animation"], "static");
+    assert_eq!(
+        row(&p, "3d.part.0.position")["control"]["axes"][0]["value"],
+        0.
+    );
+    let record = data::wire(&inspector().layer("model").unwrap());
+    assert!(record["d"]["data"]["object"]["parts"].get("0").is_none());
+    run(Request::new(native, pm_kernel::HistoryCall::Undo));
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(
+        row(&p, "3d.part.0.position")["animation"],
+        "key-at-playhead"
+    );
+    send(&mut presenter, select(Value::Null), 1.);
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(parts(&p)["parts"]["active"], Value::Null);
+    assert_eq!(parts(&p)["rows"], json!([]));
 }
 
 /// Playing, Properties shows a keyframed value at the playhead: the time the
@@ -6122,6 +6376,83 @@ fn properties_follow_the_playhead_while_playing() {
         assert!(shown.to_string().contains(&wanted), "{time}: {shown}");
     }
     assert!(panels.follow_time("not-open", 1., true).is_none());
+    assert!(panels.take_errors().is_empty());
+}
+
+/// Scrubbing the ruler, expanded Timeline property rows follow the playhead's
+/// evaluated value and at-playhead keyframe state via `follow_time`, without
+/// waiting for a kernel publication on mouse-up.
+#[test]
+fn timeline_expanded_properties_follow_the_playhead_during_scrub() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = pm_model::json::parse(r##"{"id":"synthetic","name":"Synthetic Film","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"a","type":"shape","name":"Headline","from":0,"dur":10,"on":true,"lock":false,"collapsed":false,"p":{"opacity":{"v":100,"kf":[{"t":0,"v":0},{"t":10,"v":100}]},"position.x":{"v":320,"kf":[]},"position.y":{"v":180,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##).unwrap();
+    let kernel = actor.handle();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    panels.update_facts(json!({"time":0,"playing":false,"stage":[640.,360.]}));
+    finish(panels.mount("timeline").unwrap());
+    let read_opacity = |panels: &Builtins| -> std::result::Result<(String, String), String> {
+        let publication = panels
+            .take_publications()
+            .into_iter()
+            .rfind(|p| p.panel == "timeline")
+            .ok_or_else(|| "no timeline publication".to_string())?;
+        let row_id = r#"["property","a","opacity"]"#;
+        let ids: Vec<String> = publication
+            .surface
+            .nodes()
+            .values()
+            .filter_map(|n| n.props.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        let value = publication
+            .surface
+            .nodes()
+            .values()
+            .find(|n| {
+                n.props.get("id").and_then(Value::as_str)
+                    == Some(&format!("timeline:value:{row_id}:opacity"))
+            })
+            .map(|n| Value::Object(n.props.clone()).to_string())
+            .ok_or_else(|| format!("missing value node; ids={ids:?}"))?;
+        let diamond = publication
+            .surface
+            .nodes()
+            .values()
+            .find(|n| {
+                n.props.get("id").and_then(Value::as_str)
+                    == Some(&format!("timeline:diamond:{row_id}"))
+            })
+            .map(|n| Value::Object(n.props.clone()).to_string())
+            .ok_or_else(|| format!("missing diamond node; ids={ids:?}"))?;
+        Ok((value, diamond))
+    };
+    let (v0, d0) = read_opacity(&panels).unwrap();
+    assert!(v0.contains("\"value\":0"), "t=0 value: {v0}");
+    assert!(d0.contains("Remove Keyframe"), "t=0 diamond: {d0}");
+
+    finish(
+        panels
+            .follow_time("timeline", 5., false)
+            .unwrap()
+            .unwrap(),
+    );
+    let (v5, d5) = read_opacity(&panels).unwrap();
+    assert!(v5.contains("\"value\":50"), "t=5 value: {v5}");
+    assert!(d5.contains("Add Keyframe"), "t=5 diamond: {d5}");
+
+    finish(
+        panels
+            .follow_time("timeline", 10., false)
+            .unwrap()
+            .unwrap(),
+    );
+    let (v10, d10) = read_opacity(&panels).unwrap();
+    assert!(v10.contains("\"value\":100"), "t=10 value: {v10}");
+    assert!(d10.contains("Remove Keyframe"), "t=10 diamond: {d10}");
     assert!(panels.take_errors().is_empty());
 }
 
@@ -6466,7 +6797,7 @@ fn the_easing_panel_eases_the_selected_keyframes_in_one_undo_step() {
         .iter()
         .filter(|(c, _)| c == "ease-thumbnail")
         .count();
-    assert_eq!(thumbnails, 27, "a thumbnail per preset");
+    assert_eq!(thumbnails, 38, "a thumbnail per built-in preset");
     let labels: Vec<String> = publication
         .surface
         .nodes()
@@ -6478,19 +6809,47 @@ fn the_easing_panel_eases_the_selected_keyframes_in_one_undo_step() {
                 .map(str::to_owned)
         })
         .collect();
-    assert!(!labels.iter().any(|l| l == "Apply Curve"));
-    for label in ["Expo Out", "Easy Ease", "Interpolation", "Outgoing influence (%)"] {
+    for label in ["Expo Out", "Easy Ease", "Apply curve", "Influence and interpolation"] {
         assert!(labels.iter().any(|l| l == label), "{label}: {labels:?}");
     }
-    // Save Current uses the existing durable library service from this panel,
-    // without requiring the Timeline panel or a prior library import.
-    let save = publication.surface.nodes().values().find(|node|
-        node.props.get("id").and_then(Value::as_str) == Some("easing:save")
-    ).unwrap().id;
-    finish(panels.event("easing", publication.generation, publication.surface.revision(), save, "click", Default::default()).unwrap());
+    // Saving a named preset opens the editor, then persists through the same
+    // service as the Timeline without requiring a prior library import.
+    let fire = |publication: &Publication, name: &str, event, detail| {
+        let node = publication
+            .surface
+            .nodes()
+            .values()
+            .find(|node| node.props.get("id").and_then(Value::as_str) == Some(name))
+            .unwrap();
+        finish(
+            panels
+                .event(
+                    "easing",
+                    publication.generation,
+                    publication.surface.revision(),
+                    node.id,
+                    event,
+                    detail,
+                )
+                .unwrap(),
+        );
+    };
+    fire(&publication, "easing:save-preset", "click", Default::default());
+    let editor = panels.take_publications().pop().unwrap();
+    fire(
+        &editor,
+        "easing:save-name",
+        "input",
+        EventDetail {
+            value: Some(json!("Test preset")),
+            ..Default::default()
+        },
+    );
+    let edited = panels.take_publications().pop().unwrap();
+    fire(&edited, "easing:save", "click", Default::default());
     let stored = data::wire(&kernel.state().settings[crate::timeline_easing::STORAGE]);
     let library = &stored[pm_services::surfaces::easing::STORAGE_KEY];
-    assert_eq!(library["groups"][0]["presets"][0]["name"], "Custom easing");
+    assert_eq!(library["groups"][0]["presets"][0]["name"], "Test preset");
     assert_eq!(library["groups"][0]["presets"].as_array().unwrap().len(), 1);
 }
 #[test]
@@ -7249,7 +7608,7 @@ fn properties_expose_editable_3d_transforms_when_enabled_on_a_saved_layer() {
             .find(|r| r["id"] == id)
             .unwrap()
     };
-    for id in ["position", "scale", "anchor", "orientation"] {
+    for id in ["position", "scale", "anchor", "rotation3d"] {
         let axes = row(id)["control"]["axes"].as_array().unwrap();
         assert_eq!(
             axes.iter()
@@ -7258,9 +7617,14 @@ fn properties_expose_editable_3d_transforms_when_enabled_on_a_saved_layer() {
             ["X", "Y", "Z"]
         );
     }
-    assert_eq!(row("rotation.x")["label"], "X Rotation");
-    assert_eq!(row("rotation.y")["label"], "Y Rotation");
-    assert_eq!(row("rotation")["label"], "Z Rotation");
+    assert_eq!(row("rotation3d")["label"], "Rotation");
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["id"] != "orientation"),
+        "untouched orientation row should be hidden in favor of unified Rotation"
+    );
     let perspective = &row("perspective")["control"]["axes"][0];
     assert_eq!(perspective["value"], 50.);
     assert_eq!(perspective["unit"], "mm");
@@ -7320,10 +7684,7 @@ fn properties_keyframing_3d_transform_rows_keys_all_three_axes() {
         ("position", ["position.x", "position.y", "position.z"]),
         ("scale", ["scale.x", "scale.y", "scale.z"]),
         ("anchor", ["anchor.x", "anchor.y", "anchor.z"]),
-        (
-            "orientation",
-            ["orientation.x", "orientation.y", "orientation.z"],
-        ),
+        ("rotation3d", ["rotation.x", "rotation.y", "rotation"]),
     ] {
         presenter.snapshot(&mut model, 1., false).unwrap();
         let req = presenter
@@ -7515,5 +7876,257 @@ fn a_gain_drag_starts_without_waiting_on_a_busy_inspector() {
         "a busy inspector sends the drag the ordinary way"
     );
     panels.close();
+    actor.shutdown();
+}
+
+#[test]
+fn composition_background_lives_in_properties_and_not_project_settings() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("inspector").unwrap());
+    let proj = {
+        let backend = panels
+            .broker
+            .entry("inspector")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .backend
+            .clone();
+        let mut guard = backend.lock().unwrap();
+        let b = &mut *guard;
+        b.native
+            .properties
+            .snapshot(b.model.as_mut().unwrap(), 0., false)
+            .unwrap()
+    };
+    let comp_rows = proj["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "composition")
+        .expect("composition section when nothing is selected")["rows"]
+        .as_array()
+        .unwrap();
+    let bg_row = comp_rows
+        .iter()
+        .find(|r| r["id"] == "bg")
+        .expect("Background row in Properties Composition section");
+    assert_eq!(bg_row["label"], "Background");
+    let binding = bg_row["control"]["binding"]["handle"].as_str().unwrap();
+    finish(panels.write("inspector", binding, json!("#1E2535")).unwrap());
+    let published = kernel.published("synthetic").unwrap();
+    let root = published.snapshot.root().unwrap();
+    let comp = pm_kernel::model::comp_node(root, published.snapshot.open_comp().as_deref()).unwrap();
+    assert_eq!(
+        comp.get("bg").and_then(|n| match n.kind() {
+            pm_model::NodeKind::String(s) => s.as_str(),
+            _ => None,
+        }),
+        Some("#1E2535")
+    );
+    finish(panels.mount("settings").unwrap());
+    let settings_proj = panels
+        .broker
+        .entry("settings")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone()
+        .lock()
+        .unwrap()
+        .settings_snapshot()
+        .unwrap();
+    let has_bg = settings_proj["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["id"] == "project.background");
+    assert!(
+        !has_bg,
+        "Background should be moved out of Project Settings into Properties"
+    );
+    panels.close();
+    actor.shutdown();
+}
+
+#[test]
+fn parenting_studio_3d_layer_to_null_promotes_it_to_3d_null_at_origin() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let published = kernel.published("synthetic").unwrap();
+    let (_, cmds, cube_id) =
+        pm_panel_studio3d::view::add_layer(&published, 0., "box", "cube-3d").unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::EditCall::Apply {
+                    body: pm_kernel::WriteBody::Commands(cmds),
+                    base_revision: None,
+                    label: Some("Add Cube".into()),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let add_null = pm_kernel::commands::layers::AddLayer {
+        id: "rig-null".into(),
+        layer_type: "null".into(),
+        comp: None,
+        name: Some("Rig Null".into()),
+        from: Some(0.),
+        duration: Some(5.),
+        content: pm_model::Map::new(),
+        properties: pm_model::Map::new(),
+        color: None,
+        index: None,
+        parent: None,
+        blend: None,
+        motion_blur: None,
+        visible: None,
+        shy: None,
+        collapsed: None,
+        track: None,
+        time: 0.,
+    };
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::EditCall::Apply {
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::LayerCommand::Add(Box::new(add_null)).into(),
+                    ]),
+                    base_revision: None,
+                    label: Some("Add Null".into()),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::EditCall::Apply {
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::LayerCommand::Set {
+                            layer_id: cube_id.clone(),
+                            patch: pm_kernel::commands::layers::LayerPatch {
+                                parent: Some(pm_kernel::commands::layers::ParentChange {
+                                    parent: Some("rig-null".into()),
+                                    time: 0.,
+                                }),
+                                time: 0.,
+                                ..Default::default()
+                            },
+                        }
+                        .into(),
+                    ]),
+                    base_revision: None,
+                    label: Some("Parent".into()),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let after = kernel.published("synthetic").unwrap();
+    let root = after.snapshot.root().unwrap();
+    let comp = pm_kernel::model::comp_node(root, after.snapshot.open_comp().as_deref()).unwrap();
+    let layers = match comp.get("layers").unwrap().kind() {
+        pm_model::NodeKind::Array(a) => a,
+        _ => panic!("layers array"),
+    };
+    let null = layers
+        .iter()
+        .find(|l| {
+            l.get("id")
+                .and_then(|n| n.to_value().as_str().map(str::to_owned))
+                .as_deref()
+                == Some("rig-null")
+        })
+        .unwrap();
+    assert_eq!(
+        null.get("threeD").map(pm_model::Node::to_value),
+        Some(pm_model::Value::Bool(true))
+    );
+    assert_eq!(
+        null.get("d")
+            .and_then(|d| d.get("studio3d"))
+            .map(pm_model::Node::to_value),
+        Some(pm_model::Value::Bool(true))
+    );
+    let ch = |n: &pm_model::Node, k: &str| {
+        n.get("p")
+            .and_then(|p| p.get(k))
+            .and_then(|c| c.get("v"))
+            .and_then(|v| v.to_value().as_f64())
+            .unwrap()
+    };
+    assert_eq!(ch(null, "position.x"), 0.0);
+    assert_eq!(ch(null, "position.y"), 0.0);
+    assert_eq!(ch(null, "position.z"), 0.0);
+    assert_eq!(ch(null, "anchor.x"), 0.0);
+    assert_eq!(ch(null, "anchor.y"), 0.0);
+    select_layer(&kernel, "rig-null");
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let mut presenter = properties::Properties::default();
+    let proj = presenter.snapshot(&mut model, 0., false).unwrap();
+    assert_eq!(proj["target"]["first"]["studio"], true);
+    assert_eq!(proj["target"]["first"]["typeLabel"], "3D Null");
+    actor.shutdown();
+}
+
+#[test]
+fn semantic_activate_retargets_after_node_id_republish() {
+    let actor = actor();
+    let kernel = actor.handle();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("inspector").unwrap());
+    let publication = panels.take_publications().pop().unwrap();
+    let entry_arc = panels.broker.entry("inspector").unwrap();
+    let mut entry = entry_arc.lock().unwrap();
+    // Pick any existing node that carries a semantic props["id"] and invoke
+    // `event_source` with a stale numeric target id + stale revision.
+    let (live_id, semantic_id) = entry
+        .surface
+        .nodes()
+        .iter()
+        .find_map(|(&id, node)| {
+            node.props
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|sid| (id, sid.to_owned()))
+        })
+        .expect("inspector surface has semantic nodes");
+    let stale_target = live_id + 10_000;
+    let stale_revision = publication.surface.revision().saturating_sub(1);
+    let source = Builtins::event_source(
+        &mut entry,
+        publication.generation,
+        stale_revision,
+        stale_target,
+        "click",
+        EventDetail::default(),
+        Some(semantic_id.clone()),
+    )
+    .expect("semantic id should retarget to the live node after republish");
+    assert!(
+        source.contains(&format!("\"target\":{live_id}")),
+        "expected retargeted node id {live_id} in {source}"
+    );
+    drop(entry);
     actor.shutdown();
 }

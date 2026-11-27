@@ -202,6 +202,104 @@ fn comp_ids(root: &Node) -> Vec<Option<String>> {
     out
 }
 
+/// A project-wide index, rebuilt only when an operation can change layer
+/// membership, ordering, or id. Duplicate ids keep the first stored position.
+pub(crate) struct LayerIndex {
+    comps: Vec<(
+        Option<String>,
+        std::collections::HashMap<String, (usize, bool)>,
+    )>,
+}
+
+impl LayerIndex {
+    pub(crate) fn new(root: Option<&Node>) -> Self {
+        let comps = root
+            .into_iter()
+            .flat_map(|root| comp_ids(root).into_iter().map(move |id| (root, id)))
+            .map(|(root, id)| {
+                let positions = comp_node(root, id.as_deref())
+                    .map(|comp| {
+                        let locks = GroupLocks::new(layers_of(comp));
+                        let mut positions = std::collections::HashMap::new();
+                        for (index, layer) in layers_of(comp).enumerate() {
+                            if let Some(id) = layer.get("id").and_then(str_of) {
+                                positions
+                                    .entry(id.to_owned())
+                                    .or_insert_with(|| (index, locks.locked(layer, id)));
+                            }
+                        }
+                        positions
+                    })
+                    .unwrap_or_default();
+                (id, positions)
+            })
+            .collect();
+        Self { comps }
+    }
+
+    pub(crate) fn contains_open(&self, id: &str) -> bool {
+        self.comps
+            .first()
+            .is_some_and(|(_, layers)| layers.contains_key(id))
+    }
+
+    pub(crate) fn find(&self, id: &str) -> Option<(LayerLoc, bool)> {
+        self.comps.iter().find_map(|(comp_id, layers)| {
+            layers.get(id).map(|&(index, locked)| {
+                (
+                    LayerLoc {
+                        comp_id: comp_id.clone(),
+                        index,
+                    },
+                    locked,
+                )
+            })
+        })
+    }
+}
+
+pub(crate) fn layer_positions(comp: &Node) -> std::collections::HashMap<String, usize> {
+    let mut positions = std::collections::HashMap::new();
+    for (index, layer) in layers_of(comp).enumerate() {
+        if let Some(id) = layer.get("id").and_then(str_of) {
+            positions.entry(id.to_owned()).or_insert(index);
+        }
+    }
+    positions
+}
+
+/// The composition-local tail of an operation's path.
+pub(crate) fn comp_op_path(path: &[PathPart]) -> Option<(Option<&str>, &[PathPart])> {
+    match path {
+        [PathPart::Key(key), PathPart::Key(id), rest @ ..] if key.as_str() == Some("comps") => {
+            Some((Some(id.as_str()?), rest))
+        }
+        [PathPart::Key(key), ..] if matches!(key.as_str(), Some("comps" | "compId")) => None,
+        [] => None,
+        _ => Some((None, path)),
+    }
+}
+
+pub(crate) fn changes_layer_index(ops: &[pm_model::Op], include_locks: bool) -> bool {
+    ops.iter().any(|op| {
+        let Some((_, path)) = comp_op_path(op.path()) else {
+            return true;
+        };
+        match path {
+            [] => true,
+            [PathPart::Key(key), rest @ ..] if key.as_str() == Some("layers") => match rest {
+                [_, PathPart::Key(field), ..] => match field.as_str() {
+                    Some("id") | None => true,
+                    Some("lock" | "group" | "type") => include_locks,
+                    _ => false,
+                },
+                _ => true,
+            },
+            _ => false,
+        }
+    })
+}
+
 /// Finds a layer by id: the open composition first, then the others (a
 /// precomp's layers are edited without opening it).
 pub fn find_layer(root: &Node, layer_id: &str) -> Option<LayerLoc> {
@@ -391,6 +489,104 @@ pub fn layer_names(root: &Node, comp_id: Option<&str>) -> Vec<(String, String)> 
         .collect()
 }
 
+/// Propagate locks once through the group graph, including cycles. Each
+/// group has at most one parent, so the graph and the propagation are linear.
+pub(crate) struct GroupLocks<'a> {
+    groups: std::collections::HashMap<&'a str, &'a Node>,
+    locked: std::collections::HashSet<&'a str>,
+}
+
+impl<'a> GroupLocks<'a> {
+    pub(crate) fn new(layers: impl IntoIterator<Item = &'a Node>) -> Self {
+        use std::collections::{HashMap, HashSet};
+        let mut groups = HashMap::new();
+        for layer in layers {
+            if layer.get("type").and_then(str_of) == Some("group")
+                && let Some(id) = layer.get("id").and_then(str_of)
+            {
+                groups.entry(id).or_insert(layer);
+            }
+        }
+        let mut pending: Vec<_> = groups
+            .iter()
+            .filter_map(|(&id, group)| {
+                (group.get("lock").and_then(bool_of) == Some(true)).then_some(id)
+            })
+            .collect();
+        if pending.is_empty() {
+            return Self {
+                groups,
+                locked: HashSet::new(),
+            };
+        }
+        let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (&id, &layer) in &groups {
+            if let Some(parent) = layer
+                .get("group")
+                .and_then(str_of)
+                .filter(|s| !s.is_empty())
+            {
+                children.entry(parent).or_default().push(id);
+            }
+        }
+        let mut locked = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if locked.insert(id)
+                && let Some(children) = children.remove(id)
+            {
+                pending.extend(children);
+            }
+        }
+        Self { groups, locked }
+    }
+
+    pub(crate) fn locked(&self, layer: &Node, id: &str) -> bool {
+        if layer.get("lock").and_then(bool_of) == Some(true) {
+            return true;
+        }
+        self.inherits_lock(layer, id, layer.get("group").and_then(str_of))
+    }
+
+    fn inherits_lock(&self, layer: &Node, id: &str, parent: Option<&str>) -> bool {
+        if self.locked.is_empty() {
+            return false;
+        }
+        let Some(parent) = parent.filter(|s| !s.is_empty()) else {
+            return false;
+        };
+        if !self.locked.contains(parent) {
+            return false;
+        }
+        if self
+            .groups
+            .get(id)
+            .is_none_or(|group| std::ptr::eq(*group, layer))
+        {
+            return true;
+        }
+        // With duplicate IDs, the legacy walk stops before visiting a
+        // different group that shares this layer's id.
+        let mut seen = std::collections::HashSet::from([id]);
+        let mut next = Some(parent);
+        while let Some(parent) = next {
+            if !seen.insert(parent) {
+                break;
+            }
+            let Some(group) = self.groups.get(parent) else {
+                break;
+            };
+            if group.get("lock").and_then(bool_of) == Some(true) {
+                return true;
+            }
+            next = group
+                .get("group")
+                .and_then(str_of)
+                .filter(|s| !s.is_empty());
+        }
+        false
+    }
+}
+
 /// The layers of the composition `comp_id` (`None`: the open one).
 pub fn list_layers(root: &Node, comp_id: Option<&str>) -> Vec<LayerInfo> {
     walked();
@@ -399,44 +595,40 @@ pub fn list_layers(root: &Node, comp_id: Option<&str>) -> Vec<LayerInfo> {
     let Some(comp) = comp_node(root, comp_id.as_deref()) else {
         return Vec::new();
     };
-    // Group layers by id, once: each layer's lock walks its group chain
-    // through this map (`is_locked` searches the stack per group, which over
-    // every layer of a large composition was quadratic: 41 ms for 867).
-    // The first group layer with an id wins, as `group_ancestors` finds it.
-    let mut groups: std::collections::HashMap<&str, &Node> = Default::default();
-    for l in layers_of(comp).filter(|l| l.get("type").and_then(str_of) == Some("group")) {
-        if let Some(id) = l.get("id").and_then(str_of) {
-            groups.entry(id).or_insert(l);
-        }
-    }
-    let locked = |layer: &Node| {
-        if layer.get("lock").and_then(bool_of) == Some(true) {
-            return true;
-        }
-        let mut seen: Vec<&str> = layer.get("id").and_then(str_of).into_iter().collect();
-        let mut next = layer.get("group").and_then(str_of).filter(|s| !s.is_empty());
-        while let Some(id) = next {
-            if seen.contains(&id) {
-                break;
-            }
-            seen.push(id);
-            let Some(group) = groups.get(id) else {
-                break;
-            };
-            if group.get("lock").and_then(bool_of) == Some(true) {
-                return true;
-            }
-            next = group.get("group").and_then(str_of).filter(|s| !s.is_empty());
-        }
-        false
-    };
+    let groups = GroupLocks::new(layers_of(comp));
+    // Consecutive layers commonly share a key schema. Resolve the columns
+    // once per schema, then read their positions directly from each row.
+    let mut schema = None;
+    let mut positions = [None; 11];
+    let fields = [
+        "id", "name", "type", "from", "dur", "on", "lock", "group", "solo", "shy", "parent",
+    ];
     layers_of(comp)
         .enumerate()
         .filter_map(|(index, layer)| {
-            let id = layer.get("id").and_then(str_of)?.to_owned();
-            let from = layer.get("from").and_then(number_of).unwrap_or(0.0);
-            let dur = layer.get("dur").and_then(number_of).unwrap_or(0.0);
-            let on = layer.get("on");
+            let NodeKind::Object(map) = layer.kind() else {
+                return None;
+            };
+            if schema != Some(map.schema_id()) {
+                schema = Some(map.schema_id());
+                positions = fields.map(|field| map.position(field.as_bytes()));
+            }
+            let [
+                id,
+                name,
+                kind,
+                from,
+                dur,
+                on,
+                lock,
+                group,
+                solo,
+                shy,
+                parent,
+            ] = positions.map(|position| position.and_then(|position| map.value_at(position)));
+            let id = id.and_then(str_of)?;
+            let from = from.and_then(number_of).unwrap_or(0.0);
+            let dur = dur.and_then(number_of).unwrap_or(0.0);
             let visible = match on.map(Node::kind) {
                 Some(NodeKind::Bool(b)) => *b,
                 Some(NodeKind::Object(_)) => on
@@ -445,28 +637,25 @@ pub fn list_layers(root: &Node, comp_id: Option<&str>) -> Vec<LayerInfo> {
                     .unwrap_or(true),
                 _ => true,
             };
+            let locked = lock.and_then(bool_of) == Some(true);
+            let group = group.and_then(str_of);
             Some(LayerInfo {
-                name: layer
-                    .get("name")
+                name: name
                     .and_then(string_of)
                     .map(JsString::to_string_lossy)
                     .unwrap_or_default(),
-                kind: layer
-                    .get("type")
-                    .and_then(str_of)
-                    .unwrap_or_default()
-                    .to_owned(),
-                parent: layer.get("parent").and_then(str_of).map(str::to_owned),
-                group: layer.get("group").and_then(str_of).map(str::to_owned),
+                kind: kind.and_then(str_of).unwrap_or_default().to_owned(),
+                parent: parent.and_then(str_of).map(str::to_owned),
+                group: group.map(str::to_owned),
                 in_time: from,
                 out_time: from + dur,
-                locked: layer.get("lock").and_then(bool_of) == Some(true),
-                effectively_locked: locked(layer),
+                locked,
+                effectively_locked: locked || groups.inherits_lock(layer, id, group),
                 visible,
-                solo: layer.get("solo").and_then(bool_of) == Some(true),
-                shy: layer.get("shy").and_then(bool_of) == Some(true),
+                solo: solo.and_then(bool_of) == Some(true),
+                shy: shy.and_then(bool_of) == Some(true),
                 index,
-                id,
+                id: id.to_owned(),
             })
         })
         .collect()
@@ -713,7 +902,10 @@ pub(crate) fn naming_ops(root: &Node, ops: Option<&[pm_model::Op]>) -> Vec<pm_mo
 /// A recovery journal's base is that document: a session whose keys moved
 /// since they were named differs from it.
 pub(crate) fn reopened_hash(document: &std::sync::Arc<pm_model::Document>) -> Option<String> {
-    let stripped = without_derived_key_ids(document);
+    hash_reopened_stripped(&without_derived_key_ids(document))
+}
+
+pub(crate) fn hash_reopened_stripped(stripped: &pm_model::Document) -> Option<String> {
     let root_stripped = stripped.root()?;
     let naming = naming_ops(root_stripped, None);
     if naming.is_empty() {

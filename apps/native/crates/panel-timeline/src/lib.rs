@@ -22,7 +22,7 @@ pub mod v4;
 mod v4_actions;
 
 pub use behaviour::*;
-pub use client::{ClientError, LayerPreviewFrame, TimelineClient};
+pub use client::{ClientError, KeyMovePreview, LayerPreviewFrame, TimelineClient};
 pub use interaction::*;
 pub use marquee::*;
 pub use reveal::{Disclosure, PropertyFacts, RevealState, RevealTarget};
@@ -92,14 +92,39 @@ pub enum GraphDisplay {
 #[derive(Debug)]
 struct CachedTrackLayout {
     index: Arc<TimelineIndex>,
+    rows: Arc<Vec<Row>>,
     held: HashMap<String, reveal::Held>,
+    focused_group: Option<String>,
     layout: Arc<tracks::Layout>,
+}
+
+/// The focused group id stored in the timeline's persisted UI state, if any.
+pub fn focused_group_from_ui(ui: &pm_kernel::state::UiState) -> Option<&str> {
+    ui.timeline
+        .get("nativeModel")
+        .and_then(|v| v.get("focusedGroup"))
+        .and_then(pm_model::Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// Validates the focused group stored in `published.ui_state` against the active
+/// composition in `published.snapshot`.
+pub fn focused_group_for_published(published: &Published) -> Option<String> {
+    let id = focused_group_from_ui(&published.ui_state)?;
+    let root = published.snapshot.root()?;
+    let layers = pm_kernel::model::list_layers(root, None);
+    layers
+        .iter()
+        .any(|l| l.id == id && l.kind == "group")
+        .then(|| id.to_owned())
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct TimelineModel {
     pub index: Arc<TimelineIndex>,
     pub selection: Selection,
+    /// Focused group layer id (double-clicked to edit like a composition).
+    pub focused_group: Option<String>,
     /// Transient value field; never persisted as a reveal request.
     pub editing_property: Option<(String, String)>,
     pub mode: TimelineMode,
@@ -130,9 +155,11 @@ pub struct TimelineModel {
     pub transition: Option<(String, crate::render::Edge)>,
     pub property_labels: HashMap<(String, String), String>,
     pub(crate) anchor: Option<String>,
-    rows: Vec<Row>,
-    row_positions: HashMap<RowId, usize>,
+    rows: Arc<Vec<Row>>,
+    row_positions: Arc<HashMap<RowId, usize>>,
+    layer_positions: Arc<Vec<Option<usize>>>,
     track_layout: Arc<std::sync::Mutex<Option<CachedTrackLayout>>>,
+    track_outline: Arc<std::sync::Mutex<Option<Arc<v4::TrackOutline>>>>,
     pub rebuilds: u64,
     /// Monotonic request, consumed once by the native scroll host.
     pub reveal_serial: u64,
@@ -148,25 +175,84 @@ impl TimelineModel {
     /// Lane packing depends on the immutable index and the held lane assignments.
     /// Model clones used by the canvas and outline share the packed result.
     pub fn track_layout(&self) -> Arc<tracks::Layout> {
+        let focus = self.active_focused_group().map(str::to_owned);
         let mut cached = self.track_layout.lock().unwrap();
         if let Some(entry) = &*cached
             && Arc::ptr_eq(&entry.index, &self.index)
+            && Arc::ptr_eq(&entry.rows, &self.rows)
             && entry.held == self.reveal.held
+            && entry.focused_group == focus
         {
             return entry.layout.clone();
         }
-        let layout = Arc::new(tracks::layout(&self.index, &self.reveal));
+        let layout = Arc::new(tracks::layout_focused(
+            &self.index,
+            &self.reveal,
+            focus.as_deref(),
+        ));
         *cached = Some(CachedTrackLayout {
             index: self.index.clone(),
+            rows: self.rows.clone(),
             held: self.reveal.held.clone(),
+            focused_group: focus,
             layout: layout.clone(),
         });
         layout
     }
 
+    /// The currently focused group layer id, if it still exists as a group in
+    /// the active composition.
+    pub fn active_focused_group(&self) -> Option<&str> {
+        let id = self.focused_group.as_deref()?;
+        self.index
+            .layer(id)
+            .is_some_and(|l| l.kind == "group")
+            .then_some(id)
+    }
+
+    /// Outermost-to-innermost chain of focused groups (empty when viewing the
+    /// whole composition).
+    pub fn focused_group_chain(&self) -> Vec<&Layer> {
+        let Some(mut cur) = self.active_focused_group() else {
+            return Vec::new();
+        };
+        let mut chain = Vec::new();
+        let mut seen = HashSet::new();
+        while seen.insert(cur) {
+            let Some(layer) = self.index.layer(cur) else {
+                break;
+            };
+            if layer.kind != "group" {
+                break;
+            }
+            chain.push(layer);
+            match layer.group.as_deref() {
+                Some(parent) => cur = parent,
+                None => break,
+            }
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// Focus a group layer like a composition (`None` returns to the active
+    /// composition root).
+    pub fn set_focused_group(&mut self, group: Option<String>) -> Result<(), ModelError> {
+        if let Some(id) = group.as_deref()
+            && !self.index.layer(id).is_some_and(|l| l.kind == "group")
+        {
+            return Err(ModelError::UnknownId(id.into()));
+        }
+        self.focused_group = group;
+        self.rebuild_rows();
+        Ok(())
+    }
+
     pub fn follows_publication(&self, published: &Published) -> bool {
         self.follows_snapshot(&published.snapshot)
-            && self.ui_seen.as_ref() == Some(&published.ui_state.timeline)
+            && self.ui_seen.as_ref().is_some_and(|seen| {
+                crate::session::same_model_ui(seen, &published.ui_state.timeline)
+            })
             && self.selection == published.selection
     }
 
@@ -183,18 +269,21 @@ impl TimelineModel {
         let new_document = self.index.doc_id != published.snapshot.doc_id;
         let changed = !self.follows_snapshot(&published.snapshot);
         let same_composition =
-            !new_document && self.index.comp_id == published.snapshot.open_comp();
+            !new_document && (!changed || self.index.comp_id == published.snapshot.open_comp());
         if new_document {
             *self = Self::default();
         }
         let selection_changed = self.selection.layers() != published.selection.layers();
-        let keys_changed = self.selection.keys() != published.selection.keys();
+        let keys_changed = self.selection.keys() != published.selection.keys()
+            || self.selection.key_layers() != published.selection.key_layers();
         let selection_step = !changed
             && self.history_applied != published.history.applied
             && self.history_entries == published.history.entries;
         self.history_applied = published.history.applied;
         self.history_entries = published.history.entries;
-        self.selection = published.selection.clone();
+        if self.selection != published.selection {
+            self.selection = published.selection.clone();
+        }
         let previous = (changed && same_composition).then(|| self.index.clone());
         let agent_edit = changed
             && published.changes.last().is_some_and(|change| {
@@ -218,6 +307,7 @@ impl TimelineModel {
             self.reveal.entry = entry;
             self.reveal.revealed_in_entry.clear();
         }
+        let mut rows_changed = false;
         if changed {
             // Tracks mode: the lanes shown now hold through whatever changed
             // the document (the timeline, a menu, Properties, an agent).
@@ -226,8 +316,16 @@ impl TimelineModel {
             } else {
                 self.reveal.held.clear();
             }
+            if !same_composition {
+                self.focused_group = None;
+            }
             self.index = TimelineIndex::shared(&published.snapshot, &self.index);
-            self.rebuild_rows();
+            if self.focused_group.is_some() && self.active_focused_group().is_none() {
+                self.focused_group = None;
+            }
+            rows_changed = previous
+                .as_ref()
+                .is_none_or(|old| !self.index.shares_hierarchy(old));
         }
         // A transition stays selected until a selection leaves out its layer,
         // or the layer no longer has it.
@@ -240,7 +338,12 @@ impl TimelineModel {
         {
             self.transition = None;
         }
-        if self.ui_seen.as_ref() != Some(&published.ui_state.timeline) {
+        let rebuilds = self.rebuilds;
+        if self
+            .ui_seen
+            .as_ref()
+            .is_none_or(|seen| !crate::session::same_model_ui(seen, &published.ui_state.timeline))
+        {
             self.ui_seen = Some(published.ui_state.timeline.clone());
             self.restore_ui(&published.ui_state);
         }
@@ -254,12 +357,22 @@ impl TimelineModel {
             let mut added = Vec::new();
             let mut removed = Vec::new();
             let mut closed_empty_strip = false;
-            for layer in &self.index.layers {
+            for (i, layer) in self.index.layers.iter().enumerate() {
+                if previous
+                    .layers
+                    .get(i)
+                    .is_some_and(|old| Arc::ptr_eq(old, layer))
+                {
+                    continue;
+                }
                 let Some(old_layer) = previous.layer(&layer.id) else {
                     continue;
                 };
                 if std::ptr::eq(old_layer, layer.as_ref()) {
                     continue;
+                }
+                if self.rebuilds == rebuilds && !rows_changed {
+                    rows_changed = self.layer_rows_changed(old_layer, layer);
                 }
                 // An older document can have an empty, open disclosure.
                 // Adding a ready-animated effect or enabling a saved 3D
@@ -284,7 +397,7 @@ impl TimelineModel {
                 for channel in &layer.channels {
                     // New effect and mask channels may arrive with saved keys.
                     // Reveal only keys added to a channel already on this layer.
-                    let Some(old) = previous.channel(&layer.id, &channel.path) else {
+                    let Some(old) = old_layer.channel(&channel.path) else {
                         continue;
                     };
                     if channel.keys.is_empty() {
@@ -299,6 +412,15 @@ impl TimelineModel {
                         || channel.path.ends_with(".$enabled")
                         || channel.path == "c.audioMuted"
                         || !layer.channel_available(&channel.path)
+                    {
+                        continue;
+                    }
+                    if channel
+                        .keys
+                        .iter()
+                        .zip(&old.keys)
+                        .all(|(a, b)| a.id == b.id)
+                        && channel.keys.len() == old.keys.len()
                     {
                         continue;
                     }
@@ -344,13 +466,25 @@ impl TimelineModel {
                 if entry.is_some() && !self.reveal.revealed_in_entry.insert((layer.clone(), path.clone())) {
                     continue;
                 }
-                let _ = self.open_property_rows(&layer, None);
+                if self
+                    .reveal
+                    .layers
+                    .get(&layer)
+                    .is_some_and(|d| d.paths.is_some())
+                {
+                    let _ = self.include_paths(&layer, std::slice::from_ref(&path));
+                } else {
+                    let _ = self.open_property_rows(&layer, None);
+                }
                 self.reveal_serial += 1;
                 self.reveal_target = Some(RevealTarget::Property { layer, path });
             }
             if disclosure_changed {
                 self.rebuild_rows();
             }
+        }
+        if rows_changed && self.rebuilds == rebuilds {
+            self.rebuild_rows();
         }
         if selection_changed && !agent_edit {
             let selected = self.selection.layers().to_vec();
@@ -367,13 +501,20 @@ impl TimelineModel {
                 let Some(group) = self.index.layer(id).filter(|_| seen.insert(id)) else {
                     break;
                 };
-                let d = self.reveal.layers.entry(id.to_owned()).or_insert_with(|| Disclosure {
-                    collapsed: group.collapsed,
-                    group_collapsed: group.group_collapsed,
-                    paths: None,
-                });
-                opened |= d.group_collapsed;
-                d.group_collapsed = false;
+                if let Some(disclosure) = self.reveal.layers.get_mut(id) {
+                    opened |= disclosure.group_collapsed;
+                    disclosure.group_collapsed = false;
+                } else if group.group_collapsed {
+                    self.reveal.layers.insert(
+                        id.to_owned(),
+                        Disclosure {
+                            collapsed: group.collapsed,
+                            group_collapsed: false,
+                            paths: None,
+                        },
+                    );
+                    opened = true;
+                }
                 at = group.group.as_deref();
             }
         }
@@ -413,6 +554,34 @@ impl TimelineModel {
         false
     }
 
+    /// Changes to values and key times do not affect the visible outline.
+    fn layer_rows_changed(&self, old: &Layer, new: &Layer) -> bool {
+        if self.hide_shy && old.shy != new.shy {
+            return true;
+        }
+        let disclosure = self.reveal.layers.get(&new.id);
+        if disclosure.is_none()
+            && (old.collapsed != new.collapsed || old.group_collapsed != new.group_collapsed)
+        {
+            return true;
+        }
+        if !self.search.is_empty() {
+            return true;
+        }
+        if disclosure.map_or(new.collapsed, |d| d.collapsed) {
+            return false;
+        }
+        old.three_d != new.three_d
+            || old.separate_dimensions != new.separate_dimensions
+            || old.effects != new.effects
+            || old.channels.len() != new.channels.len()
+            || old.channels.iter().zip(&new.channels).any(|(a, b)| {
+                a.path != b.path
+                    || a.path_group != b.path_group
+                    || a.keys.is_empty() != b.keys.is_empty()
+            })
+    }
+
     pub fn rebuild_rows(&mut self) {
         self.reveal.retained_empty.retain(|(layer, path)| {
             let collapsed = self.reveal.layers.get(layer).map(|d| d.collapsed)
@@ -424,20 +593,21 @@ impl TimelineModel {
             }
             !collapsed
         });
-        self.rows.clear();
-        // Index parent links once; avoid an O(depth * layers) ancestor walk.
-        let children = self.index.children();
-        let mut stack: Vec<(usize, usize)> = self
-            .index
-            .roots(&children)
-            .into_iter()
-            .rev()
-            .map(|i| (i, 0))
-            .collect();
-        let mut seen = HashSet::new();
+        let mut rows = Vec::with_capacity(self.rows.len());
+        let mut layer_positions = vec![None; self.index.layers.len()];
+        let mut row_positions = HashMap::new();
+        let roots = self
+            .active_focused_group()
+            .and_then(|id| self.index.layer_ordinal(id))
+            .map_or_else(
+                || self.index.root_ordinals(),
+                |i| self.index.child_ordinals(i),
+            );
+        let mut stack: Vec<_> = roots.iter().rev().map(|i| (*i, 0)).collect();
+        let mut seen = vec![false; self.index.layers.len()];
         let query = self.search.trim().to_lowercase();
         while let Some((i, depth)) = stack.pop() {
-            if !seen.insert(i) {
+            if std::mem::replace(&mut seen[i], true) {
                 continue;
             }
             let layer = &self.index.layers[i];
@@ -449,12 +619,12 @@ impl TimelineModel {
             let group_closed = disclosure
                 .map(|d| d.group_collapsed)
                 .unwrap_or(layer.group_collapsed);
-            let kids = (!group_closed || !self.search.is_empty())
-                .then(|| children.get(&Some(layer.id.clone())))
-                .flatten();
+            let kids =
+                (!group_closed || !self.search.is_empty()).then(|| self.index.child_ordinals(i));
             // A closed layer with no search shows its row alone.
             if collapsed && query.is_empty() {
-                self.rows.push(Row {
+                layer_positions[i] = Some(rows.len());
+                rows.push(Row {
                     id: RowId::Layer(layer.id.clone()),
                     depth,
                 });
@@ -507,6 +677,7 @@ impl TimelineModel {
             }
             let matching: Vec<_> = properties
                 .iter()
+                .filter(|_| !query.is_empty())
                 .filter(|path| {
                     self.property_labels
                         .get(&(layer.id.clone(), (*path).clone()))
@@ -524,7 +695,8 @@ impl TimelineModel {
                 || layer.name.to_string_lossy().to_lowercase().contains(&query)
                 || !matching.is_empty();
             if include {
-                self.rows.push(Row {
+                layer_positions[i] = Some(rows.len());
+                rows.push(Row {
                     id: RowId::Layer(layer.id.clone()),
                     depth,
                 });
@@ -553,19 +725,24 @@ impl TimelineModel {
                                         effect: id.clone(),
                                     })
                             });
-                        if section != current_section && let Some(id) = &section {
-                            self.rows.push(Row {
+                        if section != current_section
+                            && let Some(id) = &section
+                        {
+                            row_positions.insert(id.clone(), rows.len());
+                            rows.push(Row {
                                 id: id.clone(),
                                 depth: depth + 1,
                             });
                         }
                         let property_depth = depth + if section.is_some() { 2 } else { 1 };
                         current_section = section;
-                        self.rows.push(Row {
-                            id: RowId::Property {
-                                layer_id: layer.id.clone(),
-                                channel: path,
-                            },
+                        let id = RowId::Property {
+                            layer_id: layer.id.clone(),
+                            channel: path,
+                        };
+                        row_positions.insert(id.clone(), rows.len());
+                        rows.push(Row {
+                            id,
                             depth: property_depth,
                         });
                     }
@@ -575,12 +752,9 @@ impl TimelineModel {
                 stack.extend(kids.iter().rev().map(|i| (*i, depth + 1)));
             }
         }
-        self.row_positions = self
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (r.id.clone(), i))
-            .collect();
+        self.row_positions = Arc::new(row_positions);
+        self.layer_positions = Arc::new(layer_positions);
+        self.rows = Arc::new(rows);
         self.rebuilds += 1;
     }
 
@@ -764,7 +938,16 @@ impl TimelineModel {
         (series, false)
     }
     pub fn row_position(&self, id: &RowId) -> Option<usize> {
-        self.row_positions.get(id).copied()
+        match id {
+            RowId::Layer(id) => self.layer_row_position(id),
+            _ => self.row_positions.get(id).copied(),
+        }
+    }
+    fn layer_row_position(&self, id: &str) -> Option<usize> {
+        self.layer_positions
+            .get(self.index.layer_ordinal(id)?)
+            .copied()
+            .flatten()
     }
     pub fn rows(&self) -> &[Row] {
         &self.rows
@@ -787,6 +970,11 @@ impl TimelineModel {
             });
         let siblings = if group.is_some() {
             children.get(&group).cloned().unwrap_or_default()
+        } else if let Some(gid) = self.active_focused_group() {
+            children
+                .get(&Some(gid.to_owned()))
+                .cloned()
+                .unwrap_or_default()
         } else {
             self.index.roots(&children)
         };
@@ -805,58 +993,59 @@ impl TimelineModel {
         self.index
             .layer(id)
             .ok_or_else(|| ModelError::UnknownId(id.into()))?;
-        let ids: Vec<_> = self
-            .rows
-            .iter()
-            .filter_map(|r| match &r.id {
-                RowId::Layer(id) => Some(id.clone()),
-                _ => None,
-            })
-            .collect();
         let current = self.selection.layers();
-        let mut next = current.to_vec();
-        if mods.shift {
+        let next = if mods.shift {
             if self
                 .anchor
                 .as_ref()
-                .is_none_or(|a| !ids.contains(a) || !current.contains(a))
+                .is_none_or(|id| !current.contains(id) || self.layer_row_position(id).is_none())
             {
                 self.anchor = current
                     .iter()
-                    .find(|id| ids.contains(id))
+                    .find(|id| self.layer_row_position(id).is_some())
                     .cloned()
                     .or_else(|| Some(id.into()));
             }
-            let a = ids
-                .iter()
-                .position(|x| Some(x) == self.anchor.as_ref())
+            let a = self
+                .anchor
+                .as_deref()
+                .and_then(|id| self.layer_row_position(id))
                 .ok_or(ModelError::HiddenRow)?;
-            let b = ids
+            let b = self.layer_row_position(id).ok_or(ModelError::HiddenRow)?;
+            let range = self.rows[a.min(b)..=a.max(b)]
                 .iter()
-                .position(|x| x == id)
-                .ok_or(ModelError::HiddenRow)?;
-            let range = &ids[a.min(b)..=a.max(b)];
+                .filter_map(|row| match &row.id {
+                    RowId::Layer(id) => Some(id),
+                    _ => None,
+                });
             if mods.command() {
-                for id in range {
-                    if !next.contains(id) {
-                        next.push(id.clone());
-                    }
-                }
+                let selected: HashSet<_> = current.iter().collect();
+                current
+                    .iter()
+                    .cloned()
+                    .chain(range.filter(|id| !selected.contains(id)).cloned())
+                    .collect()
             } else {
-                next = range.to_vec();
+                range.cloned().collect()
             }
         } else {
             self.anchor = Some(id.into());
-            if mods.command() {
-                if next.iter().any(|x| x == id) {
-                    next.retain(|x| x != id);
-                } else {
-                    next.push(id.into());
-                }
-            } else if !next.iter().any(|x| x == id) {
-                next = vec![id.into()];
+            let selected = self.selection.contains(id);
+            match (mods.command(), selected) {
+                (true, true) => current
+                    .iter()
+                    .filter(|layer| *layer != id)
+                    .cloned()
+                    .collect(),
+                (true, false) => current
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(id.into()))
+                    .collect(),
+                (false, true) => current.to_vec(),
+                (false, false) => vec![id.into()],
             }
-        }
+        };
         self.key_selection_active = false;
         Ok(vec![
             SelectionCall::Layers {
@@ -1154,6 +1343,17 @@ pub fn property_label(path: &str) -> String {
         "anchor.y" => "Anchor Point Y",
         "anchor.z" => "Anchor Point Z",
         "skew" => "Skew",
+        "camera.targetX" | "light.targetX" => "Point of Interest X",
+        "camera.targetY" | "light.targetY" => "Point of Interest Y",
+        "camera.targetZ" | "light.targetZ" => "Point of Interest Z",
+        "camera.fov" => "Field of View",
+        "camera.zoom" => "Zoom",
+        "camera.focusDistance" => "Focus Distance",
+        "camera.fStop" => "F-Stop",
+        "camera.blurLevel" => "Blur Level",
+        "light.intensity" => "Intensity",
+        "light.color" => "Light Color",
+        "environment.ambient" => "Ambient",
         _ => return pm_surface::humanize(path),
     }
     .to_owned()

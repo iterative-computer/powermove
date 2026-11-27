@@ -31,8 +31,8 @@ and `lit()` is the one that shows. `Kit::menu_row` no longer washes itself.
 
 Seven roles per appearance, chosen in OKLCH (`Colors::of`): an ink, four
 grounds (window, panel, recess, viewer), a floating surface and the accent.
-Dark is warm stone (hue about 55°, chroma under 0.01); light is cool paper
-(hue 286°). Everything else neutral is the ink over a ground at an alpha step:
+Dark grounds and ink have zero chroma. Light grounds have a subtle cool tint
+(hue 286°). The other neutrals are the ink over a ground at an alpha step:
 
 | Step | Role |
 |---|---|

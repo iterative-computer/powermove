@@ -588,6 +588,8 @@ struct View {
     retired_presenters: Vec<usize>,
     transient_snapshot: Option<Snapshot>,
     transient_content: Option<u64>,
+    /// An earlier edition with the same setup inputs as this snapshot.
+    setup_edition: Option<u64>,
     stamp: Stamp,
     content: u64,
     dirty: bool,
@@ -613,6 +615,7 @@ struct View {
     overlay_time: Option<Ticks>,
     locked_provider: Option<LockedOverlayProvider>,
     commands: VecDeque<TransportCommand>,
+    last_scrub: Option<Ticks>,
     /// When the oldest pending command was sent (host s), for the
     /// diagnostic trace's command-to-frame latency.
     commands_sent: Option<f64>,
@@ -643,17 +646,25 @@ struct View {
     quality: Quality,
     studio_preview: studio::Preview,
     studio_view: studio::ViewCamera,
+    camera_rest_at: Option<f64>,
+    focus_group: Option<String>,
     /// Auto draws dragged frames of a slow project reduced (an editor's
     /// viewer); otherwise every paused frame is exact.
     adapt_drags: bool,
     /// An edit is in progress (a kernel gesture is open: a layer, clip,
-    /// field or wheel being dragged). Its frames are drag frames, and each
-    /// one is shown when it lands although the drag has moved on.
+    /// field or wheel being dragged). It uses the interactive frame policy.
     editing: bool,
     /// The open edit has rested on this revision (text being typed, a drag
     /// held still): it is drawn as a resting picture, which the next step
     /// interrupts like any paused one.
     edit_rested: bool,
+    /// Host timestamp (seconds) of the latest document revision arrival, used
+    /// to avoid settling mid-scrub and to detect rapid non-gesture edit bursts
+    /// (e.g. arrow-key nudging).
+    last_edit_at: Option<f64>,
+    /// True while rapid non-gesture edits (2+ revisions within the settle window)
+    /// are arriving, keeping interactive preview rendering until input rests.
+    recent_edit: bool,
     /// The skimmer (Final Cut's): while paused the viewer shows this time,
     /// and the playhead stays where it is.
     skim: Option<Ticks>,
@@ -715,20 +726,39 @@ fn bumps_snapshot() -> serde_json::Value {
 /// The last scrub time asked of each view, and repeats of it (diagnostics).
 static LAST_SCRUB: Mutex<BTreeMap<u64, (i64, u64)>> = Mutex::new(BTreeMap::new());
 
-fn only_moved(v: &View, stamp: Stamp, moves: u64, moment: Moment, capture: bool) -> bool {
+fn only_moved(
+    v: &View,
+    stamp: Stamp,
+    moves: u64,
+    moment: Moment,
+    camera_motion: bool,
+    capture: bool,
+) -> bool {
     // 1: only playhead moves since the frame's stamp. 2: the same content
     // (generation, document, revision); a drag picture may carry the
     // previous overlay or quality for one frame, never another document.
     // While an edit is dragged every step is a new revision: its picture of
     // an earlier step is shown, the newest drawn next (else a drag faster
     // than a frame renders showed nothing until release).
+    // Likewise during continuous 3D camera motion (Fly WASD, mouse-look,
+    // orbit/pan), each finished camera frame presents even when newer 60 Hz
+    // poses arrived while it rendered, as long as no edit or capture landed.
     let mode = pm_media::decode::diag::knob("PM_FIX_PRESENT_STALE").or(Some(2));
+    if capture || !matches!(mode, Some(1 | 2)) {
+        return false;
+    }
+    if v.stamp.generation != stamp.generation || v.stamp.doc_id != stamp.doc_id {
+        return false;
+    }
+    if camera_motion {
+        return !v.capture
+            && v.camera_rest_at.is_some()
+            && v.stamp.revision == stamp.revision
+            && v.stamp.sequence.wrapping_sub(stamp.sequence) == v.moves.wrapping_sub(moves);
+    }
     moment == Moment::Scrub
-        && !capture
-        && matches!(mode, Some(1 | 2))
-        && v.stamp.generation == stamp.generation
-        && v.stamp.doc_id == stamp.doc_id
-        && ((v.editing && stamp.revision <= v.stamp.revision)
+        && (((v.editing || v.recent_edit || v.last_edit_at.is_some())
+            && stamp.revision <= v.stamp.revision)
             || (v.stamp.revision == stamp.revision
                 && (mode == Some(2)
                     || v.stamp.sequence.wrapping_sub(stamp.sequence)
@@ -740,6 +770,9 @@ impl View {
         if self.editing != on {
             self.editing = on;
             self.edit_rested = false;
+            if on {
+                self.recent_edit = false;
+            }
             self.stamp.sequence += 1;
             self.dirty = true;
         }
@@ -813,6 +846,7 @@ impl View {
                     ..
                 }
         );
+        self.last_scrub = None;
         self.commands.push_back(cmd);
         self.commands_sent.get_or_insert_with(trace::now);
         self.stamp.sequence += 1;
@@ -999,6 +1033,10 @@ impl Viewer {
         self.shared.wake.try_send(()).ok();
         Ok(())
     }
+    fn interrupt_frame(&self, view: &mut View) {
+        self.shared.supersede();
+        view.retry_now = true;
+    }
     /// Immutable publication input, cheap COW tree clone. The snapshot is the
     /// authoritative fallback if the consumer missed any change events.
     #[cfg(feature = "kernel")]
@@ -1018,13 +1056,20 @@ impl Viewer {
             )),
             Some(preview),
             Some(p.entry.is_some()),
+            |previous| {
+                p.entry.is_some()
+                    && p.only_transform_values_since(previous.doc_id, previous.revision)
+            },
         )
     }
     /// An edit is being dragged (`publish` says so from the kernel's open
-    /// gesture): its frames are drag frames and none waits for the next.
+    /// gesture): newer input can supersede its interactive frames.
     pub fn editing(&self, on: bool) -> Result<()> {
         self.edit(|v| {
-            v.set_editing(on);
+            if v.editing != on {
+                self.interrupt_frame(v);
+                v.set_editing(on);
+            }
             Ok(())
         })
     }
@@ -1057,9 +1102,10 @@ impl Viewer {
         if snapshot.is_none() && v.transient_snapshot.is_none() {
             return Ok(());
         }
-        if snapshot.is_none() || v.edit_rested {self.shared.supersede();}
+        self.interrupt_frame(v);
         v.set_editing(snapshot.is_some());
-        v.edit_rested=false;
+        v.edit_rested = false;
+        v.last_edit_at = Some(trace::now());
         v.transient_content = snapshot.as_ref().map(|_| content);
         v.transient_snapshot = snapshot;
         v.stamp.sequence += 1;
@@ -1070,7 +1116,7 @@ impl Viewer {
         Ok(())
     }
     pub fn snapshot(&self, snapshot: Snapshot) -> Result<()> {
-        self.snapshot_traced(snapshot, None, None, None)
+        self.snapshot_traced(snapshot, None, None, None, |_| false)
     }
     fn snapshot_traced(
         &self,
@@ -1078,6 +1124,7 @@ impl Viewer {
         spans: Option<(f64, f64)>,
         preview: Option<studio::Preview>,
         editing: Option<bool>,
+        same_setup: impl FnOnce(&Snapshot) -> bool,
     ) -> Result<()> {
         self.edit(|v| {
             ensure!(
@@ -1088,6 +1135,7 @@ impl Viewer {
                 snapshot.revision >= v.stamp.revision,
                 "stale kernel publication"
             );
+            let before = v.stamp;
             if let Some(preview) = preview {
                 v.set_studio_preview(preview);
             }
@@ -1099,17 +1147,25 @@ impl Viewer {
                     v.input.get_or_insert(input);
                 }
                 let (actor_ms, publication_ms) = spans.unwrap_or_default();
+                let now = trace::now();
+                let rapid = !v.editing
+                    && v.last_edit_at
+                        .is_some_and(|at| now - at <= policy::SETTLE_IDLE_SECONDS);
+                v.last_edit_at = Some(now);
+                if rapid {
+                    v.recent_edit = true;
+                }
                 v.pipeline = trace::Pipeline {
-                    request: trace::now(),
+                    request: now,
                     actor_ms,
                     publication_ms,
                 };
+                v.setup_edition = same_setup(&v.config.snapshot).then(|| {
+                    v.setup_edition
+                        .unwrap_or_else(|| v.config.snapshot.document.edition())
+                });
                 v.config.snapshot = snapshot;
-                // A drag's frame in flight is finished and shown, not
-                // abandoned for the next step; a resting picture gives way.
-                if !v.editing || std::mem::take(&mut v.edit_rested) {
-                    self.shared.supersede();
-                }
+                v.edit_rested = false;
                 v.stamp.revision = v.config.snapshot.revision;
                 v.stamp.sequence += 1;
                 bump_site(line!(), "");
@@ -1119,6 +1175,9 @@ impl Viewer {
                     v.overlays = OverlayGeometry::default();
                 }
                 v.dirty = true;
+            }
+            if v.stamp != before {
+                self.interrupt_frame(v);
             }
             Ok(())
         })
@@ -1190,11 +1249,30 @@ impl Viewer {
         camera.validate().map_err(anyhow::Error::msg)?;
         self.edit(|v| {
             if v.studio_view != camera {
+                let interactive = matches!(
+                    camera,
+                    studio::ViewCamera::Custom { .. } | studio::ViewCamera::Orthographic { .. },
+                );
+                let continuing = interactive && v.camera_rest_at.is_some();
+                // Entering or leaving camera motion interrupts any slow resting
+                // frame in flight. Continuing interactive ticks (e.g. 60 Hz Fly
+                // WASD / mouse-look) must not supersede an in-flight interactive
+                // camera frame, or scenes slower than 16 ms stall until key up.
+                if !continuing {
+                    self.interrupt_frame(v);
+                } else {
+                    v.retry_now = true;
+                }
+                v.camera_rest_at =
+                    interactive.then(|| trace::now() + policy::SETTLE_IDLE_SECONDS);
                 v.studio_view = camera;
                 v.stamp.sequence += 1;
+                if interactive {
+                    v.moves += 1;
+                }
                 v.dirty = true;
                 if let Some(input) = input {
-                    let origin=v.pending_input.take().unwrap_or(input);
+                    let origin = v.pending_input.take().unwrap_or(input);
                     v.input.get_or_insert(origin);
                     v.pipeline = trace::Pipeline {
                         request: trace::now(),
@@ -1209,6 +1287,8 @@ impl Viewer {
         pane.camera.validate().map_err(anyhow::Error::msg)?;
         self.edit(|v| {
             if v.studio_view != pane.camera || v.studio_preview != pane.tier {
+                self.interrupt_frame(v);
+                v.camera_rest_at = None;
                 v.studio_view = pane.camera;
                 v.studio_preview = pane.tier;
                 v.stamp.sequence += 1;
@@ -1231,7 +1311,10 @@ impl Viewer {
     /// Transient Studio worker tier, independent of viewer resolution.
     pub fn studio_preview(&self, preview: studio::Preview) -> Result<()> {
         self.edit(|v| {
-            v.set_studio_preview(preview);
+            if v.studio_preview != preview {
+                self.interrupt_frame(v);
+                v.set_studio_preview(preview);
+            }
             Ok(())
         })
     }
@@ -1240,6 +1323,19 @@ impl Viewer {
         self.edit(|v| {
             if v.quality != quality {
                 v.quality = quality;
+                v.stamp.sequence += 1;
+                bump_site(line!(), "");
+                v.dirty = true;
+            }
+            Ok(())
+        })
+    }
+    /// Interactive group focus: isolate rendering to this group and its
+    /// descendants in the viewer without mutating the document or exports.
+    pub fn focus_group(&self, group: Option<String>) -> Result<()> {
+        self.edit(|v| {
+            if v.focus_group != group {
+                v.focus_group = group;
                 v.stamp.sequence += 1;
                 bump_site(line!(), "");
                 v.dirty = true;
@@ -1256,6 +1352,9 @@ impl Viewer {
     pub fn set_shown(&self, shown: bool) -> Result<()> {
         self.edit(|v| {
             if v.hidden == shown {
+                if !shown {
+                    self.interrupt_frame(v);
+                }
                 v.hidden = !shown;
                 v.dirty |= shown;
             }
@@ -1285,6 +1384,7 @@ impl Viewer {
             if v.skim == time {
                 return Ok(());
             }
+            self.interrupt_frame(v);
             v.skim_rate = match (v.skim, time, v.skim_input) {
                 (Some(a), Some(b), Some(at)) if input > at => skim_rate(
                     (b.get() - a.get()) as f64 / pm_protocol::common::TICKS_PER_SECOND as f64,
@@ -1337,31 +1437,61 @@ impl Viewer {
                 *e = (time.get(), 0);
             }
         }
+        let mut paused = false;
+        let mut audio = None;
         self.edit(|v| {
+            // Repeated requests for the same position leave its frame in flight.
+            if v.last_scrub == Some(time) {
+                return Ok(());
+            }
             v.input = Some(input);
             v.pipeline.request = trace::now();
+            if v.desired_rate.num != 0 || v.resume_on_show.is_some() {
+                paused = v.request_pause(&mut audio)?;
+            }
             // Replace an unconsumed scrub pair atomically, even under a burst
-            // of HID input. A pause can never be accepted without its seek.
-            if matches!(
+            // of HID input (including while an earlier request_pause() is still
+            // pending on the worker thread).
+            let res = if matches!(
                 v.commands.back(),
                 Some(TransportCommand::Seek {
                     mode: pm_protocol::clock::SeekMode::Scrub,
                     ..
                 })
-            ) && v.pause_requested_at.is_none()
-                && v.commands.len() >= 2
+            ) && v.commands.len() >= 2
                 && v.commands[v.commands.len() - 2] == TransportCommand::Pause
             {
-                v.commands.pop_back();
-                v.commands.pop_back();
+                v.enqueue(TransportCommand::Seek {
+                    time,
+                    mode: pm_protocol::clock::SeekMode::Scrub,
+                })
+            } else if v.commands.back() == Some(&TransportCommand::Pause) {
+                v.enqueue(TransportCommand::Seek {
+                    time,
+                    mode: pm_protocol::clock::SeekMode::Scrub,
+                })
+            } else {
+                ensure!(v.commands.len() <= 61, "transport queue full");
+                v.enqueue(TransportCommand::Pause)?;
+                v.enqueue(TransportCommand::Seek {
+                    time,
+                    mode: pm_protocol::clock::SeekMode::Scrub,
+                })
+            };
+            res?;
+            v.last_scrub = Some(time);
+            self.interrupt_frame(v);
+            if let Some(clock) = &mut v.status.clock {
+                clock.media_time = time;
+                clock.rate = pm_protocol::common::PlaybackRate::STOPPED;
+                clock.state = pm_protocol::clock::TransportState::Stopped;
             }
-            ensure!(v.commands.len() <= 61, "transport queue full");
-            v.enqueue(TransportCommand::Pause)?;
-            v.enqueue(TransportCommand::Seek {
-                time,
-                mode: pm_protocol::clock::SeekMode::Scrub,
-            })
-        })
+            Ok(())
+        })?;
+        if paused {
+            self.shared.state.lock().unwrap().notify();
+        }
+        Ok(())
     }
     /// Retarget a settled raster without exposing its drawable until complete.
     pub fn retarget(&self, layer: metal::MetalLayer, crop: Option<Crop>) -> Result<()> {
@@ -1377,6 +1507,7 @@ impl Viewer {
                 ..v.config.output
             };
             v.config.layer = Some(layer);
+            self.interrupt_frame(v);
             v.stamp.generation += 1;
             v.stamp.sequence += 1;
             v.dirty = true;
@@ -1395,6 +1526,7 @@ impl Viewer {
                 || output.display != previous.display
                 || output.crop != previous.crop
             {
+                self.interrupt_frame(v);
                 v.stamp.generation += 1;
                 v.stamp.sequence += 1;
                 bump_site(line!(), "");
@@ -1479,7 +1611,7 @@ impl Viewer {
                     ..Default::default()
                 };
             }
-            self.shared.supersede();
+            self.interrupt_frame(v);
             Ok(())
         })?;
         if paused {
@@ -1516,6 +1648,16 @@ impl Viewer {
             .get(&self.id)
             .is_some_and(|v| v.desired_rate.num != 0 || v.pause_requested_at.is_some())
     }
+    /// Whether playback is currently desired: flips immediately on Play,
+    /// Shuttle, PlayAround, and Pause without lagging behind audio device
+    /// warmup or stop drain, and clears when the transport stops at end.
+    pub fn desired_playing(&self) -> bool {
+        let state = self.shared.state.lock().unwrap();
+        state
+            .views
+            .get(&self.id)
+            .is_some_and(|v| v.desired_rate.num != 0)
+    }
     pub fn shuttle(&self, key: transport::ShuttleKey, from_pause: bool) -> Result<bool> {
         let mut consumed = false;
         let mut audio = None;
@@ -1525,10 +1667,11 @@ impl Viewer {
             } else if let Some(cmd) = transport::shuttle(key, v.desired_rate, from_pause) {
                 if cmd == TransportCommand::Pause {
                     if v.request_pause(&mut audio)? {
-                        self.shared.supersede();
+                        self.interrupt_frame(v);
                     }
                 } else {
                     v.enqueue(cmd)?;
+                    self.interrupt_frame(v);
                 }
                 consumed = true;
             }
@@ -1990,6 +2133,7 @@ impl EngineService {
                 config,
                 transient_snapshot: None,
                 transient_content: None,
+                setup_edition: None,
                 stamp,
                 content,
                 dirty: true,
@@ -2004,6 +2148,7 @@ impl EngineService {
                 overlay_time: None,
                 locked_provider: None,
                 commands: VecDeque::new(),
+                last_scrub: None,
                 commands_sent: None,
                 surface_queries: VecDeque::new(),
                 picker_samples: VecDeque::new(),
@@ -2032,9 +2177,13 @@ impl EngineService {
                 quality: Quality::Auto,
                 studio_preview: studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
                 studio_view: studio::ViewCamera::Active,
+                camera_rest_at: None,
+                focus_group: None,
                 adapt_drags: false,
                 editing: false,
                 edit_rested: false,
+                last_edit_at: None,
+                recent_edit: false,
                 skim: None,
                 skim_input: None,
                 skim_rate: pm_protocol::common::PlaybackRate::NORMAL,
@@ -2067,6 +2216,7 @@ impl Drop for EngineService {
         {
             let mut state = self.shared.state.lock().unwrap();
             state.stop = true;
+            self.shared.supersede();
             for view in state.views.values_mut() {
                 surface::cancel(view, "surface query worker stopped");
                 export_estimate::cancel(view, "export estimate worker stopped");
@@ -2222,6 +2372,7 @@ struct Flight {
     stamp: Stamp,
     moves: u64,
     spec: FrameSpec,
+    camera_motion: bool,
     /// `spec` is the final picture of its time (`FrameSpec::final_picture`).
     settled: bool,
     submission: render::Submission,
@@ -2331,6 +2482,7 @@ struct SettleAsk {
     spec: FrameSpec,
     mastering: color::Mastering,
     resources: Arc<resources::ResourceSnapshot>,
+    focus_group: Option<String>,
 }
 /// The longest lead of a playing frame, in refreshes (50 ms at 120 Hz):
 /// what an edit made while playing waits at most before it is drawn.
@@ -2352,12 +2504,15 @@ struct Work {
     stamp: Stamp,
     moves: u64,
     scene: Scene,
+    setup_edition: Option<u64>,
     /// What rendered frames are drawn from: a paused frame's media (never
     /// Automatic's HD proxies), whatever this frame's moment reads.
     rendered_media: Arc<pm_export::render::MediaPaths>,
     spec: FrameSpec,
     studio_preview: studio::Preview,
     studio_view: studio::ViewCamera,
+    camera_motion: bool,
+    focus_group: Option<String>,
     layer: Option<metal::MetalLayer>,
     overlays: OverlayGeometry,
     provider: Option<LockedOverlayProvider>,
@@ -2431,6 +2586,7 @@ fn request_settle(
     use std::sync::atomic::{AtomicBool, Ordering};
     let (id, stamp) = (ask.id, ask.stamp);
     let spec = ask.spec;
+    engine.focus_group(ask.focus_group.clone());
     engine.mastering = ask.mastering;
     engine.set_resources(ask.resources.clone());
     engine.use_compat_document(stamp.doc_id);
@@ -3061,7 +3217,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             Some("viewer diagnostic trace overflow/disconnected".into());
                     }
                 }
-                if v.stamp != f.stamp && !only_moved(v, f.stamp, f.moves, f.spec.moment, captured) {
+                if v.stamp != f.stamp
+                    && !only_moved(
+                        v,
+                        f.stamp,
+                        f.moves,
+                        f.spec.moment,
+                        f.camera_motion,
+                        captured,
+                    )
+                {
                     v.status.stale_rejections += 1;
                     // Its readback is for a stamp no one shows: ask again.
                     v.capture |= captured;
@@ -3421,8 +3586,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
             }
             // Fall through (no `continue`): a continuous stream of publications
-            // must not starve rendering. A revision that arrived meanwhile is
-            // still caught by the in-loop check below, as before.
+            // must not starve rendering. A newer publication's audio graph
+            // is picked up next pass, outside the lock as well.
             state = shared.state.lock().unwrap();
             pass.mark("audio graph");
             if state.stop {
@@ -3504,17 +3669,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     lookahead: Lookahead::default(),
                 }
             });
-            if r.revision != v.stamp.revision || r.content != v.content {
-                if let Err(e) = r.transport.update(
-                    &v.config.snapshot,
-                    v.config.media.audio_paths(v.media_mode),
-                    &v.config.composition,
-                ) {
-                    v.status.error = Some(e.to_string());
-                }
-                r.revision = v.stamp.revision;
-                r.content = v.content;
-            }
             changed |= !v.commands.is_empty() || v.status.clock.is_none();
             if let Some((target, interval)) = v.phase {
                 r.grid = Some((target, interval));
@@ -3698,12 +3852,24 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // The playhead stopped on a frame dragged at reduced resolution.
             // A new picture of the same time: its own `frame:rendered`.
             if !playing && r.refine_at.is_some_and(|at| now >= at) {
-                r.refine_at = None;
-                r.scrub = false;
-                v.edit_rested = v.editing;
-                v.stamp.sequence += 1;
-                bump_site(line!(), "");
-                v.dirty = true;
+                let edit_rest = if v.editing {
+                    policy::SETTLE_IDLE_SECONDS
+                } else {
+                    policy::SCRUB_SETTLE_SECONDS
+                };
+                if (v.editing || v.recent_edit)
+                    && let Some(at) = v.last_edit_at.filter(|at| now - *at < edit_rest)
+                {
+                    r.refine_at = Some(at + edit_rest);
+                } else {
+                    r.refine_at = None;
+                    r.scrub = false;
+                    v.edit_rested = v.editing;
+                    v.recent_edit = false;
+                    v.stamp.sequence += 1;
+                    bump_site(line!(), "");
+                    v.dirty = true;
+                }
             }
             if std::mem::take(&mut v.retry_now) {
                 r.not_before = r.not_before.min(now);
@@ -3773,8 +3939,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         spec,
                         mastering: v.mastering,
                         resources: v.resources.clone(),
+                        focus_group: v.focus_group.clone(),
                     });
                 }
+            }
+            if v.camera_rest_at.is_some_and(|at| now >= at) {
+                v.camera_rest_at = None;
+                v.dirty = true;
             }
             if !v.dirty && (!playing || now < r.next - r.ahead * interval) {
                 continue;
@@ -3834,7 +4005,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }
             let moment = if playing {
                 Moment::Playing
-            } else if r.scrub || (v.editing && !v.edit_rested) {
+            } else if r.scrub || (v.editing && !v.edit_rested) || v.recent_edit {
                 Moment::Scrub
             } else {
                 Moment::Paused
@@ -3858,16 +4029,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             };
             cursor = id;
             let budget = frame.max(interval);
+            let camera_motion = !capture && v.camera_rest_at.is_some();
             let full = FrameSpec::paused_full_scale(&scene, &v.config.output);
             let settling = r.full_for == Some(v.stamp);
             let quality = if capture {
                 1.
             } else {
-                // A layer being dragged is drawn as sharp as at rest (v1's,
-                // PM-395); only a playhead scrub adapts.
                 v.quality.scale(
                     &r.auto,
-                    if moment == Moment::Scrub && (!v.adapt_drags || v.editing) {
+                    if moment == Moment::Scrub
+                        && (!v.adapt_drags || ((v.editing || v.recent_edit) && !render::large_scene(&scene)))
+                    {
                         Moment::Paused
                     } else {
                         moment
@@ -3879,9 +4051,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // whole composition at its own size once the viewer has rested
             // (a capture reads that picture directly); playing and dragged
             // frames keep their policy. (A play waiting for its audio start
-            // draws as it is.)
-            let resting = quality == 1. && moment == Moment::Paused && !r.transport.running();
-            let text_grid = (quality == 1. && (moment != Moment::Scrub || v.editing))
+            // draws as it is.) Active 3D camera flight/orbit stays in preview
+            // mode and auto-settles via `camera_rest_at`.
+            let resting =
+                !camera_motion && quality == 1. && moment == Moment::Paused && !r.transport.running();
+            let text_grid = (!camera_motion
+                && quality == 1.
+                && (moment != Moment::Scrub || v.editing || v.recent_edit))
                 .then(|| engine.text_grid_scale(&scene, &v.config.output))
                 .flatten();
             let (scale, settled) = if capture {
@@ -3919,6 +4095,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 stamp: v.stamp,
                 moves: v.moves,
                 scene,
+                setup_edition: (moment == Moment::Scrub
+                    && v.editing
+                    && !capture
+                    && v.transient_snapshot.is_none())
+                .then_some(v.setup_edition)
+                .flatten(),
                 rendered_media: v.paused_paths.clone(),
                 spec: FrameSpec {
                     time,
@@ -3937,12 +4119,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 },
                 studio_preview: if capture {
                     studio::Preview::Final
-                } else if playing && matches!(v.studio_preview, studio::Preview::Refine | studio::Preview::Final) {
+                } else if (playing || moment == Moment::Scrub || camera_motion)
+                    && matches!(v.studio_preview, studio::Preview::Refine | studio::Preview::Final)
+                {
                     studio::Preview::Live
                 } else {
                     v.studio_preview
                 },
                 studio_view: if capture { studio::ViewCamera::Active } else { v.studio_view.clone() },
+                camera_motion: !capture && v.camera_rest_at.is_some(),
+                focus_group: if capture { None } else { v.focus_group.clone() },
                 layer: v.config.layer.clone(),
                 overlays: if v.overlay_time.is_none_or(|t| t == time) {
                     v.overlays.clone()
@@ -4025,7 +4211,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         // again for it under the stamp it shows (an export estimate holds
         // that stamp).
         let ask = ask.filter(|ask| {
-            if !shared.disk.draws_studio(&ask.scene) {
+            if !shared.disk.draws_studio(&ask.scene)
+                && state
+                    .views
+                    .get(&ask.id)
+                    .is_none_or(|view| view.studio_view == studio::ViewCamera::Active)
+            {
                 return true;
             }
             if let (Some(v), Some(r)) = (state.views.get_mut(&ask.id), runtime.get_mut(&ask.id))
@@ -4067,10 +4258,13 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             stamp,
             moves,
             scene,
+            setup_edition,
             rendered_media,
             spec,
             studio_preview,
             studio_view,
+            camera_motion,
+            focus_group,
             layer,
             overlays,
             provider,
@@ -4087,6 +4281,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         {
             let superseded = &shared.superseded;
             let armed = superseded.load(std::sync::atomic::Ordering::Acquire);
+            let superseded = superseded.clone();
+            let interrupted = || superseded.load(std::sync::atomic::Ordering::Acquire) != armed;
+            let started = trace::now();
             drop(state);
             let trace = Arc::new(Mutex::new(trace::Trace {
                 worker_start: now,
@@ -4098,9 +4295,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }));
             engine.studio_preview(studio_preview);
             engine.studio_camera(studio_view);
+            engine.camera_motion(camera_motion);
+            engine.focus_group(focus_group.clone());
             engine.mastering = mastering;
             engine.set_resources(resources.clone());
             engine.use_compat_document(stamp.doc_id);
+            engine.reuse_scene_setup(&scene, setup_edition);
             let overrides = engine
                 .compat()
                 .filter(|store| store.producing_now())
@@ -4122,7 +4322,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             };
             // Partial definitions while extensions load are never a fill's
             // source: its frames would be drawn without their effects.
+            // A position-only preview has no disk frame for its new revision.
+            // Index the final state once the edit rests or finishes.
             if !transient
+                && setup_edition.is_none()
                 && !engine.definitions_pending()
                 && shared.disk.observe(
                     &rendered,
@@ -4143,7 +4346,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             pass.mark("observe");
             if spec.wide_viewport(&scene)
                 && !engine.definitions_pending()
-                && !engine.draws_studio(&scene)
+                && !engine.draws_studio(&scene, spec.time)
                 && runtime.get(&id).is_none_or(|r| r.preview_fallback != Some(stamp))
             {
                 let ask = SettleAsk {
@@ -4153,6 +4356,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     spec,
                     mastering,
                     resources,
+                    focus_group,
                 };
                 let asked = if settling.is_some() {
                     Ok(render::Asked::Busy)
@@ -4212,44 +4416,57 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             let picture_only = trace_pictures && spec.moment == Moment::Playing && !capture;
             // Whose frame a 3D refinement's progress belongs to.
             *progress_work.lock().unwrap() = Some((id, stamp));
-            let result = provider
-                .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
-                .and_then(|overlays| {
-                    let read = if capture {
-                        render::Readback::Capture
-                    } else if picture_only {
-                        render::Readback::Presented
-                    } else {
-                        render::Readback::None
-                    };
-                    let interrupt = (superseded.clone(), armed);
-                    engine.set_interrupt(Some(interrupt.clone()));
-                    if spec.moment == Moment::Playing && !spec.exact {
-                        MATERIAL_PLAYBACK.replace(Some(interrupt));
-                    }
-                    let frame = engine.frame(&scene, spec, layer.as_ref(), &overlays, read, trace);
-                    MATERIAL_PLAYBACK.replace(None);
-                    engine.set_interrupt(None);
-                    frame
-                });
+            let result = if interrupted() {
+                Err(pm_render::RenderError::Abandoned.into())
+            } else {
+                provider
+                    .map_or_else(|| Ok(overlays), |p| p(&scene.doc, &scene.comp, spec.time))
+                    .and_then(|overlays| {
+                        let read = if capture {
+                            render::Readback::Capture
+                        } else if picture_only {
+                            render::Readback::Presented
+                        } else {
+                            render::Readback::None
+                        };
+                        let interrupt = (superseded.clone(), armed);
+                        if spec.moment == Moment::Playing {
+                            engine.set_playback_interrupt(Some(interrupt.clone()));
+                        } else {
+                            engine.set_frame_interrupt(&scene, Some(interrupt.clone()));
+                        }
+                        if matches!(spec.moment, Moment::Playing | Moment::Scrub) && !spec.exact {
+                            MATERIAL_PLAYBACK.replace(Some(interrupt));
+                        }
+                        let frame =
+                            engine.frame(&scene, spec, layer.as_ref(), &overlays, read, trace);
+                        MATERIAL_PLAYBACK.replace(None);
+                        if spec.moment == Moment::Playing {
+                            engine.set_playback_interrupt(None);
+                        } else {
+                            engine.set_frame_interrupt(&scene, None);
+                        }
+                        frame
+                    })
+            };
             *progress_work.lock().unwrap() = None;
             pass.mark("frame");
             // Media ahead of the playhead is prepared after this frame is
             // submitted: building its plan must not delay this present.
+            let large_scene = render::large_scene(&scene);
             let mut prepare_at = None;
             let mut refine_at = None;
             if spec.moment == Moment::Playing
                 && let Some(r) = runtime.get_mut(&id)
             {
                 if now - r.prepared >= PREPARE_EVERY_SECONDS {
-                    r.prepared = now;
                     let ahead = (PREPARE_AHEAD_SECONDS
                         * pm_protocol::common::TICKS_PER_SECOND as f64)
                         * f64::from(r.transport.rate().num.signum());
                     let at = (spec.time.get() + ahead as i64).max(0);
                     prepare_at = Some(Ticks::new(at).unwrap_or(spec.time));
                 } else {
-                    refine_at = r.lookahead.refine.pop_front();
+                    refine_at = r.lookahead.refine.front().copied();
                 }
             } else if let Some(r) = runtime.get_mut(&id) {
                 r.lookahead = Lookahead::default();
@@ -4260,8 +4477,44 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             }
             // Publication/resize and final submission are serialized by this
             // short lock. Render and drawable acquisition never hold it.
+            let mut request_overrides = None;
+            let mut refine_overrides = false;
             let mut state = shared.state.lock().unwrap();
             if let Some(v) = state.views.get_mut(&id) {
+                // Input and the Metal handoff share this lock. No obsolete
+                // result can reach the drawable after newer input takes it.
+                let abandoned = matches!(
+                    result.as_ref().err().and_then(|e| e.downcast_ref::<pm_render::RenderError>()),
+                    Some(pm_render::RenderError::Abandoned)
+                );
+                if abandoned
+                    || interrupted()
+                    || (v.stamp != stamp
+                        && !only_moved(v, stamp, moves, spec.moment, camera_motion, capture))
+                {
+                    if let Some(recorder) = &recorder {
+                        recorder.record(serde_json::json!({
+                            "rejected_before_commit": true, "at": trace::now(),
+                            "view_stamp": format!("{:?}", v.stamp), "frame_stamp": format!("{:?}", stamp),
+                            "view_moves": v.moves, "frame_moves": moves,
+                            "moment": format!("{:?}", spec.moment), "capture": capture,
+                            "knob": pm_media::decode::diag::knob("PM_FIX_PRESENT_STALE"),
+                        }));
+                    }
+                    v.status.stale_rejections += 1;
+                    v.capture |= capture;
+                    v.dirty = true;
+                    if spec.moment != Moment::Playing
+                        && let Some(r) = runtime.get_mut(&id)
+                    {
+                        r.auto.record_interrupted(
+                            (trace::now() - started) * 1000.,
+                            r.interval * 1000.,
+                            spec.scale,
+                        );
+                    }
+                    continue;
+                }
                 if let Some(failure) = &engine.definition_failure {
                     v.status.error = Some(failure.clone());
                 }
@@ -4283,21 +4536,6 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 if v.status.unavailable != owners {
                     v.status.unavailable = owners;
                 }
-                // A capture asked for belongs to the next frame that lands.
-                if v.stamp != stamp && !only_moved(v, stamp, moves, spec.moment, capture) {
-                    if let Some(recorder) = &recorder {
-                        recorder.record(serde_json::json!({
-                            "rejected_before_commit": true, "at": trace::now(),
-                            "view_stamp": format!("{:?}", v.stamp), "frame_stamp": format!("{:?}", stamp),
-                            "view_moves": v.moves, "frame_moves": moves,
-                            "moment": format!("{:?}", spec.moment), "capture": capture,
-                            "knob": pm_media::decode::diag::knob("PM_FIX_PRESENT_STALE"),
-                        }));
-                    }
-                    v.status.stale_rejections += 1;
-                    v.capture |= capture;
-                    continue;
-                }
                 match result {
                     Ok(Some(mut s)) => {
                         #[cfg(test)]
@@ -4308,14 +4546,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             .push((stamp, spec.time, spec.scale));
                         v.status.error = None;
                         let late_layers = s.compat_late.len();
-                        // A scrubbed frame's late override layers are asked
-                        // now; playback asks ahead of the playhead instead.
+                        // Ask from the current plan when we skip building
+                        // a second plan ahead of the playhead.
                         let late = std::mem::take(&mut s.compat_late);
-                        if spec.moment == Moment::Scrub
-                            && !late.is_empty()
-                            && let Some(store) = engine.compat()
+                        if !late.is_empty()
+                            && (spec.moment == Moment::Scrub
+                                || (spec.moment == Moment::Playing && large_scene))
                         {
-                            store.request(late);
+                            request_overrides = Some(late);
                         }
                         // The drawable was another size than configured (a
                         // resize whose publication lagged): later frames
@@ -4342,7 +4580,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                                 } else {
                                     policy::SCRUB_SETTLE_SECONDS
                                 };
-                                r.refine_at = Some(trace::now() + rest);
+                                let moved_at = v
+                                    .last_edit_at
+                                    .filter(|_| v.editing || v.recent_edit)
+                                    .unwrap_or(v.pipeline.request);
+                                r.refine_at = Some(moved_at + rest);
                             }
                             if capture {
                                 r.capture_waiting = None;
@@ -4395,6 +4637,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             stamp,
                             moves,
                             spec,
+                            camera_motion,
                             settled: spec.final_picture(&scene),
                             submission: s,
                             gpu_done: false,
@@ -4455,38 +4698,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                             }
                             _ => None,
                         };
-                        // A picture that owes its refinement asks for the
-                        // refinement's answers (at the composition's scale)
-                        // right behind its own: the realm draws them while this
-                        // picture finishes, instead of after it lands.
-                        let ahead = (pending.is_some()
-                            && runtime.get(&id).is_some_and(|r| r.full_owed == Some(stamp)))
-                        .then(|| {
-                            let full = FrameSpec::paused_full_scale(&scene, &spec.output);
-                            engine.compat_needs(
-                                &scene,
-                                spec.time,
-                                FrameSpec {
-                                    scale: full,
-                                    ..spec
-                                },
-                            )
-                        });
-                        if spec.moment == Moment::Playing && pending.is_some() {
-                            // A playing frame held for its override layers
-                            // is gone by when they land: the realm is asked
-                            // ahead of the playhead at this frame's scale, so
-                            // the frames that follow find their answers (it
-                            // asked nothing new while no frame was drawn).
-                            let rate = runtime.get(&id).map(|r| r.transport.rate());
-                            ask_ahead(&mut engine, &shared.disk, &scene, spec, rate);
-                        } else if let (Some(needs), Some(store)) =
-                            (pending.clone(), engine.compat())
-                        {
-                            store.request(needs);
-                            if let Some(ahead) = ahead {
-                                store.request_behind(ahead);
-                            }
+                        if spec.moment != Moment::Playing || large_scene {
+                            refine_overrides = pending.is_some()
+                                && !large_scene
+                                && runtime.get(&id).is_some_and(|r| r.full_owed == Some(stamp));
+                            request_overrides = pending;
                         }
                         if let Some(recorder) = &recorder {
                             recorder.record(serde_json::json!({
@@ -4557,20 +4773,42 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             state.notify();
             drop(state);
             pass.mark("submit");
+            if !interrupted()
+                && let Some(needs) = request_overrides
+                && let Some(store) = engine.compat().cloned()
+            {
+                store.request(needs);
+                // Refinement's answers queue behind the frame on screen.
+                if refine_overrides && !interrupted() {
+                    let scale = FrameSpec::paused_full_scale(&scene, &spec.output);
+                    let ahead = engine.compat_needs(&scene, spec.time, FrameSpec { scale, ..spec });
+                    if !interrupted() {
+                        store.request_behind(ahead);
+                    }
+                }
+            }
             // Traced viewers: what this thread does after a playing frame
             // before it can take the next one.
             let after = (recorder.is_some() && spec.moment == Moment::Playing).then(trace::now);
-            let (mut asked, mut uploaded) = (0., 0.);
-            if spec.moment == Moment::Playing {
+            let start = after.unwrap_or_default();
+            let (mut asked, mut uploaded) = (start, start);
+            // Speculation gets only the slack left by the foreground
+            // frame. Heavy scenes cannot afford a second inline plan.
+            let slack = || {
+                !interrupted() && (!large_scene || due.is_some_and(|at| at - trace::now() > 0.004))
+            };
+            if spec.moment == Moment::Playing && slack() {
                 let rate = runtime.get(&id).map(|r| r.transport.rate());
-                ask_ahead(&mut engine, &shared.disk, &scene, spec, rate);
+                if !large_scene {
+                    ask_ahead(&mut engine, &shared.disk, &scene, spec, rate);
+                }
                 if after.is_some() {
                     asked = trace::now();
                 }
                 // The next frame, if it is rendered, is uploaded in this
                 // frame's slack instead of at its own turn.
                 let step = frame_ticks * i64::from(rate.map_or(1, |r| r.num.signum()));
-                if let Ok(next) = Ticks::new(spec.time.get() + step) {
+                if slack() && let Ok(next) = Ticks::new(spec.time.get() + step) {
                     engine.upload_ahead(&scene, next);
                 }
                 if after.is_some() {
@@ -4582,17 +4820,29 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // of a second on a heavy project) while frames are due.
             // A composition without stills or videos has none to open ahead.
             let mut prepared = None;
-            if let Some(at) = prepare_at
-                .filter(|at| engine.has_visual_media(&scene) && !shared.disk.rendered(&scene, *at))
-            {
-                let videos = engine.prepare(&scene, at, spec);
-                if let Some(r) = runtime.get_mut(&id) {
-                    r.lookahead.planned(at, videos, frame_ticks);
+            if slack() {
+                if let Some(at) = prepare_at {
+                    if let Some(r) = runtime.get_mut(&id) {
+                        r.prepared = now;
+                    }
+                    if (large_scene || engine.has_visual_media(&scene))
+                        && !shared.disk.rendered(&scene, at)
+                    {
+                        let videos = engine.prepare(&scene, at, spec);
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.lookahead.planned(at, videos, frame_ticks);
+                        }
+                        prepared = Some("ahead");
+                    }
+                } else if let Some(at) = refine_at {
+                    if let Some(r) = runtime.get_mut(&id) {
+                        r.lookahead.refine.pop_front();
+                    }
+                    if !shared.disk.rendered(&scene, at) {
+                        engine.prepare(&scene, at, spec);
+                        prepared = Some("entry");
+                    }
                 }
-                prepared = Some("ahead");
-            } else if let Some(at) = refine_at.filter(|at| !shared.disk.rendered(&scene, *at)) {
-                engine.prepare(&scene, at, spec);
-                prepared = Some("entry");
             }
             if let (Some(recorder), Some(start)) = (&recorder, after) {
                 recorder.record(serde_json::json!({
@@ -4627,6 +4877,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 })
                 .flat_map(|(_, r)| [r.refine_at, r.settle_at.map(|(_, at)| at)])
                 .flatten()
+                .chain(state.views.values().filter_map(|v| v.camera_rest_at))
                 .map(|at| (at - now).max(0.001))
                 .fold((scrub_present_retry - now).max(0.001), f64::min);
             let busy =
@@ -5476,6 +5727,80 @@ mod worker_tests {
         v.capture_next().unwrap();
         assert_eq!(drawn(&v).frame.unwrap().input_host_seconds, None);
     }
+    #[test]
+    fn scrub_burst_after_pause_coalesces_without_filling_transport_queue() {
+        let service = EngineService::start(pm_gpu::Gpu::new("scrub-burst-pause").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        // Trigger one frame that blocks the worker on `before_submit`.
+        v.capture_next().unwrap();
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Now pause (sets `pause_requested_at = Some(...)`) and immediately
+        // fire a 120 Hz scrub burst while the worker is still blocked.
+        v.command(TransportCommand::Pause).unwrap();
+        for step in 0..100 {
+            v.scrub_at(Ticks::new((step + 1) * 1000).unwrap(), trace::now())
+                .expect("scrub burst after pause must coalesce and never overflow queue");
+        }
+        {
+            let state = service.shared.state.lock().unwrap();
+            let view = state.views.get(&v.id).unwrap();
+            assert!(view.pause_requested_at.is_some());
+            assert!(view.commands.len() <= 3, "commands={:?}", view.commands);
+        }
+        release.send(()).unwrap();
+        v.capture_next().unwrap();
+        let status = drawn(&v);
+        assert_eq!(status.error, None);
+    }
+    #[test]
+    fn a_scrub_burst_rejects_the_in_flight_scrub_and_draws_the_latest_position() {
+        let service = EngineService::start(pm_gpu::Gpu::new("scrub-latest").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        let superseded = Ticks::from_whole_seconds(1);
+        let latest = Ticks::from_whole_seconds(2);
+        v.scrub(superseded).unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        let first_generation = service.shared.superseded.load(std::sync::atomic::Ordering::Acquire);
+        for _ in 0..20 {
+            v.scrub(superseded).unwrap();
+        }
+        assert_eq!(
+            service.shared.superseded.load(std::sync::atomic::Ordering::Acquire),
+            first_generation
+        );
+        for step in 1..=100 {
+            v.scrub(Ticks::new(superseded.get() + step * 1000).unwrap()).unwrap();
+        }
+        v.scrub(latest).unwrap();
+        assert_eq!(service.shared.state.lock().unwrap().views[&v.id].commands.len(), 2);
+        release.send(()).unwrap();
+        let status = wait_for(&v, "the latest scrub", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok && f.time == latest)
+        });
+        assert!(status.stale_rejections >= 1);
+        assert!(service.shared.drawn.lock().unwrap().iter().all(|(_, t, _)| *t != superseded));
+    }
+
     #[test]
     fn fly_camera_updates_do_not_select_auto_scrub_quality() {
         let service = EngineService::start(pm_gpu::Gpu::new("fly-auto-quality").unwrap()).unwrap();
@@ -6615,35 +6940,50 @@ mod worker_tests {
         );
     }
 
-    /// PM-395: a layer being dragged is drawn as sharp as at rest, even on a
-    /// project slower than a refresh (only a playhead scrub draws reduced).
     #[test]
-    fn a_dragged_layer_is_drawn_as_sharp_as_at_rest() {
-        let service = EngineService::start(pm_gpu::Gpu::new("edit-drag-sharp").unwrap()).unwrap();
-        let config = shapes_config(None);
+    fn a_slow_live_edit_draws_reduced_and_settles_at_full_resolution() {
+        let service = EngineService::start(pm_gpu::Gpu::new("edit-drag-auto").unwrap()).unwrap();
+        let mut config = shapes_config(None);
+        let mut project = serde_json::from_str::<serde_json::Value>(
+            include_str!("../tests/fixtures/shapes.json"),
+        ).unwrap();
+        let layers = project["layers"].as_array_mut().unwrap();
+        let mut spare = layers[0].clone();
+        spare["on"] = false.into();
+        for i in 0..256 {
+            spare["id"] = format!("disabled-{i}").into();
+            layers.push(spare.clone());
+        }
+        config.snapshot.document = Arc::new(pm_model::Document::new(
+            Some(pm_model::canonical::canonical_project(
+                pm_model::json::parse(&project.to_string()).unwrap(),
+            )),
+            config.snapshot.revision,
+        ));
         let snapshot = config.snapshot.clone();
         let v = service.viewer(config).unwrap();
         v.adapt_drags(true).unwrap();
         service.shared.slow_frames.store(true, std::sync::atomic::Ordering::Release);
         wait_for(&v, "the first picture", |s| s.frame.as_ref().is_some_and(|f| f.gpu_ok));
         v.editing(true).unwrap();
-        let mut dragged = None;
-        for revision in 2..60u64 {
-            v.snapshot(Snapshot {
-                revision,
-                document: Arc::new(pm_model::Document::new(snapshot.document.to_value(), revision)),
-                ..snapshot.clone()
+        v.snapshot(Snapshot {
+            revision: 2,
+            document: Arc::new(pm_model::Document::new(snapshot.document.to_value(), 2)),
+            ..snapshot
+        }).unwrap();
+        let status = wait_for(&v, "a reduced edit preview", |s| {
+            s.frame.as_ref().is_some_and(|f| {
+                f.gpu_ok && f.stamp.revision == 2 && f.moment == Moment::Scrub && f.scale < 1.
             })
-            .unwrap();
-            std::thread::sleep(Duration::from_millis(20));
-            if let Some(frame) = v.status().frame.filter(|f| f.moment == Moment::Scrub && f.gpu_ok) {
-                dragged = Some(frame);
-                break;
-            }
-        }
-        let frame = dragged.expect("a frame drawn while the layer is dragged");
-        assert!(frame.scale >= 1., "a dragged layer drawn reduced: {frame:?}");
-        v.retire();
+        });
+        let scale = status.frame.unwrap().scale;
+        assert!(scale == policy::AUTO_FLOOR || scale == policy::AUTO_DRAG_FLOOR);
+        v.editing(false).unwrap();
+        wait_for(&v, "the full edit picture", |s| {
+            s.frame.as_ref().is_some_and(|f| {
+                f.gpu_ok && f.stamp.revision == 2 && f.moment == Moment::Paused && f.scale >= 1.
+            })
+        });
     }
 
     /// An edit left resting with its gesture still open (text being typed,
@@ -7369,13 +7709,15 @@ mod worker_tests {
         wait_for(&v, "a first frame", |s| {
             s.frame.as_ref().is_some_and(|f| f.gpu_ok)
         });
+        let edition = service.shared.state.lock().unwrap().views[&v.id]
+            .config.snapshot.document.edition();
         let captured = || {
             crate::render::SAMPLED
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|(exact, ..)| *exact)
-                .map(|(_, moment, scale, sampling)| (*moment, *scale, *sampling))
+                .filter(|(owner, exact, ..)| *owner == edition && *exact)
+                .map(|(_, _, moment, scale, sampling)| (*moment, *scale, *sampling))
                 .collect::<Vec<_>>()
         };
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -7961,6 +8303,149 @@ mod worker_tests {
         v.scrub(Ticks::ZERO).unwrap();
         v.capture_next().unwrap();
         assert_eq!(drawn(&v).frame.unwrap().pixels.unwrap(), good);
+    }
+
+    #[test]
+    fn rapid_non_gesture_edit_burst_uses_interactive_scrub_and_settles() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("rapid-nudge-burst").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let base = service
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .views
+            .get(&v.id)
+            .unwrap()
+            .config
+            .snapshot
+            .clone();
+        let next = |rev: u64| Snapshot {
+            doc_id: base.doc_id,
+            revision: rev,
+            document: base.document.clone(),
+        };
+        // First non-gesture edit: single edit, not yet a rapid burst.
+        v.snapshot(next(base.revision + 1)).unwrap();
+        {
+            let state = service.shared.state.lock().unwrap();
+            let view = state.views.get(&v.id).unwrap();
+            assert!(!view.recent_edit);
+            assert!(view.last_edit_at.is_some());
+        }
+        // Second non-gesture edit right after: enters interactive rapid-edit burst.
+        v.snapshot(next(base.revision + 2)).unwrap();
+        {
+            let state = service.shared.state.lock().unwrap();
+            let view = state.views.get(&v.id).unwrap();
+            assert!(view.recent_edit);
+            // A finished scrub frame from revision + 1 is accepted via only_moved
+            // rather than dropped in a stale_rejections freeze loop.
+            let earlier = Stamp {
+                revision: base.revision + 1,
+                ..view.stamp
+            };
+            assert!(only_moved(view, earlier, view.moves, Moment::Scrub, false, false));
+        }
+        v.retire();
+    }
+
+    #[test]
+    fn continuous_fly_camera_updates_present_frames_while_moving() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("fly-continuous-present").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        let mut camera = studio::FreeView {
+            ortho: false,
+            roll: 0.,
+            eye: [0., 0., 5.],
+            target: [0.; 3],
+            zoom: 1.,
+        };
+        let t0 = trace::now();
+        v.studio_view_at(Some(camera), t0).unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        let before_ticks = service
+            .shared
+            .superseded
+            .load(std::sync::atomic::Ordering::Acquire);
+        let before_presented = v.status().presented;
+        // Simulate 60 Hz WASD Fly ticks arriving while the in-flight interactive
+        // camera frame is still rendering.
+        for step in 1..=5 {
+            camera.eye[2] = 5. - 0.1 * f64::from(step);
+            v.studio_view_at(Some(camera), t0 + 0.016 * f64::from(step))
+                .unwrap();
+        }
+        assert_eq!(
+            service
+                .shared
+                .superseded
+                .load(std::sync::atomic::Ordering::Acquire),
+            before_ticks,
+            "continuing Fly camera ticks must not abort in-flight camera frames"
+        );
+        let final_stamp = v.stamp();
+        release.send(()).unwrap();
+        let status = wait_for(&v, "latest fly camera frame", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && Some(f.stamp) == final_stamp)
+        });
+        // Both the in-flight frame AND the latest frame must have presented
+        // (zero stale rejections while flying!).
+        assert!(
+            status.presented >= before_presented + 2,
+            "expected in-flight and final fly frames to present: before={before_presented}, after={}",
+            status.presented
+        );
+        assert_eq!(status.stale_rejections, 0);
+        v.retire();
+    }
+
+    #[test]
+    fn scrub_while_playing_pauses_immediately_and_keeps_sought_clock_time() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("scrub-while-playing").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        v.capture_next().unwrap();
+        drawn(&v);
+        let (entered, signal) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        *service.shared.before_submit.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        v.capture_next().unwrap();
+        v.command(TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        signal.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Click the timeline ruler at 2.0s while playback is running and the worker is busy.
+        let target = Ticks::from_whole_seconds(2);
+        v.scrub(target).unwrap();
+        let status = v.status();
+        assert!(!status.wants_display);
+        let clock = status.clock.expect("clock present");
+        assert_eq!(clock.state, pm_protocol::clock::TransportState::Stopped);
+        assert_eq!(clock.media_time, target);
+        release.send(()).unwrap();
+        v.capture_next().unwrap();
+        let landed = drawn(&v);
+        assert_eq!(landed.frame.unwrap().time, target);
+        v.retire();
     }
 }
 

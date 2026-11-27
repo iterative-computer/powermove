@@ -94,6 +94,10 @@ fn only_pinned_native_overlays_change_the_frozen_catalog() {
                 .expect("native marker guidance");
             tool["description"] = json!(base);
         }
+        if name == "render_frames" {
+            assert_eq!(tool["inputSchema"]["properties"]["width"]["maximum"], json!(8192));
+            tool["inputSchema"]["properties"]["width"]["maximum"] = json!(1280);
+        }
         let overlay = &speed["overlays"][name];
         if let Some(note) = overlay["note"].as_str() {
             let base = tool["description"].as_str().unwrap()

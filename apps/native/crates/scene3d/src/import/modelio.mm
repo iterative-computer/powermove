@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <ModelIO/ModelIO.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <ImageIO/ImageIO.h>
 #import <objc/message.h>
 #include <algorithm>
 #include <cmath>
@@ -333,6 +334,75 @@ extern "C" bool pm_scene3d_modelio_supports(const char *extension) {
     @autoreleasepool {
         NSString *text = [NSString stringWithUTF8String:extension];
         return text && [MDLAsset canImportFileExtension:text];
+    }
+}
+
+using EmitImage = bool (*)(void *, const uint8_t *, uint32_t, uint32_t);
+
+extern "C" bool pm_scene3d_modelio_decode_image(const uint8_t *data, size_t len, bool color,
+                                                void *context, EmitImage emit) {
+    if (!data || len == 0 || !emit) return false;
+    @autoreleasepool {
+        CFDataRef cfData = CFDataCreateWithBytesNoCopy(kCFAllocatorDefault, data,
+                                                       static_cast<CFIndex>(len),
+                                                       kCFAllocatorNull);
+        if (!cfData) return false;
+        CGImageSourceRef source = CGImageSourceCreateWithData(cfData, nullptr);
+        CFRelease(cfData);
+        if (!source) return false;
+        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
+        CFRelease(source);
+        if (!image) return false;
+        const size_t w = CGImageGetWidth(image), h = CGImageGetHeight(image);
+        const size_t edge = std::max(w, h);
+        if (!w || !h) {
+            CGImageRelease(image);
+            return false;
+        }
+        const double scale = std::min(1.0, 2048.0 / edge);
+        const uint32_t width = std::max(1L, std::lround(w * scale));
+        const uint32_t height = std::max(1L, std::lround(h * scale));
+        CGColorSpaceRef rgb = CGColorSpaceCreateWithName(color ? kCGColorSpaceSRGB : kCGColorSpaceLinearSRGB);
+        if (!color) {
+            CGColorSpaceRef srcSpace = CGImageGetColorSpace(image);
+            CGColorSpaceRef linear = nullptr;
+            if (srcSpace && CGColorSpaceGetModel(srcSpace) == kCGColorSpaceModelRGB) {
+                linear = CGColorSpaceRetain(rgb);
+            } else if (srcSpace && CGColorSpaceGetModel(srcSpace) == kCGColorSpaceModelMonochrome) {
+                linear = CGColorSpaceCreateWithName(kCGColorSpaceLinearGray);
+            }
+            if (linear) {
+                CGImageRef copy = CGImageCreateCopyWithColorSpace(image, linear);
+                CGColorSpaceRelease(linear);
+                if (copy) {
+                    CGImageRelease(image);
+                    image = copy;
+                }
+            }
+        }
+        std::vector<uint8_t> bytes(size_t(width) * height * 4);
+        CGContextRef bitmap = CGBitmapContextCreate(bytes.data(), width, height, 8, width * 4, rgb,
+            kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+        CGColorSpaceRelease(rgb);
+        if (!bitmap) {
+            CGImageRelease(image);
+            return false;
+        }
+        CGContextSetBlendMode(bitmap, kCGBlendModeCopy);
+        CGContextSetInterpolationQuality(bitmap, kCGInterpolationHigh);
+        CGContextDrawImage(bitmap, CGRectMake(0, 0, width, height), image);
+        CGContextRelease(bitmap);
+        CGImageRelease(image);
+        // Convert premultiplied RGBA to straight alpha for glTF.
+        for (size_t i = 0; i < bytes.size(); i += 4) {
+            const unsigned alpha = bytes[i + 3];
+            if (alpha && alpha < 255) {
+                for (size_t c = 0; c < 3; c++) {
+                    bytes[i + c] = std::min(255u, (bytes[i + c] * 255u + alpha / 2) / alpha);
+                }
+            }
+        }
+        return emit(context, bytes.data(), width, height);
     }
 }
 

@@ -624,6 +624,7 @@ pub fn replay_with(vectors: &Value, memoize: bool, check: &mut Check<'_>) {
                             Some(Value::Bool(true))
                         ),
                         local_view: None,
+                        focus_group: None,
                     };
                     let (x, y) = (hexf(get(case, "x").unwrap()), hexf(get(case, "y").unwrap()));
                     result(

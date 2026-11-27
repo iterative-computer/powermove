@@ -5638,6 +5638,7 @@ name = "pm-panel-studio3d"
 version = "0.1.0"
 dependencies = [
  "pm-design",
+ "pm-eval",
  "pm-geom3d",
  "pm-kernel",
  "pm-model",

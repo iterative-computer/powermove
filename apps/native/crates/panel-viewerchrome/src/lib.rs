@@ -414,6 +414,26 @@ impl ViewModel {
                 }
                 Action::Host(HostAction::OpenComposition(id.into()))
             }
+            "viewer.group.focus" => {
+                let group = match &argument {
+                    Value::Null => None,
+                    Value::String(s) => {
+                        let id = s.to_string_lossy();
+                        if id.is_empty() {
+                            return Err(Error::Invalid("group id"));
+                        }
+                        let root = self.snapshot.root().ok_or(Error::Closed)?;
+                        let layers =
+                            pm_kernel::model::list_layers(root, self.composition.as_deref());
+                        if !layers.iter().any(|l| l.id == id && l.kind == "group") {
+                            return Err(Error::Invalid("group id"));
+                        }
+                        Some(id)
+                    }
+                    _ => return Err(Error::Invalid("group id")),
+                };
+                Action::Host(HostAction::FocusGroup(group))
+            }
             "viewer.source.close" => {
                 no_arg()?;
                 Action::Host(HostAction::Source(SourceCommand::Close))
@@ -513,6 +533,14 @@ impl ViewModel {
                 self.transport.time,
                 &pm_kernel::PickOptions {
                     include_locked: context_menu,
+                    focus_group: self
+                        .ui
+                        .timeline
+                        .get("nativeModel")
+                        .and_then(|v| v.get("focusedGroup"))
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned),
                 },
             )
             .map(|hit| hit.layer_id)
@@ -645,6 +673,7 @@ pub enum Action {
 pub enum HostAction {
     Transport(TransportAction),
     OpenComposition(String),
+    FocusGroup(Option<String>),
     /// The host gathers current extension contributions. No built-in menu copy
     /// or invented Fit/Settings rows are hardcoded here.
     ContextMenu {

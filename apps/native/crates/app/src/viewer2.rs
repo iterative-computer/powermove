@@ -1223,6 +1223,7 @@ impl Controller {
                 .mastering(mtm, self.output_mode.mastering())
                 .and_then(|_| viewer.media_mode(self.media_mode))
                 .and_then(|_| viewer.quality(self.quality))
+                .and_then(|_| viewer.focus_group(self.focus_group.clone()))
                 .and_then(|_| viewer.safe_areas(geometry))
             {
                 self.message = format!("Viewer: {e}");

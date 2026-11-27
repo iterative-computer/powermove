@@ -79,12 +79,27 @@ impl TimelineModel {
         if !"psrtaumfel*".contains(key) {
             return Err(ModelError::UnknownCommand(key.to_string()));
         }
-        let layers: Vec<_> = self
-            .index
-            .layers
-            .iter()
-            .filter(|l| self.selection.layers().is_empty() || self.selection.contains(&l.id))
-            .collect();
+        let layers: Vec<_> = if self.selection.layers().is_empty() {
+            self.index
+                .layers
+                .iter()
+                .map(|layer| layer.as_ref())
+                .collect()
+        } else {
+            // Preserve stack order without walking every unselected layer.
+            let mut ordinals: Vec<_> = self
+                .selection
+                .layers()
+                .iter()
+                .filter_map(|id| self.index.layer_ordinal(id))
+                .collect();
+            ordinals.sort_unstable();
+            ordinals.dedup();
+            ordinals
+                .into_iter()
+                .map(|i| self.index.layers[i].as_ref())
+                .collect()
+        };
         if layers.is_empty() {
             return Ok(());
         }
@@ -106,8 +121,8 @@ impl TimelineModel {
         if key == '*' || (key == 'm' && self.selection.layers().is_empty()) {
             let close = before.iter().all(|d| !d.collapsed);
             for (l, mut d) in layers.iter().zip(before) {
-                d.paths = Some(vec!["*".into()]);
                 d.collapsed = close;
+                d.paths = (!close).then(|| vec!["*".into()]);
                 if key == 'm' && l.kind == "group" {
                     d.group_collapsed = close;
                 }
@@ -153,8 +168,10 @@ impl TimelineModel {
                                 ('r', false) => {
                                     p == "rotation"
                                         || p.starts_with("rotation.")
-                                        || p == "orientation"
-                                        || p.starts_with("orientation.")
+                                        || ((p == "orientation" || p.starts_with("orientation."))
+                                            && (!c.keys.is_empty()
+                                                || c.expression.is_some()
+                                                || facts.modified.contains(&pair)))
                                 }
                                 ('r', true) => p == "c.timeRemap" || p == "c.sourceTime",
                                 ('a', false) => p.starts_with("anchor."),
@@ -222,7 +239,7 @@ impl TimelineModel {
                     target
                 };
                 d.collapsed = close || (shift && paths.is_empty());
-                d.paths = Some(paths);
+                d.paths = (!d.collapsed).then_some(paths);
                 self.reveal.layers.insert(l.id.clone(), d);
                 let mut parent = l.group.clone();
                 let mut seen = HashSet::new();
@@ -269,7 +286,14 @@ impl TimelineModel {
             .reveal
             .layers
             .get(layer)
-            .and_then(|d| d.paths.clone())
+            .and_then(|d| {
+                d.paths.as_ref().filter(|paths| {
+                    // Older views can retain an all-properties flag after
+                    // collapse. Opening for a new key must leave it closed.
+                    !d.collapsed || !paths.iter().any(|p| p == "*")
+                })
+            })
+            .cloned()
             .unwrap_or_else(|| {
                 l.channels
                     .iter()
@@ -411,5 +435,85 @@ mod layer_reveal_tests {
         assert!(!model.reveal.layers["inner"].group_collapsed);
         assert_eq!(model.reveal_serial, 1);
         assert_eq!(model.reveal_target, Some(RevealTarget::Layer("target".into())));
+    }
+
+    #[test]
+    fn adding_keyframe_to_collapsed_layer_does_not_reopen_stale_sibling_paths() {
+        let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig::default());
+        let kernel = actor.handle();
+        let seed = pm_model::json::parse(r#"{"id":"project","dur":10,"layers":[]}"#).unwrap();
+        kernel
+            .open("test", pm_kernel::OpenSource::Untitled(seed))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let before = pm_model::Node::parse_bytes(br#"{
+            "id":"project", "dur":10, "layers":[
+                {
+                    "id":"fx1",
+                    "type":"shader",
+                    "d": {
+                        "uniforms": {
+                            "pointAy": {"v": 50, "kf": []},
+                            "pointBx": {"v": 75, "kf": []},
+                            "radius": {"v": 120, "kf": []},
+                            "rampOffset": {"v": 81.7, "kf": []},
+                            "saturation": {"v": 1, "kf": []}
+                        }
+                    }
+                }
+            ]
+        }"#, 0).unwrap();
+        let after = pm_model::Node::parse_bytes(br#"{
+            "id":"project", "dur":10, "layers":[
+                {
+                    "id":"fx1",
+                    "type":"shader",
+                    "d": {
+                        "uniforms": {
+                            "pointAy": {"v": 50, "kf": []},
+                            "pointBx": {"v": 75, "kf": []},
+                            "radius": {"v": 120, "kf": []},
+                            "rampOffset": {"v": 81.7, "kf": [{"i":"k1","t":0,"v":81.7}]},
+                            "saturation": {"v": 1, "kf": []}
+                        }
+                    }
+                }
+            ]
+        }"#, 1).unwrap();
+        let mut pub0 = (*kernel.published("test").unwrap()).clone();
+        pub0.snapshot = pm_kernel::Snapshot {
+            doc_id: pub0.snapshot.doc_id,
+            revision: 0,
+            document: Arc::new(pm_model::Document::from_root(Some(before), 0)),
+        };
+        let mut pub1 = pub0.clone();
+        pub1.snapshot = pm_kernel::Snapshot {
+            doc_id: pub0.snapshot.doc_id,
+            revision: 1,
+            document: Arc::new(pm_model::Document::from_root(Some(after), 1)),
+        };
+        let mut model = TimelineModel::default();
+        model.sync(&pub0);
+        // Simulate a previously collapsed layer that had stale expanded paths.
+        model.reveal.layers.insert(
+            "fx1".into(),
+            Disclosure {
+                collapsed: true,
+                group_collapsed: true,
+                paths: Some(vec!["*".into()]),
+            },
+        );
+        model.rebuild_rows();
+        model.sync(&pub1);
+        let props: Vec<String> = model
+            .rows()
+            .iter()
+            .filter_map(|row| match &row.id {
+                crate::RowId::Property { channel, .. } => Some(channel.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(props, vec!["u.rampOffset".to_owned()]);
     }
 }

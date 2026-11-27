@@ -94,6 +94,9 @@ pub struct RenderRequest {
     pub origin: Option<(f64, f64)>,
     /// Tone map the finished frame ([`OutputTone`]).
     pub output_tone: Option<OutputTone>,
+    /// Viewer-only group focus: render only this group and its descendants in
+    /// the top-level composition (never set for exports or exact captures).
+    pub focus_group: Option<String>,
 }
 
 /// BT.2390 on the finished frame ([`crate::composite::ColorSettings::hdr`]):
@@ -150,6 +153,7 @@ impl RenderRequest {
             viewer: false,
             origin: None,
             output_tone: None,
+            focus_group: None,
         }
     }
 
@@ -173,6 +177,7 @@ impl RenderRequest {
             viewer: false,
             origin: None,
             output_tone: None,
+            focus_group: None,
         }
     }
 
@@ -214,6 +219,7 @@ impl RenderRequest {
             viewer: false,
             origin: None,
             output_tone: None,
+            focus_group: None,
         })
     }
 

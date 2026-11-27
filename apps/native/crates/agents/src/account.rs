@@ -383,18 +383,79 @@ impl Accounts {
         }
         self.bump();
     }
-    fn binary(&self, runtime: Runtime) -> Result<PathBuf, String> {
-        self.environment.binary(runtime).ok_or_else(|| {
-            let name = match runtime {
-                Runtime::Codex => "ChatGPT",
-                Runtime::Claude => "Claude",
-            };
-            format!("Powermove's built-in {name} runtime is missing. Reinstall Powermove.")
-        })
+    fn ensure_runtime(
+        &self,
+        provider: Provider,
+        runtime: Runtime,
+        job: Job,
+        cancel: &AtomicBool,
+    ) -> Result<PathBuf, Status> {
+        if let Some(binary) = self.environment.binary(runtime) {
+            return Ok(binary);
+        }
+        match job {
+            Job::Refresh => return Err(Status::of(State::Disconnected, None)),
+            Job::Disconnect => {
+                self.set_models(provider, vec![]);
+                return Err(Status::of(State::Disconnected, None));
+            }
+            Job::Connect | Job::ConnectKey => {}
+        }
+        let label = match runtime {
+            Runtime::Codex => "ChatGPT",
+            Runtime::Claude => "Claude",
+        };
+        if cancel.load(Ordering::Acquire) {
+            return Err(Status::of(
+                State::Disconnected,
+                Some("Sign-in was cancelled.".into()),
+            ));
+        }
+        self.publish(
+            provider,
+            Status::of(
+                State::Connecting,
+                Some(format!("Downloading {label} runtime…")),
+            ),
+        );
+        let root = self.environment.runtimes_root();
+        let pin = crate::runtime::bundled_pin(runtime, crate::runtime::current_arch());
+        let mut registry = crate::runtime::NpmRegistry;
+        let mut probe = crate::runtime::NativeProbe;
+        match crate::runtime::install(
+            &root,
+            &self.environment.app_version,
+            &pin,
+            &mut registry,
+            &mut probe,
+        ) {
+            Ok(binary) => {
+                if !crate::launch::grants::any_live() {
+                    let _ = crate::runtime::prune_inactive(&root, runtime);
+                }
+                if cancel.load(Ordering::Acquire) {
+                    return Err(Status::of(
+                        State::Disconnected,
+                        Some("Sign-in was cancelled.".into()),
+                    ));
+                }
+                Ok(binary)
+            }
+            Err(error) => Err(Status::of(
+                State::Disconnected,
+                Some(format!(
+                    "Couldn't download the {label} runtime ({error}). Check your connection and try again."
+                )),
+            )),
+        }
     }
     fn chatgpt(&self, job: Job, cancel: &AtomicBool) -> Result<Status, String> {
+        let binary = match self.ensure_runtime(Provider::Chatgpt, Runtime::Codex, job, cancel) {
+            Ok(binary) => binary,
+            Err(status) => return Ok(status),
+        };
         let mut peer = Peer::start(
-            &self.binary(Runtime::Codex)?,
+            &binary,
             &["app-server"],
             self.environment.codex_vars()?,
         )?;
@@ -499,7 +560,10 @@ impl Accounts {
         cancel: &AtomicBool,
         discovery_timeout: Duration,
     ) -> Result<Status, String> {
-        let binary = self.binary(Runtime::Claude)?;
+        let binary = match self.ensure_runtime(Provider::Claude, Runtime::Claude, job, cancel) {
+            Ok(binary) => binary,
+            Err(status) => return Ok(status),
+        };
         let vars = self.environment.claude_vars()?;
         if job == Job::Disconnect {
             let (code, output) = run(&binary, &["auth", "logout"], &vars, REQUEST, cancel)?;
@@ -1489,5 +1553,27 @@ for line in sys.stdin:
         let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(config.contains("cli_auth_credentials_store = \"file\""));
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn refresh_without_bundled_runtime_reports_disconnected_ready_for_on_demand_download() {
+        let root = std::env::temp_dir().join(format!(
+            "pm-account-missing-{}",
+            crate::runtime::unique()
+        ));
+        let accounts = Accounts::new(
+            Environment {
+                profile: root.join("profile"),
+                resources: None,
+                ..Default::default()
+            },
+            Arc::new(|_| panic!("refresh never opens a browser")),
+            Arc::new(|| {}),
+        );
+        let cancel = AtomicBool::default();
+        for provider in [Provider::Chatgpt, Provider::Claude] {
+            let status = accounts.run(provider, Job::Refresh, &cancel);
+            assert_eq!(status.state, State::Disconnected, "{provider:?}");
+            assert_eq!(status.detail, None, "{provider:?}");
+        }
     }
 }

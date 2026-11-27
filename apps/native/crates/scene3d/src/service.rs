@@ -22,7 +22,7 @@ pub fn new_layer(
     let position = match role {
         Role::Object => [0., 0., 0.],
         Role::Light => [-3., 5., 4.],
-        Role::Camera => [3., 2., 6.],
+        Role::Camera => [0., 0., 6.],
     };
     let mut p = json!({});
     for (alias, path) in schema::TRANSFORMS {
@@ -473,7 +473,7 @@ pub(crate) fn studio_plan(
         "light_highlight" => {
             let point = vec3(&args["at"])?;
             let normal = vec3(&args["normal"])?;
-            let eye = camera.map(pos).unwrap_or([3., 2., 6.]);
+            let eye = camera.map(pos).unwrap_or([0., 0., 6.]);
             let distance = scalar(args, "distance", (length(sub(eye, point)) * 0.9).max(2.))?;
             let size = args.get("size").map(|_| scalar(args, "size", 0.)).transpose()?;
             let (at, size) = if camera.is_some_and(|c| c["d"]["data"]["environment"]["shadowCatcher"] == true) {
@@ -489,7 +489,7 @@ pub(crate) fn studio_plan(
             let preset = args["preset"].as_str().unwrap_or("");
             let product = product_for(layers, layer)?;
             let (c, r) = product_frame(comp, product);
-            let eye = camera.map(pos).unwrap_or([3., 2., 6.]);
+            let eye = camera.map(pos).unwrap_or([0., 0., 6.]);
             let placement = crate::light_tool::preset_placement(preset, c, r, eye)?;
             let color = match args.get("temperature") {
                 Some(t) => crate::light_tool::kelvin_hex(
@@ -591,8 +591,10 @@ pub(crate) fn studio_plan(
             };
             match args["shot"].as_str() {
                 Some("turntable") => {
-                    if schema::role(l) != Some(Role::Object) && l["type"] != "group" {
-                        return fail("A turntable needs a model or group");
+                    if schema::role(l) != Some(Role::Object)
+                        && !matches!(l["type"].as_str(), Some("group" | "null"))
+                    {
+                        return fail("A turntable needs a model, group, or null");
                     }
                     let from = l["p"]["rotation.y"]["v"].as_f64().unwrap_or(0.);
                     keys(
@@ -785,6 +787,8 @@ pub struct ResolvedScene {
     pub scene: Value,
     pub model_worlds: std::collections::BTreeMap<String, [f64; 16]>,
     pub light_worlds: std::collections::BTreeMap<String, [f64; 16]>,
+    pub null_worlds: std::collections::BTreeMap<String, [f64; 16]>,
+    pub parent_worlds: std::collections::BTreeMap<String, [f64; 16]>,
     pub targets: std::collections::BTreeMap<String, Vec3>,
     pub opacities: std::collections::BTreeMap<String, f64>,
     pub occludes: std::collections::BTreeMap<String, bool>,
@@ -799,6 +803,8 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
         scene,
         model_worlds: Default::default(),
         light_worlds: Default::default(),
+        null_worlds: Default::default(),
+        parent_worlds: Default::default(),
         targets: Default::default(),
         opacities: Default::default(),
         occludes: Default::default(),
@@ -811,6 +817,26 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
         .ok_or_else(|| Error("No composition layers".into()))?;
     let sources = scatter_sources(layers, time, ev)?;
     for l in layers {
+        if l["type"] == "null" && l["threeD"] == true {
+            if !ev.active(l, time)? {
+                continue;
+            }
+            let id = l["id"]
+                .as_str()
+                .ok_or_else(|| Error("Missing 3D layer ID".into()))?
+                .to_string();
+            let world = ev.world(l, time)?;
+            if !world.iter().all(|v| v.is_finite()) {
+                return fail("Invalid 3D world matrix");
+            }
+            let parent = ev.parent(l, time)?;
+            if !parent.iter().all(|v| v.is_finite()) {
+                return fail("Invalid 3D parent matrix");
+            }
+            result.null_worlds.insert(id.clone(), world);
+            result.parent_worlds.insert(id, parent);
+            continue;
+        }
         let Some(role) = schema::role(l) else {
             continue;
         };
@@ -829,6 +855,11 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
         if !world.iter().all(|v| v.is_finite()) {
             return fail("Invalid 3D world matrix");
         }
+        let parent = ev.parent(l, time)?;
+        if !parent.iter().all(|v| v.is_finite()) {
+            return fail("Invalid 3D parent matrix");
+        }
+        result.parent_worlds.insert(id.clone(), parent);
         match role {
             Role::Object => {
                 result.model_worlds.insert(id.clone(), world);
@@ -858,10 +889,6 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
                 result.occludes.insert(id, occludes);
             }
             Role::Light | Role::Camera => {
-                let parent = ev.parent(l, time)?;
-                if !parent.iter().all(|v| v.is_finite()) {
-                    return fail("Invalid 3D parent matrix");
-                }
                 let mut aim = [0.; 3];
                 for (a, k) in ["targetX", "targetY", "targetZ"].iter().enumerate() {
                     aim[a] = ev
@@ -880,21 +907,104 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
                 } else if result.camera_id.is_none() {
                     let position = math::apply(&world, [0.; 3]);
                     let mut target = math::apply(&parent, aim);
+                    let distance = (0..3)
+                        .map(|i| (target[i] - position[i]).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                    let free_rotation = l["d"]["data"]["camera"]["autoOrient"] == "off";
                     // Auto-Orient Off (a one-node camera): it looks down its own
                     // −Z, turned by its rotation, and moving it never re-aims it.
                     // The aim point keeps the point of interest's distance, so
                     // focus and depth of field read the same.
-                    if l["d"]["data"]["camera"]["autoOrient"] == "off" {
-                        let d = (0..3)
-                            .map(|i| (target[i] - position[i]).powi(2))
-                            .sum::<f64>()
-                            .sqrt();
+                    if free_rotation || !(distance.is_finite() && distance > 1e-6) {
                         let forward = normalize([-world[8], -world[9], -world[10]]);
-                        let d = if d.is_finite() && d > 1e-6 { d } else { 10. };
+                        let d = if distance.is_finite() && distance > 1e-6 {
+                            distance
+                        } else {
+                            10.
+                        };
                         target = [0, 1, 2].map(|i| position[i] + forward[i] * d);
                     }
+                    let mut up = [world[4], world[5], world[6]];
+                    // Match `pm_eval::space3d::Scope::camera_3d_with_up`: apply
+                    // local pitch/yaw/roll on top of the look-at frame so 3D
+                    // Studio models, picking, and 2.5D layers rotate identically.
+                    if !free_rotation && distance.is_finite() && distance >= 1e-6 && l["threeD"] == true {
+                        let mut channel = |path: &str, default: f64| -> Result<f64> {
+                            let Some(prop) = l["p"].get(path) else {
+                                return Ok(default);
+                            };
+                            let n = ev.value(l, path, prop, time)?.as_f64().unwrap_or(default);
+                            Ok(if n.is_finite() { n } else { default })
+                        };
+                        let mut local_rotation = [
+                            1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+                        ];
+                        let mut rotated = false;
+                        for (axis, key) in [
+                            (2usize, "rotation"),
+                            (1, "rotation.y"),
+                            (0, "rotation.x"),
+                            (2, "orientation.z"),
+                            (1, "orientation.y"),
+                            (0, "orientation.x"),
+                        ] {
+                            let degrees = channel(key, 0.)?;
+                            if degrees != 0. {
+                                let rad = degrees.to_radians();
+                                let (s, c) = (rad.sin(), rad.cos());
+                                let r = match axis {
+                                    0 => [1., 0., 0., 0., 0., c, s, 0., 0., -s, c, 0., 0., 0., 0., 1.],
+                                    1 => [c, 0., -s, 0., 0., 1., 0., 0., s, 0., c, 0., 0., 0., 0., 1.],
+                                    _ => [c, s, 0., 0., -s, c, 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.],
+                                };
+                                let mut prod = [0.; 16];
+                                for col in 0..4 {
+                                    for row in 0..4 {
+                                        prod[col * 4 + row] = (0..4)
+                                            .map(|k| local_rotation[k * 4 + row] * r[col * 4 + k])
+                                            .sum();
+                                    }
+                                }
+                                local_rotation = prod;
+                                rotated = true;
+                            }
+                        }
+                        if rotated {
+                            let sy = channel("scale.y", 100.)? / 100.;
+                            let skew_y = channel("skew", 0.)?.to_radians().tan() * sy;
+                            let base_up = [0, 1, 2].map(|i| parent[i] * skew_y + parent[4 + i] * sy);
+                            let forward = normalize([0, 1, 2].map(|i| target[i] - position[i]));
+                            let right0 = cross(forward, [0., 1., 0.]);
+                            let right0 = if dot(right0, right0) < 1e-12 {
+                                [1., 0., 0.]
+                            } else {
+                                normalize(right0)
+                            };
+                            let up0 = cross(right0, forward);
+                            let roll_x = -dot(base_up, right0);
+                            let roll_y = dot(base_up, up0);
+                            let roll = if roll_x.hypot(roll_y) < 1e-6 {
+                                0.
+                            } else {
+                                roll_x.atan2(roll_y)
+                            };
+                            let (rs, rc) = roll.sin_cos();
+                            let right = [0, 1, 2].map(|i| right0[i] * rc + up0[i] * rs);
+                            let up_base = [0, 1, 2].map(|i| up0[i] * rc - right0[i] * rs);
+                            let to_world = |v: [f64; 3]| {
+                                [0, 1, 2].map(|i| right[i] * v[0] + up_base[i] * v[1] - forward[i] * v[2])
+                            };
+                            let [rx, ry, rz] = [local_rotation[8], local_rotation[9], local_rotation[10]];
+                            if [rx, ry, rz] != [0., 0., 1.] {
+                                let forward = normalize(to_world([-rx, -ry, -rz]));
+                                target = [0, 1, 2].map(|i| position[i] + forward[i] * distance);
+                            }
+                            up = to_world([local_rotation[4], local_rotation[5], local_rotation[6]]);
+                        }
+                    }
                     result.camera_position = Some(position);
-                    result.camera_up = Some(normalize([world[4], world[5], world[6]]));
+                    result.camera_up = Some(normalize(up));
                     result.targets.insert(id.clone(), target);
                     result.camera_id = Some(id);
                 }
@@ -923,6 +1033,9 @@ pub fn depth_ids(
     let mut ids = std::collections::BTreeSet::new();
     let mut visit = |l: &Value| -> Result<bool> {
         if !ev.active(l, time)? {
+            return Ok(true);
+        }
+        if matches!(l["type"].as_str(), Some("null" | "audio")) {
             return Ok(true);
         }
         let Some(role) = schema::role(l) else {
@@ -970,10 +1083,13 @@ pub fn ordered_layers(
     }
     let mut out = vec![];
     let mut start = 0;
+    let is_3d_pass = |l: &Value| {
+        schema::role(l).is_some() || matches!(l["type"].as_str(), Some("null" | "audio"))
+    };
     while start < layers.len() {
-        let model = schema::role(&layers[start]).is_some();
+        let model = is_3d_pass(&layers[start]);
         let mut end = start + 1;
-        while end < layers.len() && schema::role(&layers[end]).is_some() == model {
+        while end < layers.len() && is_3d_pass(&layers[end]) == model {
             end += 1;
         }
         let mut block = layers[start..end].to_vec();

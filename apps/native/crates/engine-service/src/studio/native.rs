@@ -32,8 +32,89 @@ mod material_policy;
 #[path = "scatter.rs"]
 mod scatter;
 
+/// Bounded strong cache for parsed Studio 3D models & converted meshes owned
+/// by an active `Engine` session so document edits / camera moves don't re-read
+/// and re-parse multi-megabyte `.glb` files from disk, and background prewarm
+/// can populate them before the playhead enters a 3D section. Cleared when the
+/// project closes (`Engine::release_project_memory_inner`).
+#[derive(Clone, Default)]
+pub struct StudioResourceCache {
+    inner: Arc<Mutex<StudioResourceCacheInner>>,
+}
+#[derive(Default)]
+struct StudioResourceCacheInner {
+    resources: Vec<(
+        (std::path::PathBuf, u64, Option<std::time::SystemTime>),
+        Arc<pm_scene3d::render::Resource>,
+    )>,
+    meshes: Vec<Arc<Mesh>>,
+    images: Vec<Arc<Vec<u8>>>,
+    warming: std::collections::HashSet<(std::path::PathBuf, u64, Option<std::time::SystemTime>)>,
+}
+impl StudioResourceCache {
+    pub fn clear(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.resources.clear();
+            inner.meshes.clear();
+            inner.images.clear();
+            inner.warming.clear();
+        }
+    }
+    fn file_stamp(path: &std::path::Path) -> Option<(std::path::PathBuf, u64, Option<std::time::SystemTime>)> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some((path.to_path_buf(), meta.len(), meta.modified().ok()))
+    }
+    fn get_resource(
+        &self,
+        stamp: &(std::path::PathBuf, u64, Option<std::time::SystemTime>),
+    ) -> Option<Arc<pm_scene3d::render::Resource>> {
+        let inner = self.inner.lock().ok()?;
+        inner
+            .resources
+            .iter()
+            .find(|(k, _)| k == stamp)
+            .map(|(_, r)| r.clone())
+    }
+    fn put_resource(
+        &self,
+        stamp: (std::path::PathBuf, u64, Option<std::time::SystemTime>),
+        resource: Arc<pm_scene3d::render::Resource>,
+    ) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(pos) = inner.resources.iter().position(|(k, _)| k == &stamp) {
+                inner.resources.remove(pos);
+            }
+            inner.resources.push((stamp, resource));
+            while inner.resources.len() > 4 {
+                inner.resources.remove(0);
+            }
+        }
+    }
+    fn retain_warmed(&self, meshes: Vec<Arc<Mesh>>, images: Vec<Arc<Vec<u8>>>) {
+        if let Ok(mut inner) = self.inner.lock() {
+            for mesh in meshes {
+                if !inner.meshes.iter().any(|m| Arc::ptr_eq(m, &mesh)) {
+                    inner.meshes.push(mesh);
+                }
+            }
+            while inner.meshes.len() > 128 {
+                inner.meshes.remove(0);
+            }
+            for img in images {
+                if !inner.images.iter().any(|i| Arc::ptr_eq(i, &img)) {
+                    inner.images.push(img);
+                }
+            }
+            while inner.images.len() > 64 {
+                inner.images.remove(0);
+            }
+        }
+    }
+}
+
 pub struct DocumentSource {
     refine_observer: Option<super::RefineObserver>,
+    shared_resources: Option<StudioResourceCache>,
     text: Mutex<pm_render::text::TextContext>,
     capture_id: u64,
     capture_fonts: Option<pm_render::text::host::RenderFonts>,
@@ -96,6 +177,7 @@ impl DocumentSource {
         text.set_weight(pm_render::text::TextWeight::Exact);
         Self {
             refine_observer: None,
+            shared_resources: None,
             capture_id: NEXT_CAPTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             capture_fonts: None,
             capture_font_factory: None,
@@ -133,7 +215,97 @@ impl DocumentSource {
         self.export_render_scale=scale;Ok(self)
     }
     pub fn with_refine_observer(mut self, observer: Option<super::RefineObserver>) -> Self {
-        self.refine_observer = observer; self
+        self.refine_observer = observer;
+        self
+    }
+    pub fn with_resource_cache(mut self, cache: StudioResourceCache) -> Self {
+        self.shared_resources = Some(cache);
+        self
+    }
+    /// Preloads imported 3D models referenced by `composition` on a background
+    /// worker so entering the 3D section during scrub or playback hits warm
+    /// parsed geometry, converted meshes, and decoded textures.
+    pub fn spawn_prewarm(self: &Arc<Self>, composition: &str) {
+        let Some(cache) = self.shared_resources.clone() else {
+            return;
+        };
+        let Ok(comp) = pm_eval::Comp::resolve(&self.snapshot.document, composition) else {
+            return;
+        };
+        let mut to_warm = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for layer in comp.layers() {
+            if pm_eval::parenting::Role3d::of(layer) != Some(pm_eval::parenting::Role3d::Object) {
+                continue;
+            }
+            let Some(asset_id) = layer
+                .get("d")
+                .and_then(|d| d.get("data"))
+                .and_then(|d| d.get("object"))
+                .and_then(|o| o.get("source"))
+                .and_then(|s| s.get("assetId"))
+                .and_then(|id| pm_eval::node::string(Some(id)))
+                .map(|s| s.to_string_lossy())
+            else {
+                continue;
+            };
+            if !seen.insert(asset_id.clone()) {
+                continue;
+            }
+            let Some(path) = self.media.paths.get(&asset_id) else {
+                continue;
+            };
+            let Some(stamp) = StudioResourceCache::file_stamp(path) else {
+                continue;
+            };
+            if cache.get_resource(&stamp).is_some() {
+                continue;
+            }
+            let should_warm = cache
+                .inner
+                .lock()
+                .ok()
+                .is_some_and(|mut inner| inner.warming.insert(stamp.clone()));
+            if should_warm {
+                to_warm.push((asset_id, stamp));
+            }
+        }
+        if to_warm.is_empty() {
+            return;
+        }
+        let source = Arc::clone(self);
+        let _ = std::thread::Builder::new()
+            .name("pm-studio-prewarm".into())
+            .spawn(move || {
+                let _ = crate::qos::set_job_qos(crate::qos::JobQos::Utility);
+                for (asset_id, stamp) in to_warm {
+                    if let Ok(resource) = source.resource(&asset_id) {
+                        let mut warmed_meshes = Vec::new();
+                        let mut warmed_images = Vec::new();
+                        if let Ok(parts) = resource.parts(0.) {
+                            for part in &parts {
+                                if let Ok(mesh) = source.imported_mesh(&part.geometry) {
+                                    warmed_meshes.push(mesh);
+                                }
+                            }
+                        }
+                        if let pm_scene3d::import::Model::Gltf(model) = &resource.model {
+                            let mut seen_imgs = std::collections::HashSet::new();
+                            for (tex_idx, tex) in model.textures.iter().enumerate() {
+                                if seen_imgs.insert(tex.image)
+                                    && let Ok(pixels) = imported::image(&resource, tex_idx)
+                                {
+                                    warmed_images.push(pixels);
+                                }
+                            }
+                        }
+                        cache.retain_warmed(warmed_meshes, warmed_images);
+                    }
+                    if let Ok(mut inner) = cache.inner.lock() {
+                        inner.warming.remove(&stamp);
+                    }
+                }
+            });
     }
     pub fn with_text_fonts(self, fonts: Box<dyn pm_render::text::TextFonts>) -> Self {
         self.text
@@ -241,18 +413,33 @@ impl DocumentSource {
         Ok(scene)
     }
     fn resource(&self, id: &str) -> Result<Arc<pm_scene3d::render::Resource>, String> {
-        let mut resources = self
-            .resources
-            .lock()
-            .map_err(|_| "Studio resource cache poisoned")?;
-        if let Some(resource) = resources.get(id) {
-            return Ok(resource.clone());
+        {
+            let resources = self
+                .resources
+                .lock()
+                .map_err(|_| "Studio resource cache poisoned")?;
+            if let Some(resource) = resources.get(id) {
+                return Ok(resource.clone());
+            }
         }
         let path = self
             .media
             .paths
             .get(id)
             .ok_or_else(|| format!("3D model geometry is not loaded: {id}"))?;
+        let stamp = self
+            .shared_resources
+            .as_ref()
+            .and_then(|_| StudioResourceCache::file_stamp(path));
+        if let (Some(cache), Some(stamp)) = (&self.shared_resources, &stamp)
+            && let Some(resource) = cache.get_resource(stamp)
+        {
+            self.resources
+                .lock()
+                .map_err(|_| "Studio resource cache poisoned")?
+                .insert(id.into(), resource.clone());
+            return Ok(resource);
+        }
         let mut file = std::fs::File::open(path).map_err(|e| format!("3D model resource: {e}"))?;
         use std::io::Read;
         let mut bytes = vec![];
@@ -288,7 +475,13 @@ impl DocumentSource {
             .ok_or("Invalid model resource path")?;
         let resource =
             pm_scene3d::render::Resource::load(name, &bytes).map_err(|e| e.to_string())?;
-        resources.insert(id.into(), resource.clone());
+        if let (Some(cache), Some(stamp)) = (&self.shared_resources, stamp) {
+            cache.put_resource(stamp, resource.clone());
+        }
+        self.resources
+            .lock()
+            .map_err(|_| "Studio resource cache poisoned")?
+            .insert(id.into(), resource.clone());
         Ok(resource)
     }
     fn environment_image(
@@ -395,6 +588,13 @@ impl pm_studio3d_engine::compositor::Source for DocumentSource {
     fn final_render_scale(&self,_request:&SceneRequest)->Result<f32,String>{Ok(self.export_render_scale)}
     fn needs_materials(&self, request: &SceneRequest) -> Result<bool, String> {
         Ok(!self.material_references(request)?.is_empty())
+    }
+    fn prewarm_materials(
+        &self,
+        renderer: &mut pm_render::Renderer,
+        _request: &SceneRequest,
+    ) -> Result<(), String> {
+        self.bind_capture_renderer(renderer)
     }
     fn prepare_materials(
         &self,
@@ -658,7 +858,12 @@ impl SceneSource for DocumentSource {
                 ) {
                     0.
                 } else {
-                    n(cp, "fStop", 0.)
+                    let blur = n(cp, "blur", 0.);
+                    if blur > 0. {
+                        (90.0 / blur).clamp(0.7, 32.0)
+                    } else {
+                        n(cp, "fStop", 0.)
+                    }
                 },
                 focus: (n(cp, "focusDistance", 0.) > 0.)
                     .then(|| eye + (target - eye).normalize() * n(cp, "focusDistance", 0.)),

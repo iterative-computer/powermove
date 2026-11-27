@@ -68,6 +68,10 @@ pub fn mark_failed(key: Key, failure: Failure) {
     failed().lock().expect("failed lock").insert(key, failure);
 }
 
+pub(crate) fn native_failed(key: &Key) -> bool {
+    failed().lock().expect("failed lock").contains_key(key)
+}
+
 /// The verdict of a wrapped fragment program.
 pub fn verdict(source: &str, line_offset: u32) -> (Key, Verdict) {
     let cache = cache();

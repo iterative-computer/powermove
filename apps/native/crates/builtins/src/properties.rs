@@ -1,6 +1,7 @@
 //! Properties presentation using model-issued, selection-fenced leases.
 use pm_kernel::commands::timing::{RetimeMode, TimingCommand};
 use pm_kernel::{Caller, Request};
+use pm_model::{Node, NodeKind};
 use pm_panel_inspector::{
     Binding, FieldType, Inspector, PropertyId,
     v4_properties::{V4Action, V4Adapter, V4Plan},
@@ -38,6 +39,7 @@ pub struct Properties {
     pub originals: BTreeMap<String, std::path::PathBuf>,
     slots: BTreeMap<String, Vec<Value>>,
     model_parts: BTreeMap<String, Vec<pm_scene3d::geometry::ModelPart>>,
+    part_names: BTreeMap<String, String>,
     /// The model part a viewer double-click focused, `(layer, slot)`, and
     /// the request number it came with (each request opens its section once).
     part_focus: Option<(String, u64)>,
@@ -55,6 +57,12 @@ pub struct RegisteredTransition {
     pub definition: pm_kernel::commands::effects::TransitionDefinition,
     pub labels: BTreeMap<String, String>,
 }
+const PART_TRANSFORMS: &[(&str, &str, &[&str], &str, f64)] = &[
+    ("position", "Position", &["x", "y", "z"], "", 0.01),
+    ("rotation", "Rotation", &["rx", "ry", "rz"], "°", 1.),
+    ("scale", "Scale", &["scale"], "%", 1.),
+];
+
 /// The two transition fields and their slot names.
 const TRANSITION_EDGES: [(&str, &str, pm_kernel::commands::effects::Edge); 2] = [
     (
@@ -70,6 +78,52 @@ const TRANSITION_EDGES: [(&str, &str, pm_kernel::commands::effects::Edge); 2] = 
 ];
 /// What Add Expression… starts from, as the shipped editor did.
 pub const STARTING_EXPRESSION: &str = "value + wiggle(2, 20)";
+fn node_string(node: &Node) -> Option<&str> {
+    match node.kind() {
+        NodeKind::String(value) => value.as_str(),
+        _ => None,
+    }
+}
+
+fn member(node: &Node, key: &str) -> Value {
+    node.get(key)
+        .map(|value| super::data::wire(&value.to_value()))
+        .unwrap_or_default()
+}
+
+// The studio and extrusion presenters consume a JSON record. Give them only
+// the fields they read, so paths, vertices and unrelated channels stay native.
+fn studio_record(layer: &Node) -> Value {
+    let mut data = serde_json::Map::new();
+    if let Some(content) = layer.get("d") {
+        let definition = content.get("definition").and_then(node_string);
+        for key in [
+            "definition",
+            "studio3d",
+            "extrusion",
+            "color",
+            "fill",
+            "size",
+            "w",
+            "h",
+        ] {
+            if content.get(key).is_some() {
+                data.insert(key.into(), member(content, key));
+            }
+        }
+        if matches!(
+            definition,
+            Some(
+                pm_scene3d::schema::OBJECT | pm_scene3d::schema::LIGHT | pm_scene3d::schema::CAMERA
+            )
+        ) {
+            data.insert("data".into(), member(content, "data"));
+        }
+    }
+    json!({"type":member(layer, "type"),"threeD":member(layer, "threeD"),
+        "separateDimensions":member(layer, "separateDimensions"),"d":data})
+}
+
 impl Properties {
     /// A row's expression field, when one of its channels has an expression:
     /// the source, what the parser says about it, and a lease that writes
@@ -174,35 +228,44 @@ impl Properties {
                 .ok_or("Properties identity exhausted")?;
             self.key = format!("properties:{}:{}", model.document_id(), self.sequence);
         }
+        self.part_names.clear();
         let target = if let Some(id) = model.primary() {
-            let layer = model.layer(id).map_err(|e| e.to_string())?;
-            let kind = layer
-                .get("type")
-                .and_then(pm_model::Value::as_str)
-                .unwrap_or("");
-            json!({"kind":"layers","key":self.key,"count":model.selected_layers().len(),"first":{"id":id,"name":layer.get("name").and_then(pm_model::Value::as_str).unwrap_or(""),"type":kind,"typeLabel":super::data::kind_label(kind),"locked":!model.editable(id),"audio":kind=="audio","acceptsEffects": !matches!(kind,"audio"|"camera")},"sharedType":if model.selected_layers().iter().all(|id|model.layer(id).ok().and_then(|l|l.get("type").and_then(pm_model::Value::as_str).map(str::to_owned)).as_deref()==Some(kind)) {Some(kind)} else {None}})
+            let layer = model.layer_node(id).map_err(|e| e.to_string())?;
+            let kind = layer.get("type").and_then(node_string).unwrap_or("");
+            json!({"kind":"layers","key":self.key,"count":model.selected_layers().len(),"first":{"id":id,"name":layer.get("name").and_then(node_string).unwrap_or(""),"type":kind,"typeLabel":super::data::kind_label(kind),"locked":!model.editable(id),"audio":kind=="audio","acceptsEffects": !matches!(kind,"audio"|"camera")},"sharedType":if model.selected_layers().iter().all(|id|model.layer_node(id).ok().and_then(|l|l.get("type")).and_then(node_string)==Some(kind)) {Some(kind)} else {None}})
         } else {
             json!({"kind":"composition","key":self.key})
         };
         // A Studio 3D layer: its role, environment kind and the name it goes by.
-        let studio = model
+        let record = model
             .primary()
-            .and_then(|id| model.layer(id).ok())
-            .map(|l| super::data::wire(&l))
-            .and_then(|r| {
-                let (role, _) = pm_panel_studio3d::properties::fields(&r)?;
+            .and_then(|id| model.layer_node(id).ok())
+            .map(studio_record);
+        let studio = record.as_ref().and_then(|r| {
+            if let Some((role, _)) = pm_panel_studio3d::properties::fields(r) {
                 let data = &r["d"]["data"];
                 let env = pm_panel_studio3d::properties::environment(data);
-                Some((role, env, studio_label(role, env, data)))
-            });
+                return Some((role, env, studio_label(role, env, data)));
+            }
+            if r["type"] == "null" && r["threeD"] == true && r["d"]["studio3d"] == true {
+                return Some((pm_panel_studio3d::properties::Role::Object, None, "3D Null"));
+            }
+            None
+        });
         let mut target = target;
-        if let Some((_, _, label)) = &studio
+        if let Some((role, _, label)) = &studio
             && model.selected_layers().len() == 1
         {
-            // `Terrain · Terrain` says nothing twice: a layer named for its
-            // kind shows the generic 3D kind instead.
+            // Layers named for their kind usually show the generic 3D label.
+            // The inspector uses the Camera label to format camera headings.
             let named = target["first"]["name"].as_str().unwrap_or("") == *label;
-            target["first"]["typeLabel"] = json!(if named { "3D Layer" } else { label });
+            target["first"]["typeLabel"] = json!(
+                if named && *role != pm_panel_studio3d::properties::Role::Camera {
+                    "3D Layer"
+                } else {
+                    label
+                }
+            );
             target["first"]["acceptsEffects"] = json!(false);
             target["first"]["studio"] = json!(true);
         }
@@ -217,13 +280,9 @@ impl Properties {
         }
         let mut sections = vec![];
         if let Some(layer) = model.primary().map(str::to_owned) {
-            let audio = model
-                .layer(&layer)
-                .map_err(|e| e.to_string())?
-                .get("type")
-                .and_then(pm_model::Value::as_str)
-                == Some("audio");
-            if model.selected_layers().len() == 1 && !audio {
+            let kind = target["first"]["type"].as_str().unwrap_or_default();
+            let audio = kind == "audio";
+            if model.selected_layers().len() == 1 && !audio && studio.is_none() {
                 sections.extend(self.transition_sections(model, &layer, time)?);
             }
             let mut content = vec![];
@@ -236,9 +295,10 @@ impl Properties {
             // A contributed layer type's definition, read once (not a copy of the
             // layer per field).
             let definition = model
-                .layer(&layer)
+                .layer_node(&layer)
                 .ok()
-                .and_then(|l| l.get("d")?.get("definition")?.as_str().map(str::to_owned))
+                .and_then(|l| l.get("d")?.get("definition").and_then(node_string))
+                .map(str::to_owned)
                 .unwrap_or_default();
             for field in fields {
                 let contributed = match &field.binding {
@@ -496,7 +556,7 @@ impl Properties {
             // remapping rows once a layer has a source time channel.
             if matches!(target["first"]["type"].as_str(), Some("video" | "precomp")) {
                 let remapped = model
-                    .layer(&layer)
+                    .layer_node(&layer)
                     .ok()
                     .is_some_and(|l| l.get("d").and_then(|d| d.get("sourceTime")).is_some());
                 if !remapped {
@@ -507,35 +567,36 @@ impl Properties {
             if let Some(section) = self.type_settings(model, &layer, time)? {
                 sections.push(section);
             }
-            if model.selected_layers().len() == 1 {
+            if kind == "captions" && model.selected_layers().len() == 1 {
                 sections.extend(self.caption_sections(model, &layer)?);
             }
             // One 3D section after content, single selection only.
-            if model.selected_layers().len() == 1 {
-                let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
-                if let Some((role, fields)) = pm_panel_studio3d::properties::fields(&record) {
-                    sections.extend(self.part_sections(model, &layer, &record, time)?);
+            if model.selected_layers().len() == 1
+                && let Some(record) = record.as_ref()
+            {
+                if let Some((role, fields)) = pm_panel_studio3d::properties::fields(record) {
+                    sections.extend(self.part_sections(model, &layer, record, time)?);
                     sections
-                        .extend(self.scene_sections(model, &layer, &record, role, fields, time)?);
+                        .extend(self.scene_sections(model, &layer, record, role, fields, time)?);
                 } else if matches!(record["type"].as_str(), Some("text" | "shape")) {
-                    sections.extend(self.extrude_sections(model, &layer, &record, time)?);
+                    sections.extend(self.extrude_sections(model, &layer, record, time)?);
                 }
             }
             if let Some((role, env, _)) = &studio {
                 if *env != Some("world") {
                     let rows = self.transform_3d(model, &layer, *role, time)?;
                     if !rows.is_empty() {
-                        sections.push(json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows}));
+                        let transform = json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows});
+                        if *role == pm_panel_studio3d::properties::Role::Camera {
+                            sections.insert(0, transform);
+                        } else {
+                            sections.push(transform);
+                        }
                     }
                 }
             } else if !audio {
                 let mut rows = vec![];
-                let three_d = model
-                    .layer(&layer)
-                    .map_err(|e| e.to_string())?
-                    .get("threeD")
-                    .and_then(pm_model::Value::as_bool)
-                    == Some(true);
+                let three_d = record.as_ref().is_some_and(|r| r["threeD"] == true);
                 let mut groups = vec![
                     (
                         "position",
@@ -549,17 +610,41 @@ impl Properties {
                 if three_d {
                     groups[0].2.push("position.z");
                     groups[1].2.push("scale.z");
-                    groups.extend([
-                        (
+                    // Orientation and Rotation are unified into a single 3D
+                    // Rotation row; only show legacy Orientation when a layer
+                    // already carries non-zero, animated, or scripted values.
+                    let has_legacy_orientation = ["orientation.x", "orientation.y", "orientation.z"]
+                        .iter()
+                        .any(|path| {
+                            let binding = Binding::Property(PropertyId::new(&layer, *path));
+                            model.binding_state(&binding, time).is_ok_and(|state| {
+                                state.animated
+                                    || state.key_at_playhead
+                                    || state.mixed
+                                    || state.expression.is_some()
+                                    || state
+                                        .value
+                                        .as_f64()
+                                        .is_some_and(|v| v.abs() > 1e-6)
+                            })
+                        });
+                    if has_legacy_orientation {
+                        groups.push((
                             "orientation",
                             "Orientation",
                             vec!["orientation.x", "orientation.y", "orientation.z"],
                             "°",
                             1.,
+                        ));
+                    }
+                    groups.extend([
+                        (
+                            "rotation3d",
+                            "Rotation",
+                            vec!["rotation.x", "rotation.y", "rotation"],
+                            "°",
+                            1.,
                         ),
-                        ("rotation.x", "X Rotation", vec!["rotation.x"], "°", 1.),
-                        ("rotation.y", "Y Rotation", vec!["rotation.y"], "°", 1.),
-                        ("rotation", "Z Rotation", vec!["rotation"], "°", 1.),
                         ("perspective", "Perspective", vec!["perspective"], "mm", 1.),
                     ]);
                 } else {
@@ -628,23 +713,15 @@ impl Properties {
                         let mut row = json!({"id":id,"label":label,"locked":!model.editable(&layer),"animation":animation,"control":{"kind":"number","axes":axes}});
                         if id == "position" {
                             row["separateDimensions"] = json!(
-                                model
-                                    .layer(&layer)
-                                    .map_err(|e| e.to_string())?
-                                    .get("separateDimensions")
-                                    .and_then(pm_model::Value::as_bool)
-                                    .unwrap_or(false)
+                                record
+                                    .as_ref()
+                                    .is_some_and(|r| r["separateDimensions"] == true)
                             );
                         }
                         if id == "scale" {
-                            row["linked"] = json!(
-                                model
-                                    .layer(&layer)
-                                    .map_err(|e| e.to_string())?
-                                    .get("scaleLinked")
-                                    .and_then(pm_model::Value::as_bool)
-                                    .unwrap_or(true)
-                            );
+                            let layer_node = model.layer_node(&layer).map_err(|e| e.to_string())?;
+                            row["linked"] =
+                                json!(member(layer_node, "scaleLinked").as_bool().unwrap_or(true));
                         }
                         if let Some(expression) =
                             self.expression(model, id, bound, expression, time)?
@@ -730,9 +807,15 @@ impl Properties {
                 }
             }
             if target["first"]["type"] == "text" {
-                let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
+                let source = model.layer_node(&layer).map_err(|e| e.to_string())?;
+                let animators_value = source.get("d").map(|d| member(d, "animators"));
                 let mut animators = vec![];
-                for animator in record["d"]["animators"].as_array().into_iter().flatten() {
+                for animator in animators_value
+                    .as_ref()
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
                     let Some(id) = animator["id"].as_str() else {
                         continue;
                     };
@@ -899,6 +982,26 @@ impl Properties {
                     rows.push(json!({"id":id,"label":label,"control":{"kind":"number","axes":[{"binding":self.lease(model,id,binding)?,"value":value,"unit":unit,"step":step}]}}));
                 }
             }
+            let bg_binding = Binding::Composition("bg".into());
+            if let Ok(state) = model.binding_state(&bg_binding, time) {
+                let value = super::data::wire(&state.value);
+                if value.is_string() {
+                    let lease = self.lease(model, "bg", bg_binding.clone())?;
+                    let hex = self.lease(model, "bg#hex", bg_binding)?;
+                    rows.push(json!({
+                        "id": "bg",
+                        "label": "Background",
+                        "control": {
+                            "kind": "colour",
+                            "binding": lease,
+                            "value": value,
+                            "mixed": false,
+                            "hexBinding": hex,
+                            "hex": value
+                        }
+                    }));
+                }
+            }
             sections.push(
                 json!({"id":"composition","title":"Composition","collapsed":false,"rows":rows}),
             );
@@ -928,8 +1031,8 @@ impl Properties {
         Ok(json!({"target":target,"sections":sections,"playing":playing,"time":time}))
     }
     /// Position, rotation and scale with depth, in scene units and degrees.
-    /// Lights and cameras move but don't scale; a camera never needs X/Y tilt
-    /// here because it aims at its target.
+    /// Lights and cameras move without scale. Cameras are rotation-only (no
+    /// Point of Interest).
     fn transform_3d(
         &mut self,
         model: &mut Inspector,
@@ -939,11 +1042,13 @@ impl Properties {
     ) -> Result<Vec<Value>, String> {
         use pm_panel_studio3d::properties::Role;
         let mut rows = vec![];
-        // A camera aims at its point of interest unless Auto-Orient is Off.
-        let one_node = role == Role::Camera
-            && super::data::wire(&model.layer(layer).map_err(|e| e.to_string())?)["d"]["data"]["camera"]
-                ["autoOrient"]
-                == "off";
+        let camera = if role == Role::Camera {
+            Some(studio_record(
+                model.layer_node(layer).map_err(|e| e.to_string())?,
+            ))
+        } else {
+            None
+        };
         let mut groups: Vec<(&str, &str, Vec<(&str, &str)>, &str, f64)> = vec![(
             "position",
             "Position",
@@ -955,30 +1060,13 @@ impl Properties {
             "",
             0.1,
         )];
-        // The point of interest is what turns the view when the camera moves,
-        // so it sits under Position (After Effects' two-node camera).
-        if role == Role::Camera && !one_node {
-            groups.push((
-                "target",
-                "Point of Interest",
-                vec![
-                    ("camera.targetX", "X"),
-                    ("camera.targetY", "Y"),
-                    ("camera.targetZ", "Z"),
-                ],
-                "",
-                0.1,
-            ));
-        }
-        if role != Role::Camera || one_node {
-            groups.push((
-                "rotation3d",
-                "Rotation",
-                vec![("rotation.x", "X"), ("rotation.y", "Y"), ("rotation", "Z")],
-                "°",
-                1.,
-            ));
-        }
+        groups.push((
+            "rotation3d",
+            "Rotation",
+            vec![("rotation.x", "X"), ("rotation.y", "Y"), ("rotation", "Z")],
+            "°",
+            1.,
+        ));
         // A light aims at its target (the renderer ignores its rotation): the
         // target sits under its position, and is what the ◆ in the viewer drags.
         if role == Role::Light {
@@ -1009,6 +1097,7 @@ impl Properties {
             let mut all_keyed = true;
             let mut any_animated = false;
             let mut active_paths = vec![];
+            let (mut bound, mut expression) = (vec![], None);
             for (path, axis) in paths {
                 let binding = Binding::Property(PropertyId::new(layer, path));
                 let state = match model.binding_state(&binding, time) {
@@ -1033,9 +1122,15 @@ impl Properties {
                     any_animated = true;
                 }
                 active_paths.push(path.to_owned());
-                // Three narrow wells hold four characters: one place below
-                // ten (-1.7), none above (-12). Typing still sets exact values.
-                let shown = if value.abs() >= 10. {
+                if role == Role::Camera {
+                    bound.push(binding.clone());
+                    expression = expression.or(state.expression);
+                }
+                // Use the shared field's precision for camera framing. Keep
+                // the compact values used by the other Studio transforms.
+                let shown = if role == Role::Camera {
+                    value
+                } else if value.abs() >= 10. {
                     value.round()
                 } else {
                     (value * 10.).round() / 10.
@@ -1064,56 +1159,62 @@ impl Properties {
                 } else {
                     self.row_channels.remove(id);
                 }
-                // Three axes fill the value column; no room for a link button.
-                rows.push(json!({"id":id,"label":label,"locked":!model.editable(layer),"animation":animation,"control":{"kind":"number","axes":axes}}));
+                let mut row = json!({"id":id,"label":label,"locked":!model.editable(layer),"animation":animation,"control":{"kind":"number","axes":axes}});
+                if let Some(record) = &camera {
+                    if id == "position" {
+                        row["separateDimensions"] =
+                            json!(record["separateDimensions"].as_bool().unwrap_or(false));
+                    }
+                    if let Some(expression) = self.expression(model, id, bound, expression, time)? {
+                        row["expression"] = expression;
+                    }
+                }
+                rows.push(row);
             }
         }
         Ok(rows)
     }
-    /// The composition's 3D summary: its render quality and sky, so a scene
-    /// looks right in a few clicks without selecting a camera or World.
+    /// The composition's sky control when it contains a Studio scene.
     fn scene_section(&mut self, model: &mut Inspector) -> Result<Option<Value>, String> {
-        use pm_panel_studio3d::properties::{QUALITY, SKIES, scene_summary};
-        let Some(summary) = scene_summary(model.published()).map_err(|e| e.to_string())? else {
-            // An empty composition says where 3D starts, with the one-click
-            // lit set beside it.
-            let empty = model
-                .published()
-                .snapshot
-                .root()
-                .and_then(|root| {
-                    pm_kernel::model::comp_node(
-                        root,
-                        model.published().snapshot.open_comp().as_deref(),
-                    )
-                    .and_then(|c| c.get("layers"))
-                    .map(|l| matches!(l.kind(), pm_model::NodeKind::Array(a) if a.is_empty()))
-                })
-                .unwrap_or(false);
-            if !empty {
-                return Ok(None);
-            }
-            return Ok(Some(
-                json!({"id":"3d.scene","title":"3D Scene","collapsed":false,"rows":[],
-                "note":"Add a model, text or light from Layer ▸ Add 3D Layer, or start from a lit studio set.",
-                "action":"set-up-studio"}),
-            ));
+        use pm_panel_studio3d::properties::SKIES;
+        let snapshot = &model.published().snapshot;
+        let Some(comp) = snapshot
+            .root()
+            .and_then(|root| pm_kernel::model::comp_node(root, snapshot.open_comp().as_deref()))
+        else {
+            return Ok(None);
         };
-        let quality = summary["quality"]["preset"]
-            .as_str()
-            .unwrap_or("production");
-        let mut options: Vec<Value> = QUALITY
-            .iter()
-            .map(|(v, label, detail)| json!({"v":v,"label":label,"detail":detail}))
-            .collect();
-        if quality == "custom" {
-            options.push(json!({"v":"custom","label":"Custom","disabled":true}));
+        let mut has_studio = false;
+        let mut world = None;
+        for layer in pm_kernel::model::layers_of(comp) {
+            has_studio |= pm_eval::address::layer3d_role(layer).is_some();
+            if world.is_none() {
+                world = layer
+                    .get("d")
+                    .and_then(|d| d.get("data"))
+                    .and_then(|data| data.get("object"))
+                    .and_then(|object| object.get("world"))
+                    .filter(|world| matches!(world.kind(), NodeKind::Object(_)));
+            }
+            if has_studio && world.is_some() {
+                break;
+            }
         }
-        let lease = self.control_lease("3d.scene.quality");
-        let mut rows = vec![
-            json!({"id":"3d.scene.quality","label":"Render Quality","control":{"kind":"choice","binding":lease,"value":quality,"options":options}}),
-        ];
-        let sky = summary["sky"].as_str().unwrap_or("none");
+        if !has_studio {
+            return Ok(None);
+        }
+        let sky = match world
+            .and_then(|world| world.get("mode"))
+            .and_then(node_string)
+        {
+            Some("sky") => world
+                .and_then(|world| world.get("preset"))
+                .and_then(node_string)
+                .unwrap_or("clear-noon"),
+            Some(mode) => mode,
+            None => "none",
+        }
+        .to_owned();
         let mut skies: Vec<Value> = vec![json!({"v":"none","label":"None"})];
         skies.extend(
             SKIES
@@ -1124,23 +1225,9 @@ impl Properties {
             skies.push(json!({"v":"hdri","label":"HDRI Image","disabled":true}));
         }
         let lease = self.control_lease("3d.scene.sky");
-        rows.insert(0, json!({"id":"3d.scene.sky","label":"Sky","control":{"kind":"choice","binding":lease,"value":sky,"options":skies}}));
-        // Add Shot (§8): a command pull-down, so it always shows its title.
-        // Every row is explicitly unchecked: the title row is the control's
-        // value, and a pop-up would otherwise mark it as a current choice.
-        let mut shots =
-            vec![json!({"v":"add","label":"Add Shot…","disabled":true,"checked":false})];
-        shots.extend(
-            pm_panel_studio3d::properties::shots()
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|s| json!({"v":s["id"],"label":s["label"],"detail":s["detail"],"checked":false})),
-        );
-        let lease = self.control_lease("3d.scene.shot");
-        rows.push(json!({"id":"3d.scene.shot","label":"Shot","control":{"kind":"choice","binding":lease,"value":"add","options":shots}}));
+        let sky_row = json!({"id":"3d.scene.sky","label":"Sky","control":{"kind":"choice","binding":lease,"value":sky,"options":skies}});
         Ok(Some(
-            json!({"id":"3d.scene","title":"3D Scene","collapsed":self.collapsed.get("3d.scene").copied().unwrap_or(false),"rows":rows,"action":"set-up-studio"}),
+            json!({"id":"3d.scene","title":"3D Scene","collapsed":self.collapsed.get("3d.scene").copied().unwrap_or(false),"rows":[sky_row]}),
         ))
     }
     /// A 3D control that isn't a channel (a pop-up or checkbox): its lease
@@ -1155,78 +1242,62 @@ impl Properties {
     }
     fn part_transform_rows(
         &mut self,
-        model: &Inspector,
-        record: &Value,
+        model: &mut Inspector,
+        part: &Value,
+        defaults: &Value,
         layer: &str,
         key: &str,
         time: f64,
-    ) -> Result<Vec<Value>, String> {
-        let p = model.published();
-        let evaluated = pm_kernel::commands::scene3d::resolve_scene(
-            &p.snapshot,
-            p.snapshot.open_comp().as_deref(),
-            time,
-        )
-        .map_err(|error| error.to_string())?;
-        let values = evaluated.scene["objects"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|object| object["id"] == layer)
-            .map(|object| &object["parts"][key]["p"]);
-        let defaults =
-            pm_scene3d::schema::properties("part", None).map_err(|error| error.to_string())?;
-        let saved = &record["d"]["data"]["object"]["parts"][key]["p"];
-        let local = time - record["from"].as_f64().unwrap_or(0.);
-        let fps = p
-            .snapshot
-            .root()
-            .and_then(|root| root.get("fps"))
-            .and_then(|v| v.to_value().as_f64())
-            .filter(|fps| *fps > 0.)
-            .unwrap_or(30.);
-        let mut rows = vec![];
-        for &(field, label) in pm_scene3d::part_material::TRANSFORM_FIELDS {
-            let id = format!("3d.part.{key}.{field}");
-            let lease = self.control_lease(&id);
-            let value = values
-                .and_then(|values| values.get(field))
-                .map(|channel| channel.get("v").unwrap_or(channel))
-                .or_else(|| saved[field].get("v"))
-                .unwrap_or(&defaults[field]["v"]);
-            let keys = saved[field]["kf"]
-                .as_array()
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            let animation = if keys.iter().any(|k| {
-                k["t"]
-                    .as_f64()
-                    .is_some_and(|t| (t - local).abs() < 0.5 / fps)
-            }) {
-                "key-at-playhead"
-            } else if keys.is_empty() {
-                "static"
-            } else {
-                "animated"
-            };
-            let control = if field == "visible" {
-                json!({"kind":"toggle","binding":lease,"value":value})
-            } else {
-                let unit = match field {
-                    "scale" => "%",
-                    "rx" | "ry" | "rz" => "°",
-                    _ => "",
+    ) -> Vec<Value> {
+        let locked = !model.editable(layer);
+        let mut rows = Vec::with_capacity(PART_TRANSFORMS.len());
+        for &(group, label, fields, unit, step) in PART_TRANSFORMS {
+            let mut animated = false;
+            let mut at_key = true;
+            let mut axes = Vec::with_capacity(fields.len());
+            for (index, &field) in fields.iter().enumerate() {
+                let id = format!("3d.part.{key}.{field}");
+                let channel = &part["p"][field];
+                let state = if !channel.is_null() {
+                    let binding = Binding::Property(PropertyId::new(
+                        layer,
+                        format!("pt.{key}.{field}"),
+                    ));
+                    model.binding_state(&binding, time).ok()
+                } else {
+                    None
                 };
-                let mut axis = json!({"binding":lease,"value":value,"unit":unit,"step":if unit.is_empty() {0.1} else {1.},"precision":2});
-                if field == "scale" {
+                animated |= state.as_ref().is_some_and(|s| s.animated);
+                at_key &= state.as_ref().is_some_and(|s| s.key_at_playhead);
+                let value = state
+                    .and_then(|s| s.value.as_f64())
+                    .or_else(|| channel["v"].as_f64())
+                    .unwrap_or_else(|| defaults[field]["v"].as_f64().unwrap_or(0.));
+                let mut axis = json!({
+                    "binding":self.control_lease(&id), "value":value, "unit":unit,
+                    "step":step, "precision":2,
+                });
+                if fields.len() > 1 {
+                    axis["axis"] = json!(["X", "Y", "Z"][index]);
+                } else {
                     axis["min"] = json!(0);
                     axis["max"] = json!(10000);
                 }
-                json!({"kind":"number","axes":[axis]})
+                axes.push(axis);
+            }
+            let animation = if at_key {
+                "key-at-playhead"
+            } else if animated {
+                "animated"
+            } else {
+                "static"
             };
-            rows.push(json!({"id":id,"label":label,"locked":!model.editable(layer),"animation":animation,"control":control}));
+            rows.push(json!({
+                "id":format!("3d.part.{key}.{group}"), "label":label,
+                "locked":locked, "animation":animation, "control":{"kind":"number","axes":axes},
+            }));
         }
-        Ok(rows)
+        rows
     }
 
     /// Pick one node and expose its transform and source material slot.
@@ -1258,10 +1329,16 @@ impl Properties {
         if let Some(saved) = object["parts"].as_object() {
             for (key, part) in saved {
                 if !parts.iter().any(|entry| &entry.key == key) {
+                    let raw = part["name"].as_str().unwrap_or("Part").to_owned();
                     parts.push(pm_scene3d::geometry::ModelPart {
                         key: key.clone(),
-                        name: part["name"].as_str().unwrap_or("Part").into(),
+                        name: raw.clone(),
+                        raw_name: raw,
+                        parent: None,
+                        depth: 0,
                         material: None,
+                        material_name: None,
+                        swatch: None,
                     });
                 }
             }
@@ -1272,23 +1349,69 @@ impl Properties {
         let selected = active
             .as_deref()
             .and_then(|key| parts.iter().find(|part| part.key == key));
-        let mut options = vec![json!({"v":null,"label":"Whole Model"})];
-        options.extend(
+        let saved = &object["parts"];
+        let defaults =
+            pm_scene3d::schema::properties("part", None).map_err(|error| error.to_string())?;
+        self.part_names.extend(
             parts
                 .iter()
-                .map(|part| json!({"v":part.key,"label":part.name})),
+                .map(|part| (part.key.clone(), part.name.clone())),
         );
-        let id = "3d.part.select";
-        let lease = self.control_lease(id);
-        let mut rows = vec![
-            json!({"id":id,"label":"Edit","control":{"kind":"choice","binding":lease,"value":selected.map(|p| &p.key),"options":options}}),
-        ];
-        if let Some(part) = selected {
-            rows.extend(self.part_transform_rows(model, record, layer, &part.key, time)?);
+        let mut children = BTreeMap::new();
+        for parent in parts.iter().filter_map(|part| part.parent.as_deref()) {
+            *children.entry(parent).or_insert(0) += 1;
         }
-        let mut sections = vec![
-            json!({"id":"3d.part","title":"Model Part","collapsed":self.collapsed.get("3d.part").copied().unwrap_or(false),"rows":rows}),
-        ];
+        let items: Vec<Value> = parts
+            .iter()
+            .map(|part| {
+                let channel = &saved[&part.key]["p"]["visible"];
+                let visibility = if channel["kf"]
+                    .as_array()
+                    .is_some_and(|keys| !keys.is_empty())
+                    || channel["expr"]
+                        .as_str()
+                        .is_some_and(|expr| !expr.is_empty())
+                {
+                    let binding = Binding::Property(PropertyId::new(
+                        layer,
+                        format!("pt.{}.visible", part.key),
+                    ));
+                    model
+                        .binding_state(&binding, time)
+                        .ok()
+                        .and_then(|state| state.value.as_bool())
+                } else {
+                    None
+                };
+                json!({
+                    "v":part.key, "label":part.name, "parent":part.parent, "depth":part.depth,
+                    "children":children.get(part.key.as_str()).copied().unwrap_or(0),
+                    "visible":visibility.or_else(|| channel["v"].as_bool()).unwrap_or(true),
+                    "edited":pm_scene3d::part_material::edited(&saved[&part.key], &defaults),
+                })
+            })
+            .collect();
+        let rows = selected
+            .map(|part| {
+                self.part_transform_rows(
+                    model,
+                    &saved[&part.key],
+                    &defaults,
+                    layer,
+                    &part.key,
+                    time,
+                )
+            })
+            .unwrap_or_default();
+        let mut sections = vec![json!({
+            "id":"3d.part", "title":"Parts", "collapsed":self.collapsed.get("3d.part").copied().unwrap_or(false),
+            "parts":{
+                "layer":layer, "active":selected.map(|p| &p.key), "activeName":selected.map(|p| &p.name),
+                "activeEdited":selected.is_some_and(|p| pm_scene3d::part_material::edited(&saved[&p.key], &defaults)),
+                "items":items,
+            },
+            "rows":rows,
+        })];
         let Some(index) = selected
             .and_then(|part| part.material)
             .map(|slot| slot as u64)
@@ -1656,6 +1779,28 @@ impl Properties {
             )
         };
         let status = |id: &str, label: &str, value: String| json!({"id":id,"label":label,"control":{"kind":"status","value":value}});
+        let perspective_camera =
+            role == Role::Camera && data["camera"]["projection"] != "orthographic";
+        let camera_state = |model: &mut Inspector, path: &str| {
+            model.binding_state(&Binding::Property(PropertyId::new(layer, path)), time)
+        };
+        let camera_dof_on = perspective_camera
+            && (camera_state(model, "camera.blur")
+                .is_ok_and(|state| state.value.as_f64().unwrap_or(0.) > 0.)
+                || camera_state(model, "camera.fStop")
+                    .is_ok_and(|state| state.value.as_f64().unwrap_or(0.) > 0.));
+        // Hidden DOF rows only need their stored keyframe metadata.
+        let camera_dof_animated = perspective_camera
+            && !camera_dof_on
+            && fields
+                .iter()
+                .filter(|field| field.group == "Depth of Field")
+                .filter_map(|field| field.id.strip_prefix("camera."))
+                .any(|key| {
+                    data["camera"]["p"][key]["kf"]
+                        .as_array()
+                        .is_some_and(|keys| !keys.is_empty())
+                });
         match (role, env) {
             (Role::Object, Some("world")) => {
                 let world = &data["object"]["world"];
@@ -1934,127 +2079,17 @@ impl Properties {
                         json!({"kind":"choice","binding":lease,"value":data["camera"]["projection"],"options":options}),
                     ),
                 );
-                // Off moves the camera without re-aiming it; switching keeps the view.
-                let lease = self.control_lease("3d.autoOrient");
-                let value = if data["camera"]["autoOrient"] == "off" {
-                    "off"
-                } else {
-                    "target"
-                };
-                push(
-                    &mut groups,
-                    "Camera",
-                    row(
-                        "3d.autoOrient",
-                        "Auto-Orient",
-                        json!({"kind":"choice","binding":lease,"value":value,"options":[
-                            {"v":"target","label":"Toward Point of Interest","detail":"Moving the camera turns it to keep looking at the point of interest."},
-                            {"v":"off","label":"Off","detail":"The camera keeps its rotation; moving it slides the view."}]}),
-                    ),
-                );
-                if data["camera"]["projection"] != "orthographic" {
-                    let fstop = model
-                        .binding_state(
-                            &Binding::Property(PropertyId::new(layer, "camera.fStop")),
-                            time,
-                        )
-                        .ok()
-                        .and_then(|s| s.value.as_f64())
-                        .unwrap_or(0.);
-                    let dof_on = fstop > 0.;
+                if perspective_camera {
                     push(
                         &mut groups,
                         "Depth of Field",
-                        toggle(self, "3d.dof.enabled", "Depth of Field", dof_on),
+                        toggle(self, "3d.dof.enabled", "Enabled", camera_dof_on),
                     );
-                    if dof_on {
-                        let focus_dist = model
-                            .binding_state(
-                                &Binding::Property(PropertyId::new(layer, "camera.focusDistance")),
-                                time,
-                            )
-                            .ok()
-                            .and_then(|s| s.value.as_f64())
-                            .unwrap_or(0.);
-                        if let Ok((focus_val, focus_opts)) =
-                            pm_panel_studio3d::properties::dof_focus_options(
-                                model.published(),
-                                layer,
-                                time,
-                                focus_dist,
-                            )
-                        {
-                            let lease = self.control_lease("3d.dof.focusTarget");
-                            push(
-                                &mut groups,
-                                "Depth of Field",
-                                row(
-                                    "3d.dof.focusTarget",
-                                    "Focus On",
-                                    json!({"kind":"choice","binding":lease,"value":focus_val,"options":focus_opts}),
-                                ),
-                            );
-                        }
-                        let iris_blades = model
-                            .binding_state(
-                                &Binding::Property(PropertyId::new(layer, "camera.irisShape")),
-                                time,
-                            )
-                            .ok()
-                            .and_then(|s| s.value.as_f64())
-                            .map(|v| v.round() as i64)
-                            .unwrap_or(0);
-                        let iris_val = match iris_blades {
-                            5 | 6 | 7 | 8 => iris_blades.to_string(),
-                            _ => "0".to_owned(),
-                        };
-                        let lease = self.control_lease("3d.dof.irisShape");
-                        push(
-                            &mut groups,
-                            "Depth of Field",
-                            row(
-                                "3d.dof.irisShape",
-                                "Bokeh Shape",
-                                json!({"kind":"choice","binding":lease,"value":iris_val,"options":[
-                                    {"v":"0","label":"Circular"},
-                                    {"v":"5","label":"Pentagon (5 Blades)"},
-                                    {"v":"6","label":"Hexagon (6 Blades)"},
-                                    {"v":"7","label":"Heptagon (7 Blades)"},
-                                    {"v":"8","label":"Octagon (8 Blades)"}]}),
-                            ),
-                        );
-                    }
                 }
             }
         }
-        let camera_dof_on = role == Role::Camera
-            && data["camera"]["projection"] != "orthographic"
-            && model
-                .binding_state(
-                    &Binding::Property(PropertyId::new(layer, "camera.fStop")),
-                    time,
-                )
-                .ok()
-                .and_then(|s| s.value.as_f64())
-                .unwrap_or(0.)
-                > 0.;
-        let camera_iris_blades = if camera_dof_on {
-            model
-                .binding_state(
-                    &Binding::Property(PropertyId::new(layer, "camera.irisShape")),
-                    time,
-                )
-                .ok()
-                .and_then(|s| s.value.as_f64())
-                .unwrap_or(0.)
-        } else {
-            0.
-        };
         for field in fields {
             if field.group == "Depth of Field" && !camera_dof_on {
-                continue;
-            }
-            if field.id == "camera.irisRoundness" && camera_iris_blades < 3. {
                 continue;
             }
             let binding = Binding::Property(PropertyId::new(layer, &field.id));
@@ -2225,30 +2260,6 @@ impl Properties {
             }
             Role::Camera => {
                 let environment = &data["environment"];
-                // Samples per frame come from the composition's Render
-                // Quality; the camera shows that same control, not a second one.
-                let preset = pm_panel_studio3d::properties::scene_summary(model.published())
-                    .ok()
-                    .flatten()
-                    .and_then(|s| s["quality"]["preset"].as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "production".into());
-                let mut options: Vec<Value> = pm_panel_studio3d::properties::QUALITY
-                    .iter()
-                    .map(|(v, label, detail)| json!({"v":v,"label":label,"detail":detail}))
-                    .collect();
-                if preset == "custom" {
-                    options.push(json!({"v":"custom","label":"Custom","disabled":true}));
-                }
-                let lease = self.control_lease("3d.scene.quality");
-                push(
-                    &mut groups,
-                    "Shot",
-                    row(
-                        "3d.scene.quality",
-                        "Render Quality",
-                        json!({"kind":"choice","binding":lease,"value":preset,"options":options}),
-                    ),
-                );
                 push(
                     &mut groups,
                     "Environment",
@@ -2288,22 +2299,26 @@ impl Properties {
         });
         Ok(groups
             .into_iter()
-            .map(|(title, rows)| {
+            .map(|(title, mut rows)| {
                 let id = format!("3d.{}", title.to_ascii_lowercase().replace(' ', "-"));
+                if title == "Camera" {
+                    rows.sort_by_key(|row| match row["id"].as_str() {
+                        Some("3d.projection") => 0,
+                        Some("camera.fov" | "camera.zoom") => 1,
+                        _ => 2,
+                    });
+                }
                 // Disclosure groups start closed unless a row inside is animated.
-                let closed = matches!(
-                    title,
-                    "Material Details"
-                        | "Material Options"
-                        | "Texture Maps"
-                        | "Atmosphere"
-                        | "Size"
-                        | "Ground"
-                        | "Variation"
-                        | "Placement"
-                ) && rows
-                    .iter()
-                    .all(|r| r["animation"] != "animated" && r["animation"] != "key-at-playhead");
+                let closed = match title {
+                    "Depth of Field" => !camera_dof_on && !camera_dof_animated,
+                    "Environment" | "Material Details" | "Material Options" | "Texture Maps"
+                    | "Atmosphere" | "Size" | "Ground" | "Variation" | "Placement" => {
+                        rows.iter().all(|r| {
+                            r["animation"] != "animated" && r["animation"] != "key-at-playhead"
+                        })
+                    }
+                    _ => false,
+                };
                 let collapsed = self.collapsed.get(&id).copied().unwrap_or(closed);
                 let mut section = json!({"id":id,"title":title,"collapsed":collapsed,"rows":rows});
                 if title == "Material"
@@ -2323,18 +2338,26 @@ impl Properties {
         layer: &str,
         time: f64,
     ) -> Result<Vec<Value>, String> {
-        let stored = model.layer(layer).map_err(|e| e.to_string())?;
-        let masks = stored
-            .get("masks")
-            .and_then(pm_model::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let source = model.layer_node(layer).map_err(|e| e.to_string())?;
+        let masks = match source.get("masks").map(Node::kind) {
+            Some(NodeKind::Array(masks)) => masks
+                .iter()
+                .enumerate()
+                .filter_map(|(index, mask)| {
+                    let id = mask.get("id").and_then(node_string)?.to_owned();
+                    let name = mask
+                        .get("name")
+                        .and_then(node_string)
+                        .filter(|name| !name.trim().is_empty())
+                        .map_or_else(|| format!("Mask {}", index + 1), str::to_owned);
+                    Some((id, name))
+                })
+                .collect::<Vec<_>>(),
+            _ => vec![],
+        };
         let locked = !model.editable(layer);
         let mut out = vec![];
-        for (index, mask) in masks.iter().enumerate() {
-            let Some(mid) = mask.get("id").and_then(pm_model::Value::as_str) else {
-                continue;
-            };
+        for (mid, name) in masks {
             let mut rows = vec![];
             for (key, label, unit, step) in [
                 ("on", "Enabled", "", 0.),
@@ -2384,11 +2407,6 @@ impl Properties {
                 };
                 rows.push(json!({"id":path,"label":label,"locked":locked,"animation":animation,"control":control}));
             }
-            let name = mask
-                .get("name")
-                .and_then(pm_model::Value::as_str)
-                .filter(|n| !n.trim().is_empty())
-                .map_or_else(|| format!("Mask {}", index + 1), str::to_owned);
             out.push(json!({"id":mid,"name":name,"rows":rows}));
         }
         Ok(out)
@@ -2408,13 +2426,13 @@ impl Properties {
     /// S088: a captions layer's style in the inspector's row grammar, each
     /// change one `Caption Style` step through `edit_captions` (op style).
     fn caption_sections(&mut self, model: &Inspector, layer: &str) -> Result<Vec<Value>, String> {
-        let record = super::data::wire(&model.layer(layer).map_err(|e| e.to_string())?);
-        if record["type"] != "captions" {
-            return Ok(vec![]);
-        }
+        let source = model.layer_node(layer).map_err(|e| e.to_string())?;
+        let style = source
+            .get("d")
+            .map(|d| member(d, "style"))
+            .unwrap_or_default();
         let style =
-            serde_json::to_value(pm_captions::normalize_caption_style(&record["d"]["style"]))
-                .unwrap_or_default();
+            serde_json::to_value(pm_captions::normalize_caption_style(&style)).unwrap_or_default();
         let locked = !model.editable(layer);
         let mut groups: Vec<(&str, &str, Vec<Value>)> = vec![
             ("captions", "Captions", vec![]),
@@ -2619,12 +2637,15 @@ impl Properties {
         layer: &str,
         time: f64,
     ) -> Result<Vec<Value>, String> {
-        let record = super::data::wire(&model.layer(layer).map_err(|e| e.to_string())?);
+        let source = model.layer_node(layer).map_err(|e| e.to_string())?;
         let locked = !model.editable(layer);
-        let span = record["dur"].as_f64().unwrap_or(600.).clamp(0.02, 600.);
+        let span = member(source, "dur")
+            .as_f64()
+            .unwrap_or(600.)
+            .clamp(0.02, 600.);
+        let transitions = TRANSITION_EDGES.map(|(field, _, _)| member(source, field));
         let mut sections = vec![];
-        for (field, slot, edge) in TRANSITION_EDGES {
-            let t = &record[field];
+        for ((field, slot, edge), t) in TRANSITION_EDGES.into_iter().zip(&transitions) {
             let Some(kind) = t["type"].as_str() else {
                 continue;
             };
@@ -2871,14 +2892,14 @@ impl Properties {
         layer: &str,
         time: f64,
     ) -> Result<Option<Value>, String> {
-        let source = model.layer(layer).map_err(|e| e.to_string())?;
-        if source.get("type").and_then(pm_model::Value::as_str) != Some("text") {
+        let source = model.layer_node(layer).map_err(|e| e.to_string())?;
+        if source.get("type").and_then(node_string) != Some("text") {
             return Ok(None);
         }
         let family = source
             .get("d")
             .and_then(|d| d.get("font"))
-            .and_then(pm_model::Value::as_str)
+            .and_then(node_string)
             .unwrap_or_default()
             .to_owned();
         let facts = self
@@ -3150,22 +3171,21 @@ impl Properties {
                     Some(format!("studioSurface:{surface}:{layer}")),
                 ).user()));
             }
-            if control == "part.select" {
-                let key = value.as_str();
-                if key.is_none() && !matches!(value, pm_model::Value::Null) {
-                    return Err("Choose a model part".into());
-                }
-                let layer = model.primary().ok_or("Choose a model")?;
-                let select = pm_panel_studio3d::properties::select_part(layer, key)
-                    .map_err(|error| error.to_string())?;
-                return Ok(Request::new(caller, select.user()));
+            let value = super::data::wire(&value);
+            let (label, commands) = if let Some((key, field)) = control
+                .strip_prefix("part.")
+                .and_then(|part| part.split_once('.'))
+                && let Some(name) = self.part_names.get(key)
+                && pm_scene3d::part_material::TRANSFORM_FIELDS
+                    .iter()
+                    .any(|(axis, _)| *axis == field)
+            {
+                pm_panel_studio3d::properties::part_control(
+                    &published, time, key, field, name, value,
+                )
+            } else {
+                pm_panel_studio3d::properties::command(&published, time, control, value)
             }
-            let (label, commands) = pm_panel_studio3d::properties::command(
-                &published,
-                time,
-                control,
-                super::data::wire(&value),
-            )
             .map_err(|e| e.to_string())?;
             return Ok(Request::new(
                 caller,
@@ -3180,6 +3200,20 @@ impl Properties {
             .set(model, caller, handle, &[value], time)
             .map_err(|e| e.to_string())
     }
+    fn parts_layer<'a>(&self, model: &'a Inspector) -> Result<&'a str, String> {
+        let [layer] = model.selected_layers() else {
+            return Err("Choose one model".into());
+        };
+        if self.part_names.is_empty()
+            || self.selection != model.selected_layers()
+            || self.document != Some(model.document_id())
+            || model.published().selection.layers() != model.selected_layers()
+        {
+            return Err("The selection changed".into());
+        }
+        Ok(layer)
+    }
+
     pub fn intent(
         &mut self,
         model: &mut Inspector,
@@ -3426,63 +3460,138 @@ impl Properties {
             );
             return Ok(None);
         }
-        if let Some((key, field)) = path
-            .strip_prefix("3d.part.")
-            .and_then(|p| p.split_once('.'))
-            && pm_scene3d::part_material::TRANSFORM_FIELDS
-                .iter()
-                .any(|(name, _)| *name == field)
-            && self.handles.contains_key(path)
-            && (intent["type"] == "key"
-                || matches!(
-                    intent["action"].as_str(),
-                    Some("add-key" | "remove-animation")
-                ))
-        {
+        if intent["type"] == "set-value" && row == "3d.part.select" {
+            let layer = self.parts_layer(model)?;
+            let key = match intent.get("value") {
+                Some(Value::Null) => None,
+                Some(Value::String(key)) if self.part_names.contains_key(key) => Some(key.as_str()),
+                _ => return Err("Choose a model part".into()),
+            };
+            return pm_panel_studio3d::properties::select_part(layer, key)
+                .map(|selection| Some(Request::new(caller, selection.user())))
+                .map_err(|error| error.to_string());
+        }
+        if let Some((key, field)) = row.strip_prefix("3d.part.").and_then(|p| p.split_once('.')) {
             let p = model.published();
-            let layer = model.primary().ok_or("Choose a model")?;
-            if p.selection.layers() != model.selected_layers() {
-                return Err("The selection changed".into());
+            let active = pm_panel_studio3d::properties::active_part(&p.selection)
+                .is_some_and(|(_, selected)| selected == key);
+            if intent["type"] == "set-value" && matches!(field, "visible" | "reset") {
+                let layer = self.parts_layer(model)?;
+                let name = self.part_names.get(key).ok_or("Choose a model part")?;
+                if !model.editable(layer) || (field == "reset" && !active) {
+                    return Err("Choose an editable model part".into());
+                }
+                let value = intent.get("value").ok_or("Expected a model part value")?;
+                let (label, commands) = pm_panel_studio3d::properties::part_control(
+                    p,
+                    time,
+                    key,
+                    field,
+                    name,
+                    value.clone(),
+                )
+                .map_err(|error| error.to_string())?;
+                return Ok(Some(Request::new(
+                    caller,
+                    pm_kernel::Call::Transact {
+                        label: Some(label),
+                        expected_revision: Some(model.revision()),
+                        body: pm_kernel::WriteBody::Commands(commands),
+                    },
+                )));
             }
-            let mut commands =
-                pm_panel_studio3d::properties::part_commands(p, time, layer, key, "", &json!({}))
-                    .map_err(|error| error.to_string())?;
-            let layer_id = layer.into();
-            let channel = format!("pt.{key}.{field}");
-            let key_id = pm_kernel::new_id("kf");
-            let command =
-                if intent["removeAnimation"] == true || intent["action"] == "remove-animation" {
-                    pm_kernel::KeyframeCommand::ClearAll {
-                        layer_id,
-                        channel,
-                        time,
+            if let Some(&(_, label, fields, _, _)) =
+                PART_TRANSFORMS.iter().find(|spec| spec.0 == field)
+                && (intent["type"] == "key"
+                    || matches!(
+                        intent["action"].as_str(),
+                        Some("add-key" | "remove-animation")
+                    ))
+            {
+                let layer = self.parts_layer(model)?.to_owned();
+                let name = self.part_names.get(key).ok_or("Choose a model part")?;
+                if !model.editable(&layer) || !active {
+                    return Err("Choose an editable model part".into());
+                }
+                let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
+                let saved = &record["d"]["data"]["object"]["parts"][key]["p"];
+                let states: Vec<_> = fields
+                    .iter()
+                    .map(|field| {
+                        let binding =
+                            Binding::Property(PropertyId::new(&layer, format!("pt.{key}.{field}")));
+                        model.binding_state(&binding, time).ok()
+                    })
+                    .collect();
+                let clear =
+                    intent["removeAnimation"] == true || intent["action"] == "remove-animation";
+                let remove = intent["type"] == "key"
+                    && states
+                        .iter()
+                        .all(|s| s.as_ref().is_some_and(|s| s.key_at_playhead));
+                let label = format!(
+                    "{} {label}",
+                    if clear {
+                        "Remove animation for"
+                    } else if remove {
+                        "Remove keyframe for"
+                    } else {
+                        "Add keyframe for"
                     }
-                } else if intent["action"] == "add-key" {
-                    pm_kernel::KeyframeCommand::Add {
-                        layer_id,
-                        channel,
-                        time,
-                        key_id,
-                        value: None,
-                    }
-                } else {
-                    pm_kernel::KeyframeCommand::Toggle {
-                        layer_id,
-                        channel,
-                        time,
-                        key_id,
-                        value: None,
-                    }
-                };
-            commands.push(command.into());
-            return Ok(Some(Request::new(
-                caller,
-                pm_kernel::Call::Transact {
-                    label: Some("Keyframe Model Part".into()),
-                    expected_revision: Some(model.revision()),
-                    body: pm_kernel::WriteBody::Commands(commands),
-                },
-            )));
+                );
+                let mut commands = pm_panel_studio3d::properties::part_commands(
+                    model.published(),
+                    time,
+                    &layer,
+                    key,
+                    name,
+                    &json!({}),
+                )
+                .map_err(|error| error.to_string())?;
+                for (&field, state) in fields.iter().zip(states) {
+                    let layer_id = layer.clone();
+                    let channel = format!("pt.{key}.{field}");
+                    let key_id = pm_kernel::new_id("kf");
+                    let command = if clear {
+                        pm_kernel::KeyframeCommand::ClearAll {
+                            layer_id,
+                            channel,
+                            time,
+                        }
+                    } else if remove {
+                        pm_kernel::KeyframeCommand::Toggle {
+                            layer_id,
+                            channel,
+                            time,
+                            key_id,
+                            value: None,
+                        }
+                    } else {
+                        // The first edit installs all channels. Its first key is at or after layer start.
+                        let time = if saved.get(field).is_none() {
+                            time.max(record["from"].as_f64().unwrap_or(0.))
+                        } else {
+                            time
+                        };
+                        pm_kernel::KeyframeCommand::Add {
+                            layer_id,
+                            channel,
+                            time,
+                            key_id,
+                            value: state.map(|s| s.value),
+                        }
+                    };
+                    commands.push(command.into());
+                }
+                return Ok(Some(Request::new(
+                    caller,
+                    pm_kernel::Call::Transact {
+                        label: Some(label),
+                        expected_revision: Some(model.revision()),
+                        body: pm_kernel::WriteBody::Commands(commands),
+                    },
+                )));
+            }
         }
         let handle = self.handles.get(path).ok_or("Unknown property row")?;
         if intent["type"] == "set-value" {
@@ -3776,3 +3885,40 @@ fn trim_row(path: &str) -> Option<(String, &'static str, &'static str)> {
     };
     Some((format!("trim.{pid}.{param}"), label, unit))
 }
+
+#[cfg(test)]
+mod layer_drag_profile {
+    use super::*;
+    use std::time::Instant;
+
+    mod fixture {
+        include!("../../kernel/src/drag_fixture.rs");
+    }
+
+    #[test]
+    fn profile_639_layer_properties_snapshot() {
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let mut props = Properties::default();
+        let mut model = Inspector::new(
+            kernel.published(fixture::PROJECT).unwrap(),
+            Default::default(),
+        );
+        let _ = props.snapshot(&mut model, fixture::TIME, false).unwrap();
+        let mut samples = Vec::new();
+        fixture::drag(&kernel, |p| {
+            let start = Instant::now();
+            model.sync(p);
+            let sync = start.elapsed();
+            let start = Instant::now();
+            std::hint::black_box(props.snapshot(&mut model, fixture::TIME, false).unwrap());
+            samples.push([sync, start.elapsed()].map(|d| d.as_secs_f64() * 1000.));
+        });
+        fixture::report(["Inspector sync", "Properties snapshot"], &samples);
+        fixture::assert_budget(&samples, [0, 1]);
+    }
+}
+
+#[cfg(test)]
+#[path = "properties_performance.rs"]
+mod performance;

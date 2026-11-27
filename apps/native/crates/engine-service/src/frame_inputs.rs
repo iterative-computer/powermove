@@ -489,6 +489,87 @@ pub fn draws_studio(doc: &pm_model::Document, comp: &str) -> bool {
     false
 }
 
+/// A cheap, conservative Studio check for the viewer. Direct object spans
+/// can be indexed once per setup edition. Nested comp time remapping and
+/// paired cuts are left to the render plan.
+#[derive(Default)]
+pub(crate) struct StudioActivity {
+    rate: Option<pm_model::ingest::IngestRate>,
+    spans: Vec<(f64, f64)>,
+    dynamic: bool,
+}
+
+impl StudioActivity {
+    pub(crate) fn new(doc: &pm_model::Document, composition: &str) -> Self {
+        use pm_eval::node::{is_str, member, number, truthy};
+        use pm_eval::parenting::Role3d;
+        let Ok(comp) = pm_eval::Comp::resolve(doc, composition) else {
+            return Self::default();
+        };
+        let layers = comp.layers();
+        let matte_ids: BTreeSet<_> = layers
+            .iter()
+            .filter_map(|layer| pm_eval::node::string(layer.get("matteSource")))
+            .collect();
+        let mut activity = Self {
+            rate: comp.rate(),
+            ..Self::default()
+        };
+        let mut nested = HashMap::new();
+        for layer in layers {
+            let d = member(Some(layer), "d");
+            let on = layer.get("on");
+            let matte = pm_eval::node::string(layer.get("id"))
+                .is_some_and(|id| matte_ids.contains(&id));
+            if !truthy(on) && !matte {
+                continue;
+            }
+            let studio_precomp = is_str(layer.get("type"), "precomp")
+                && member(d, "comp").and_then(string).is_some_and(|id| {
+                    *nested.entry(id.clone()).or_insert_with(|| draws_studio(doc, &id))
+                });
+            let extrusion = (is_str(layer.get("type"), "text") || is_str(layer.get("type"), "shape"))
+                && truthy(layer.get("threeD"))
+                && truthy(member(member(d, "extrusion"), "enabled"));
+            if !studio_precomp && Role3d::of(layer) != Some(Role3d::Object) && !extrusion {
+                continue;
+            }
+            if ["transitionIn", "transitionOut"].iter().any(|edge| {
+                layer.get(edge).and_then(|edge| edge.get("paired")).is_some()
+            }) {
+                activity.dynamic = true;
+                continue;
+            }
+            let (Some(from), Some(dur)) = (number(layer.get("from")), number(layer.get("dur"))) else {
+                activity.dynamic = true;
+                continue;
+            };
+            if dur > 0. {
+                let shutter = if matte || truthy(layer.get("mblur")) {
+                    pm_render::motion::shutter_frames(comp.node()).abs()
+                        / (2. * pm_render::motion::level_fps(&comp))
+                } else {
+                    0.
+                };
+                // Allow the evaluator's endpoint tolerance and all shutter taps.
+                activity.spans.push((from - shutter - 1e-6, from + dur + shutter + 2e-6));
+            }
+        }
+        activity
+    }
+
+    pub(crate) fn may_draw(&self, ticks: i64) -> bool {
+        if self.dynamic {
+            return true;
+        }
+        let time = self.rate.map_or_else(
+            || pm_time::seconds_from_ticks(ticks),
+            |rate| rate.seconds_of(ticks),
+        );
+        self.spans.iter().any(|&(from, to)| from <= time && time <= to)
+    }
+}
+
 fn string(node: &Node) -> Option<String> {
     match node.kind() {
         NodeKind::String(s) => Some(s.to_string_lossy()),

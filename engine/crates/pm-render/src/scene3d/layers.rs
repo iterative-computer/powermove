@@ -343,6 +343,9 @@ pub(crate) fn order_pass<'d>(
     assets: &dyn AssetResolver,
     view: Option<&View3d>,
     root_comp: bool,
+    skip_inactive_planes: bool,
+    has_3d: bool,
+    mut geometry: Option<&mut crate::reuse::FrameGeometry>,
 ) -> JsResult<(Vec<&'d Node>, Pass3d)> {
     let mut ctx = Pass3d::default();
     // Local View hides the other models in the editor's root composition.
@@ -353,20 +356,38 @@ pub(crate) fn order_pass<'d>(
             .collect(),
         _ => pass,
     };
-    if !pass.iter().any(|l| Role3d::of(l).is_some()) {
-        // No scene objects, and no 2.5D switch anywhere in this
-        // composition (including enclosing groups): timeline order is
-        // already the answer. Keep the old path for malformed nullish
-        // lists, whose group lookups can throw.
-        if !scope
-            .layers()
-            .iter()
-            .any(|l| js::flag(l, "threeD") || node::is_nullish(Some(l)))
-        {
-            return Ok((pass, ctx));
+    if !has_3d {
+        return Ok((pass, ctx));
+    }
+    let mut order_planes = |scope: &mut Scope<'_, 'd>, block: &[&'d Node]| {
+        if block.len() <= 1 {
+            return Ok(block.to_vec());
         }
-        // No 3D objects: `depthOrderedLayers` (the 2.5D order).
-        let ordered = scope.depth_ordered_layers(&pass, time)?;
+        if let Some(cache) = geometry.as_deref_mut() {
+            cache.order(scope, block, time, skip_inactive_planes)
+        } else if skip_inactive_planes {
+            scope.depth_ordered_draw_layers(block, time)
+        } else {
+            scope.depth_ordered_layers(block, time)
+        }
+    };
+    let roles: Vec<_> = pass.iter().map(|l| Role3d::of(l)).collect();
+    if !roles.iter().any(Option::is_some) {
+        return Ok((order_planes(scope, &pass)?, ctx));
+    }
+    // Camera and light layers split runs, but do not need a Studio scene
+    // unless this pass actually draws objects.
+    if !roles.contains(&Some(Role3d::Object)) {
+        let flags: Vec<_> = roles.iter().map(Option::is_some).collect();
+        let mut ordered = Vec::with_capacity(pass.len());
+        for (range, studio) in layering::runs(&flags) {
+            let block = &pass[range];
+            if studio {
+                ordered.extend_from_slice(block);
+            } else {
+                ordered.extend(order_planes(scope, block)?);
+            }
+        }
         return Ok((ordered, ctx));
     }
     // The composition's scene is shared by its passes (group boundaries).
@@ -390,11 +411,13 @@ pub(crate) fn order_pass<'d>(
         Ok(s) => s.camera.view(),
         Err(_) => math::IDENTITY,
     };
-    let origin = |id: &str| -> Option<[f64; 3]> {
-        let s = scene.as_ref().ok()?;
-        s.objects.iter().find(|o| o.id == id).map(|o| o.origin)
-    };
-    let is_3d: Vec<bool> = pass.iter().map(|l| Role3d::of(l).is_some()).collect();
+    let mut origins = HashMap::new();
+    if let Ok(scene) = &scene {
+        for object in &scene.objects {
+            origins.entry(object.id.as_str()).or_insert(object.origin);
+        }
+    }
+    let is_3d: Vec<bool> = roles.iter().map(Option::is_some).collect();
     let mut ordered: Vec<&'d Node> = Vec::with_capacity(pass.len());
     for (range, three) in layering::runs(&is_3d) {
         let block = &pass[range];
@@ -402,25 +425,24 @@ pub(crate) fn order_pass<'d>(
             let depths: Vec<f64> = block
                 .iter()
                 .map(|l| match Role3d::of(l) {
-                    Some(Role3d::Object) => {
-                        origin(&js::layer_id(l)).map_or(0.0, |p| layering::view_z(&camera_view, p))
-                    }
+                    Some(Role3d::Object) => origins
+                        .get(js::layer_id(l).as_str())
+                        .map_or(0.0, |&p| layering::view_z(&camera_view, p)),
                     _ => 0.0,
                 })
                 .collect();
             ordered.extend(layering::sort_run(&depths).into_iter().map(|i| block[i]));
         } else {
-            ordered.extend(scope.depth_ordered_layers(block, time)?);
+            ordered.extend(order_planes(scope, block)?);
         }
     }
     // Depth sets over the ordered pass.
     if let Ok(sc) = &scene {
         ctx.layers = depth_sets(scope, &ordered, sc, time)?;
     }
-    let layers = scope.layers();
     ctx.ordered = ordered
         .iter()
-        .filter_map(|l| layers.iter().position(|n| std::ptr::eq(n, *l)))
+        .filter_map(|l| scope.comp.layer_position(l))
         .collect();
     ctx.root_comp = root_comp;
     ctx.scene = Some(scene);
@@ -436,10 +458,13 @@ fn depth_sets<'d>(
     s: &Scene3d,
     time: f64,
 ) -> JsResult<HashMap<String, Render3d>> {
+    if s.objects.is_empty() {
+        return Ok(HashMap::new());
+    }
     let any_solo = scope.layers().iter().any(|l| js::flag(l, "solo"));
     let mut entries = Vec::with_capacity(ordered.len());
     for l in ordered {
-        let active = scope.active(l, time)?;
+        let active = !pm_eval::evaluator::outside_layer_span(l, time) && scope.active(l, time)?;
         let r = role(l);
         let opacity = if r == Some(Role::Object) && active {
             scope.world_opacity(l, time)?
@@ -449,7 +474,7 @@ fn depth_sets<'d>(
         entries.push(PassEntry {
             active,
             role: r,
-            soloed: js::flag(l, "solo") || soloed_in_pass(l, ordered),
+            soloed: any_solo && (js::flag(l, "solo") || soloed_in_pass(l, ordered)),
             opacity,
         });
     }

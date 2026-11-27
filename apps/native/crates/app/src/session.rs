@@ -42,6 +42,121 @@ pub(crate) fn defer_studio_view(
     });
 }
 
+#[cfg(test)]
+pub(crate) fn project_disabled_commands(
+    published: Option<&Published>,
+    layers: &[LayerInfo],
+) -> std::collections::BTreeSet<String> {
+    crate::layer_commands::disabled(published, layers)
+}
+
+#[derive(Default)]
+struct StudioEligibility {
+    composition: Option<(u64, Option<String>, u64)>,
+    supported: bool,
+}
+
+impl StudioEligibility {
+    fn supported(&mut self, p: &Published) -> bool {
+        let comp = p.snapshot.open_comp();
+        let rev = p
+            .snapshot
+            .root()
+            .and_then(|root| pm_kernel::model::comp_node(root, comp.as_deref()))
+            .map_or(0, pm_model::Node::rev);
+        let key = (p.snapshot.doc_id, comp, rev);
+        if self.composition.as_ref() != Some(&key) {
+            self.supported = pm_panel_studio3d::viewport::supports_navigation(p);
+            self.composition = Some(key);
+        }
+        self.supported
+    }
+}
+
+#[cfg(test)]
+mod layer_commands_latency_tests {
+    use super::StudioEligibility;
+    use pm_kernel::{KernelActor, KernelConfig, OpenSource};
+    use std::sync::Arc;
+
+    #[test]
+    fn indexed_enablement_and_studio_eligibility_on_639_layers() {
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let stack: Vec<_> = (0..639)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("l{i}"), "type": if i == 637 { "text" } else { "solid" },
+                    "dur": 5, "lock": i == 638,
+                })
+            })
+            .collect();
+        let source = serde_json::json!({
+            "id": "project", "compId": "c", "w": 64, "h": 64, "fps": 30, "dur": 5,
+            "layers": stack,
+        });
+        let value = pm_model::json::parse(&source.to_string()).unwrap();
+        kernel
+            .open("test", OpenSource::Untitled(value))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let p = kernel.published("test").unwrap();
+        let rows = p.snapshot.layers(None);
+        assert_eq!(rows.len(), 639);
+        let index = crate::layer_commands::CommandRows::new(&rows);
+        let mut eligibility = StudioEligibility::default();
+        assert!(!eligibility.supported(&p));
+
+        let mut p = (*p).clone();
+        let mut updated = (*p.snapshot.document).clone();
+        let mut path = pm_kernel::model::comp_path(p.snapshot.open_comp().as_deref());
+        path.extend(["layers".into(), 638usize.into(), "threeD".into()]);
+        let change = updated
+            .apply(&[pm_model::Patch::set(path, true.into())])
+            .unwrap();
+        p.snapshot.revision = change.revision;
+        p.snapshot.document = Arc::new(updated);
+        let start = std::time::Instant::now();
+        assert!(eligibility.supported(&p));
+        let cold = start.elapsed();
+        assert_eq!(
+            eligibility.supported(&p),
+            pm_panel_studio3d::viewport::supports_navigation(&p)
+        );
+        let p = |id: &str| {
+            let mut p = p.clone();
+            p.selection =
+                pm_kernel::selection::Selection::from_parts(vec![id.into()], vec![], None);
+            p
+        };
+        let text = p("l637");
+        let locked = p("l638");
+        let mut times = Vec::new();
+        for i in 0..21 {
+            let p = if i % 2 == 0 { &text } else { &locked };
+            let start = std::time::Instant::now();
+            let studio = eligibility.supported(p);
+            let off = crate::layer_commands::disabled_indexed(Some(p), &rows, &index, studio);
+            times.push(start.elapsed());
+            assert!(!off.contains("studio.view"));
+            assert!(!off.contains("unlockAllLayers"));
+            assert!(!off.contains("copyLayers"));
+            assert_eq!(off.contains("text.editSelected"), i % 2 != 0);
+            assert_eq!(off.contains("duplicate"), i % 2 != 0);
+            assert_eq!(off.contains("unlockSelectedLayers"), i % 2 == 0);
+        }
+        times.sort_unstable();
+        let median = times[times.len() / 2];
+        eprintln!(
+            "639-layer command enablement and 3D eligibility: cached median {:.3} ms, cold 3D probe {:.3} ms",
+            median.as_secs_f64() * 1e3,
+            cold.as_secs_f64() * 1e3
+        );
+        assert!(median < std::time::Duration::from_millis(1), "{median:?}");
+    }
+}
+
 /// Cancellation wins even if the sheet's abort callback also sent an answer.
 /// Poll both channels so Quit wakes a wait whose sheet was never visible.
 pub(crate) async fn recovery_answer<A>(
@@ -91,7 +206,6 @@ pub struct Controller {
     pub(crate) waiting_folders: Vec<pm_first_launch::WaitingFolder>,
     pub session: Option<SessionHandle>,
     pub published: Option<Arc<Published>>,
-    pub mirror: Option<QueryMirror>,
     pub viewer: Option<Viewer>,
     /// The viewer last told whether its window can be seen, and what.
     viewer_shown: Option<(u64, bool)>,
@@ -169,6 +283,8 @@ pub struct Controller {
     pub media_mode: pm_engine_service::MediaMode,
     /// Preview Resolution (viewer bar) for this editor's viewers.
     pub quality: pm_engine_service::Quality,
+    /// Currently focused group layer id (isolated in viewer and timeline like a composition).
+    pub focus_group: Option<String>,
     /// What the open project delivers (Settings › Project › Output).
     pub project_output: pm_protocol::color::ProjectOutput,
     pub scopes: crate::colour::Scopes,
@@ -185,6 +301,10 @@ pub struct Controller {
         std::collections::HashMap<String, crate::generated_panel::AgentBuild>,
     pub(crate) panel_builds:
         std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
+    /// Isolated per-panel GPU aurora views so build animations never force
+    /// full-window Controller re-renders.
+    pub(crate) panel_build_views:
+        std::collections::HashMap<String, Entity<crate::generated_panel::BuildAuroraView>>,
     /// The workspace `panel_builds` last followed, as JSON (`refresh`).
     pub(crate) workspace_json: crate::generated_panel::WorkspaceJson,
     /// Generated panels' Off/On toggles: the system's segmented control per
@@ -221,7 +341,7 @@ pub struct Controller {
     pub studio_panes: Vec<crate::studio_panes::Pane>,
     pub studio_pane_targets: Vec<objc2::rc::Retained<objc2_foundation::NSObject>>,
     pub studio_pane_sender: Option<async_channel::Sender<(usize, isize)>>,
-    pub studio_pane_scene: Option<(u64, Option<Arc<pm_panel_studio3d::viewport::Scene>>)>,
+    pub(crate) studio_pane_scenes: crate::studio_panes::PaneScenes,
     /// The Render Selection waiting to start, by count: asking again
     /// replaces the one that waits.
     pub(crate) render_wait: u64,
@@ -309,6 +429,8 @@ pub struct Controller {
     pub(crate) view_write: Option<gpui::Task<()>>,
     /// Commands that cannot run now; menus and the palette show them off.
     pub disabled: std::collections::BTreeSet<String>,
+    command_rows: Option<(Arc<Vec<LayerInfo>>, crate::layer_commands::CommandRows)>,
+    studio_eligibility: StudioEligibility,
     transition_menu: std::cell::RefCell<crate::layer_commands::TransitionMenuFacts>,
     pub save_pending: bool,
     /// A save panel is busy, but no document write has started.
@@ -771,6 +893,10 @@ impl pm_shell::integration::Integration for Bridge {
             ) {
                 v.host.borrow().send_command("agent", vec![]);
             }
+            if let Some(runtime) = &v.builtins.runtime {
+                let open_list: Vec<String> = open.iter().map(|s| (*s).to_owned()).collect();
+                runtime.emit_event("layout", &serde_json::json!({ "open": open_list }));
+            }
         });
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
@@ -842,6 +968,13 @@ impl pm_shell::integration::Integration for Bridge {
             }
             v.builtin_header(id, bounds, tabbed, w, cx)
         })
+    }
+    fn panel_header_actions(
+        &self,
+        id: &str,
+        cx: &App,
+    ) -> Vec<pm_shell::integration::PanelHeaderButton> {
+        self.0.read(cx).extension_panel_header_actions(id)
     }
     fn project_id(&self, cx: &App) -> Option<String> {
         self.0.read(cx).session.as_ref().map(|s| s.project.clone())
@@ -1154,6 +1287,146 @@ impl Controller {
         })
         .detach();
     }
+
+    /// Shows a floating popup toast letting the user know an interaction was
+    /// intercepted by one or more locked layers, with a one-click Unlock button.
+    pub(crate) fn show_locked_toast(
+        &mut self,
+        layers: Vec<String>,
+        document: u64,
+        composition: Option<String>,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let project = session.project.clone();
+        let kernel = self.kernel.clone();
+        crate::v4_native::announce(&self.host.borrow().window, &message);
+        self.note(message.clone(), cx);
+        let mut unique = Vec::new();
+        for id in layers {
+            if !unique.contains(&id) {
+                unique.push(id);
+            }
+        }
+        if unique.is_empty() {
+            self.action_toast = Some(cx.new(|cx| {
+                crate::action_toast::ToastView::notice(Some("lock.fill"), message, cx)
+            }));
+        } else {
+            let label = if unique.len() > 1 {
+                "Unlock All"
+            } else {
+                "Unlock"
+            };
+            let tx_label = if unique.len() > 1 {
+                "Unlock Layers"
+            } else {
+                "Unlock Layer"
+            };
+            self.action_toast = Some(cx.new(|cx| {
+                crate::action_toast::ToastView::with_icon_action(
+                    "lock.fill",
+                    message,
+                    label,
+                    move |cx| {
+                        let Some(publication) = kernel.published(&project) else {
+                            return;
+                        };
+                        if publication.snapshot.doc_id != document
+                            || publication.snapshot.open_comp() != composition
+                        {
+                            return;
+                        }
+                        let commands: Vec<_> = unique
+                            .iter()
+                            .map(|id| pm_kernel::Command::SetLayerLocked {
+                                layer_id: id.clone(),
+                                locked: false,
+                            })
+                            .collect();
+                        let request = pm_kernel::Request::new(
+                            pm_kernel::Caller::native(),
+                            pm_kernel::Call::Transact {
+                                label: Some(tx_label.into()),
+                                body: pm_kernel::WriteBody::Commands(commands),
+                                expected_revision: Some(publication.revision()),
+                            },
+                        )
+                        .with_document(document);
+                        let pending = kernel.call(&project, request);
+                        cx.spawn(async move |_| {
+                            let _ = pending.await;
+                        })
+                        .detach();
+                    },
+                    cx,
+                )
+            }));
+        }
+        cx.notify();
+    }
+
+    /// Resolves the locking owner for `layer_id` in the active composition and
+    /// presents the locked-layer popup toast.
+    pub(crate) fn show_locked_layer_toast_for(
+        &mut self,
+        layer_id: &str,
+        action: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(published) = self.published.clone() else {
+            return;
+        };
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&published.snapshot);
+        let owner = index.locking_layer(layer_id);
+        let owner_id = owner
+            .map(|l| l.id.clone())
+            .unwrap_or_else(|| layer_id.to_owned());
+        let message = match (index.layer(layer_id), owner) {
+            (Some(layer), Some(group)) if group.id != layer.id => format!(
+                "“{}” is inside locked group “{}”",
+                layer.name.to_string_lossy(),
+                group.name.to_string_lossy()
+            ),
+            (Some(layer), _) => format!("“{}” is locked — can't {action}", layer.name.to_string_lossy()),
+            _ => format!("That layer is locked — can't {action}"),
+        };
+        self.show_locked_toast(
+            vec![owner_id],
+            published.snapshot.doc_id,
+            published.snapshot.open_comp(),
+            message,
+            cx,
+        );
+    }
+
+    /// Shows the locked-layer popup for a status/error message reported without
+    /// an explicit layer id, attaching Unlock for any locked selected layers.
+    pub(crate) fn show_locked_status_toast(&mut self, message: String, cx: &mut Context<Self>) {
+        let Some(published) = self.published.clone() else {
+            self.note(message, cx);
+            return;
+        };
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&published.snapshot);
+        let mut owners = Vec::new();
+        for id in index.expanded_ids(published.selection.layers()) {
+            if let Some(owner) = index.locking_layer(&id)
+                && !owners.contains(&owner.id)
+            {
+                owners.push(owner.id.clone());
+            }
+        }
+        self.show_locked_toast(
+            owners,
+            published.snapshot.doc_id,
+            published.snapshot.open_comp(),
+            message,
+            cx,
+        );
+    }
     /// Status bar copy (language §14): a pending message or error, else
     /// `Saved`/`Edited` with layer and keyframe counts.
     pub fn status_text(&self) -> String {
@@ -1256,6 +1529,7 @@ impl Controller {
                 }
                 if this
                     .update(cx, |v, cx| {
+                        let mut force_panels = false;
                         for e in events {
                             match e {
                                 // A change acknowledged earlier could not be made
@@ -1283,13 +1557,16 @@ impl Controller {
                                 }
                                 // Settings › General › Appearance chosen (here or in
                                 // another window): the whole app takes it.
-                                KernelEvent::StateChanged { .. } => {
-                                    crate::appearance::follow(&v.kernel.state())
+                                KernelEvent::StateChanged { change, .. } => {
+                                    if !matches!(change, pm_kernel::state::StateChange::Ui { .. }) {
+                                        force_panels = true;
+                                        crate::appearance::follow(&v.kernel.state());
+                                    }
                                 }
                                 _ => {}
                             }
                         }
-                        v.refresh(cx);
+                        v.refresh_publication(force_panels, cx);
                     })
                     .is_err()
                 {
@@ -1327,7 +1604,6 @@ impl Controller {
             host,
             session: None,
             published: None,
-            mirror: None,
             viewer: None,
             viewer_shown: None,
             extensions_shown: None,
@@ -1363,6 +1639,7 @@ impl Controller {
             output_mode: crate::viewer2::OutputMode::from_env(),
             media_mode: Default::default(),
             quality: Default::default(),
+            focus_group: None,
             project_output: pm_protocol::color::ProjectOutput::Sdr,
             scopes: Default::default(),
             perf: Default::default(),
@@ -1373,6 +1650,7 @@ impl Controller {
             agent_panel_sweep: false,
             agent_panel_builds: Default::default(),
             panel_builds: Default::default(),
+            panel_build_views: Default::default(),
             workspace_json: Default::default(),
             generated_switches: Default::default(),
             shell: None,
@@ -1395,7 +1673,7 @@ impl Controller {
             studio_panes: vec![],
             studio_pane_targets: vec![],
             studio_pane_sender: None,
-            studio_pane_scene: None,
+            studio_pane_scenes: Default::default(),
             render_wait: 0,
             resource_feed,
             main_output: Default::default(),
@@ -1441,7 +1719,14 @@ impl Controller {
             shape_variant: "rect".into(),
             view: Default::default(),
             view_write: None,
-            disabled: crate::layer_commands::disabled(None, &[]),
+            disabled: crate::layer_commands::disabled_indexed(
+                None,
+                &[],
+                &Default::default(),
+                false,
+            ),
+            command_rows: None,
+            studio_eligibility: StudioEligibility::default(),
             transition_menu: Default::default(),
             save_pending: false,
             choosing_save_path: false,
@@ -1758,6 +2043,10 @@ impl Controller {
         .detach();
     }
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_publication(true, cx);
+    }
+
+    fn refresh_publication(&mut self, force_panels: bool, cx: &mut Context<Self>) {
         let _span = crate::diag::span("refresh");
         let Some(session) = &self.session else {
             self.linked_sync = Default::default();
@@ -1767,6 +2056,39 @@ impl Controller {
         let Some(mut p) = self.kernel.published(&session.project) else {
             return;
         };
+        let previous = self.published.clone();
+        let document_changed = previous.as_ref().is_none_or(|old| {
+            old.snapshot.doc_id != p.snapshot.doc_id || old.revision() != p.revision()
+        });
+        let view_only = !force_panels
+            && previous.as_ref().is_some_and(|old| {
+                !Arc::ptr_eq(old, &p)
+                    && !document_changed
+                    && old.selection == p.selection
+                    && old.workspace == p.workspace
+                    && old.entry == p.entry
+                    && old.history == p.history
+                    && old.metadata_revision == p.metadata_revision
+                    && old.saving == p.saving
+                    && old.dirty == p.dirty
+                    && old.fault == p.fault
+                    && old.media.shares_entries_with(&p.media)
+                    && old.ui_state.session == p.ui_state.session
+                    && old.ui_state != p.ui_state
+            });
+        let render_changed = document_changed
+            || previous.as_ref().is_none_or(|old| {
+                old.entry.is_some() != p.entry.is_some()
+                    || old.ui_state.viewer.get("studioTier") != p.ui_state.viewer.get("studioTier")
+            });
+        let timeline_changed = !view_only
+            || previous
+                .as_ref()
+                .is_some_and(|old| old.ui_state.timeline != p.ui_state.timeline);
+        let gizmos_changed = !view_only
+            || previous.as_ref().is_some_and(|old| {
+                old.ui_state.viewer != p.ui_state.viewer || old.ui_state.tool != p.ui_state.tool
+            });
         if self.telemetry_open.as_ref().is_some_and(|o| o.settled)
             && let Some(opening) = self.telemetry_open.take()
         {
@@ -1852,27 +2174,24 @@ impl Controller {
         }
         self.refresh_media(cx);
         // Raster override answers are for one revision; frames ask afresh.
-        crate::raster_overrides::published(&self.engine, &p);
-        if let Some(viewer) = &self.viewer {
+        if render_changed {
+            crate::raster_overrides::published(&self.engine, &p);
+        }
+        if render_changed && let Some(viewer) = &self.viewer {
             let _span = crate::diag::span("refresh.publish");
             if let Err(e) = viewer.publish(&p) {
                 self.message = e.to_string();
             }
         }
-        if let Some(popout) = &self.popout
+        if render_changed
+            && let Some(popout) = &self.popout
             && let Some(viewer) = &*popout.viewer.borrow()
             && let Err(e) = viewer.publish(&p)
         {
             self.message = format!("Popout viewer: {e}");
         }
-        self.publish_studio_panes(&p);
-        {
-            let _span = crate::diag::span("refresh.mirror");
-            if let Some(m) = &mut self.mirror {
-                m.sync(&p);
-            } else {
-                self.mirror = Some(QueryMirror::new(&p));
-            }
+        if document_changed {
+            self.publish_studio_panes(&p);
         }
         self.sync_rows(&p, cx);
         if p.fault.is_some() && self.stop_offered != Some(p.snapshot.doc_id) {
@@ -1887,14 +2206,30 @@ impl Controller {
         }
         self.saving_note = saving;
         self.selected = p.selection.primary().map(str::to_owned);
+        let mut viewer_changed = false;
         if let Ok(chrome) = pm_panel_viewerchrome::Chrome::read(&p.ui_state) {
             self.view.adopt(&chrome.navigation);
             // Preview Resolution in the viewer bar: the engine renders at it.
             let quality = crate::viewer2::engine_quality(chrome.quality);
             if self.quality != quality {
                 self.quality = quality;
-                self.apply_viewer_options();
+                viewer_changed = true;
             }
+        }
+        let focus_group = if document_changed || previous.as_ref().is_some_and(|old| {
+            pm_panel_timeline::focused_group_from_ui(&old.ui_state)
+                != pm_panel_timeline::focused_group_from_ui(&p.ui_state)
+        }) {
+            crate::gizmo::focused_group(&p)
+        } else {
+            self.focus_group.clone()
+        };
+        if self.focus_group != focus_group {
+            self.focus_group = focus_group;
+            viewer_changed = true;
+        }
+        if viewer_changed {
+            self.apply_viewer_options();
         }
         self.path = p.session.as_ref().and_then(|s| match &s.destination {
             SessionDestination::File(path) => Some(path.clone()),
@@ -1927,7 +2262,7 @@ impl Controller {
         // The menu bar is the app's: only the editor last in front names
         // its Undo and Redo (a tab behind publishing its own history left
         // a bare "Undo" over the front project's, PM-396).
-        if menu_editor_is(cx.entity_id()) {
+        if !view_only && menu_editor_is(cx.entity_id()) {
             history_menu(&p.history);
         }
         self.builtins.natives.published.replace(Some(p.clone()));
@@ -1936,6 +2271,23 @@ impl Controller {
             self.workspace_json
                 .follow(&mut self.panel_builds, &previous.workspace, &p.workspace);
         }
+        let selection_changed = previous
+            .as_ref()
+            .is_none_or(|old| old.selection != p.selection);
+        let selection_payload = selection_changed.then(|| {
+            serde_json::json!({
+                "layers": p.selection.layers(),
+                "primary": p.selection.primary(),
+                "keys": p.selection.keys(),
+            })
+        });
+        let doc_payload = document_changed.then(|| {
+            serde_json::json!({
+                "docId": p.snapshot.doc_id,
+                "revision": p.revision(),
+                "composition": p.snapshot.open_comp(),
+            })
+        });
         // An Undo or a save waits for an agent's edit still applying (PM-718).
         let was_waiting = self.published.as_ref().is_some_and(|q| q.history.waiting);
         if p.history.waiting && !was_waiting {
@@ -1944,6 +2296,17 @@ impl Controller {
             self.message.clear();
         }
         self.published = Some(p);
+        if document_changed {
+            self.reconcile_missing_definitions();
+        }
+        if let Some(runtime) = &self.builtins.runtime {
+            if let Some(payload) = doc_payload {
+                runtime.emit_event("document", &payload);
+            }
+            if let Some(payload) = selection_payload {
+                runtime.emit_event("selection", &payload);
+            }
+        }
         // A run in progress follows a changed duration or work area at once
         // (its loop, or where it stops), as the timeline does.
         if shape != (self.duration(), self.work_area()) && self.running() {
@@ -1952,14 +2315,20 @@ impl Controller {
         // A changed Views setting splits the viewer now, not at the next
         // frame (a paused viewer has none): read from the publication just stored.
         self.sync_studio_panes(cx);
-        self.update_builtins(cx);
-        if let Some(timeline) = &self.builtins.timeline {
+        if view_only {
+            self.update_view_builtins(cx);
+        } else {
+            self.update_builtins(cx);
+        }
+        if timeline_changed && let Some(timeline) = &self.builtins.timeline {
             timeline.update(cx, |t, cx| t.published(cx));
         }
-        if let Some(gizmos) = &self.builtins.gizmos {
+        if (gizmos_changed || viewer_changed) && let Some(gizmos) = &self.builtins.gizmos {
             gizmos.update(cx, |g, cx| g.refresh(cx));
         }
-        self.update_disabled();
+        if !view_only {
+            self.update_disabled();
+        }
         cx.notify();
     }
     pub fn layers(&self) -> &[LayerInfo] {
@@ -1968,8 +2337,9 @@ impl Controller {
     /// Rows follow the newest publication; large lists are built on a worker.
     fn sync_rows(&mut self, p: &Published, cx: &mut Context<Self>) {
         use crate::rows::{self, Plan};
+        self.rows.follow_transform_values(p);
         let key = rows::key(&p.snapshot);
-        match self.rows.plan(key, rows::layer_count(&p.snapshot)) {
+        match self.rows.plan(key, || rows::layer_count(&p.snapshot)) {
             Plan::Current => {}
             Plan::Inline => {
                 let _span = crate::diag::span("refresh.rows");
@@ -2192,9 +2562,10 @@ impl Controller {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         if cut {
             if let Some(layer_ids) = cut_layers {
+                let time = self.time();
                 self.run_layer_plan(layer_commands::Plan {
                     label: "Cut".into(),
-                    commands: vec![pm_kernel::LayerCommand::Delete { layer_ids }.into()],
+                    commands: vec![pm_kernel::LayerCommand::DeleteAt { layer_ids, time }.into()],
                     select: Some(Vec::new()),
                     count_keys: None,
                 }, cx);
@@ -2237,7 +2608,24 @@ impl Controller {
     }
     /// Menus, palette and toolbar enablement for the current document state.
     pub fn update_disabled(&mut self) {
-        self.disabled = crate::layer_commands::disabled(self.published.as_deref(), self.layers());
+        let rows = &self.rows.rows;
+        if self
+            .command_rows
+            .as_ref()
+            .is_none_or(|(cached, _)| !Arc::ptr_eq(cached, rows))
+        {
+            self.command_rows = Some((rows.clone(), crate::layer_commands::CommandRows::new(rows)));
+        }
+        let studio = self
+            .published
+            .as_ref()
+            .is_some_and(|p| self.studio_eligibility.supported(p));
+        self.disabled = crate::layer_commands::disabled_indexed(
+            self.published.as_deref(),
+            rows,
+            &self.command_rows.as_ref().unwrap().1,
+            studio,
+        );
     }
     /// One Undo step, then the selection it leads to.
     /// Project items as layers at the playhead, the first on top, in one
@@ -2406,7 +2794,13 @@ impl Controller {
             let _ = this.update(cx, |v, cx| match result {
                 Some(Ok(ack)) => {
                     if let Reply::Throw(e) = ack.reply {
-                        v.message = e.to_string();
+                        let msg = e.to_string();
+                        if msg.to_ascii_lowercase().contains("locked") {
+                            v.show_locked_status_toast(msg, cx);
+                        } else {
+                            v.message = msg;
+                            cx.notify();
+                        }
                         return;
                     }
                     if let Some(published) = v.kernel.published(&project)
@@ -2471,6 +2865,9 @@ impl Controller {
         let time = target.unwrap_or_else(|| self.time());
         if self.builtins.scrubbing {
             self.builtins.scrub_time = Some(time);
+            if let Some(wake) = &self.playback_wake {
+                let _ = wake.try_send(());
+            }
         } else {
             let _ = self.write_ui_at(time);
         }
@@ -3322,7 +3719,6 @@ impl Controller {
                 v.session = None;
                 v.published = None;
                 v.builtins.natives.published.replace(None);
-                v.mirror = None;
                 v.mcp.bind_window(v.window_key, None);
                 v.reopening_stopped = true;
                 v.open_named(source, Some(name), cx);
@@ -3579,7 +3975,6 @@ impl Controller {
         self.media = MediaCatalog::default();
         self.media_base = MediaCatalog::default();
         self.media_resolved = false;
-        self.mirror = None;
         self.selected = None;
         self.refresh(cx);
         // The status bar shows document state and counts; only exceptions get words.
@@ -4276,6 +4671,12 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(runtime) = &self.builtins.runtime {
+            runtime.emit_event(
+                "command",
+                &serde_json::json!({ "name": &cmd.name, "args": &cmd.args }),
+            );
+        }
         if cmd.name == crate::v4_quote::CITE_COMMAND {
             return self
                 .builtins
@@ -4308,6 +4709,26 @@ impl Controller {
             self.font_picked(family);
             return true;
         }
+        if let Some(key) = cmd.name.strip_prefix("partPick:") {
+            self.part_picked(key, cx);
+            return true;
+        }
+        if let Some(action) = cmd.name.strip_prefix("partFilter:") {
+            self.part_filter(action);
+            return true;
+        }
+        if let Some(spec) = cmd.name.strip_prefix("partHover:") {
+            self.part_hovered(spec, cx);
+            return true;
+        }
+        if let Some(id) = cmd
+            .name
+            .strip_prefix("dismissPartPicker:")
+            .and_then(|id| id.parse().ok())
+        {
+            self.dismiss_part_picker(id, cx);
+            return true;
+        }
         if let Some(id) = cmd.name.strip_prefix("dismissAgentPicker:").and_then(|id| id.parse().ok()) {
             self.dismiss_agent_picker(id);
             return true;
@@ -4318,6 +4739,10 @@ impl Controller {
         }
         if let Some(index) = cmd.name.strip_prefix("agentPick:") {
             self.agent_picked(index);
+            return true;
+        }
+        if let Some(index) = cmd.name.strip_prefix("agentPickDelete:") {
+            self.agent_picked_delete(index);
             return true;
         }
         if cmd.name == "palette.addEffect" {
@@ -4456,6 +4881,10 @@ impl Controller {
                 crate::telemetry::tool_selected(&cmd.name);
             }
             self.tool = cmd.name.clone();
+            if let Some(runtime) = &self.builtins.runtime {
+                runtime.set_active_tool(None);
+                runtime.emit_event("tool", &serde_json::json!({ "tool": self.tool }));
+            }
             // The Pen tool shows the selection's paths; others hide them.
             if let Some(gizmos) = self.builtins.gizmos.clone() {
                 gizmos.update(cx, |g, cx| g.refresh(cx));
@@ -4514,6 +4943,20 @@ impl Controller {
                 .all(|id| crate::gizmo::is_studio(&p, id))
         {
             cx.defer(move |cx| g.update(cx, |g, cx| g.studio_frame(cx)));
+            return true;
+        }
+        // Blender-inspired Shift+A: opens the categorized 3D Add menu (meshes,
+        // lights, cameras, 3D null, environments & nature) when 3D mode is on.
+        if cmd.name == "timeline.revealProperty:a"
+            && cmd.args.first().and_then(|v| v.as_bool()) == Some(true)
+            && let Some(g) = self.builtins.gizmos.clone()
+            && g.read(cx).studio_active()
+        {
+            self.open_studio_add_menu();
+            return true;
+        }
+        if cmd.name == "studio.addMenu" {
+            self.open_studio_add_menu();
             return true;
         }
         match cmd.name.as_str() {
@@ -5243,6 +5686,7 @@ impl Controller {
                 if cmd.name == "shuttleRelease" {
                     if let Some(command) = self.shuttle.release(key) {
                         self.transport(command);
+                        self.tick_builtins(cx);
                     }
                     return true;
                 }
@@ -5264,9 +5708,18 @@ impl Controller {
                         if key == ShuttleKey::K && acted {
                             self.end_run();
                         }
+                        if acted {
+                            self.tick_builtins(cx);
+                        }
                         acted || (from_pause && key == ShuttleKey::K)
                     }
-                    Press::Send(command) => self.transport(command),
+                    Press::Send(command) => {
+                        let accepted = self.transport(command);
+                        if accepted {
+                            self.tick_builtins(cx);
+                        }
+                        accepted
+                    }
                     Press::Held => true,
                 };
                 if handled
@@ -5412,6 +5865,7 @@ impl Controller {
                     }
                 }
                 self.transport(command);
+                self.tick_builtins(cx);
             }
             name => return self.surface_command(name, cx),
         }

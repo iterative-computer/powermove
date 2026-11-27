@@ -244,6 +244,12 @@ impl StillFacts {
             )
             && !interpreted
     }
+    fn preview_edge(&self, ask: stills::StillAsk) -> Option<u32> {
+        ask.edge.filter(|&edge| {
+            self.previewed(ask.interpreted) && (edge as usize) < self.size.0.max(self.size.1)
+        })
+    }
+
     fn of(still: &pm_media::image::StillImage) -> StillFacts {
         StillFacts {
             color: still.color.clone(),
@@ -501,7 +507,13 @@ pub(crate) fn still_size(path: &Path) -> Option<(usize, usize)> {
 
 /// The facts of `path` at its stamp when they were read already.
 fn known_still_facts(path: &Path) -> Option<Result<StillFacts, ProbeIssue>> {
-    let (len, modified) = stamp(path)?;
+    still_facts_at(path, stamp(path)?)
+}
+
+fn still_facts_at(
+    path: &Path,
+    (len, modified): (u64, u128),
+) -> Option<Result<StillFacts, ProbeIssue>> {
     STILL_FACTS
         .get()?
         .lock()
@@ -1334,6 +1346,15 @@ struct ImageKey {
     edge: Option<u32>,
 }
 
+impl ImageKey {
+    fn with_edge(&self, edge: Option<u32>) -> Self {
+        Self {
+            edge,
+            ..self.clone()
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct FrameKey {
     path: PathBuf,
@@ -1417,6 +1438,7 @@ pub struct MediaCache {
     images: BTreeMap<ImageKey, Target>,
     image_seen: BTreeMap<ImageKey, u64>,
     image_budget: u64,
+    applied_video_lease: Option<MediaLease>,
     /// Critical memory pressure: after a frame is submitted its stills too
     /// go down to the budget ([`Self::flush`]).
     image_pressure: bool,
@@ -1518,6 +1540,7 @@ impl MediaCache {
             images: BTreeMap::new(),
             image_seen: BTreeMap::new(),
             image_budget: 48 << 20,
+            applied_video_lease: None,
             image_pressure: false,
             image_over: None,
             frame_budget: 24 << 20,
@@ -1587,7 +1610,9 @@ impl MediaCache {
         self.note_image_request();
         let (len, modified) = stamp(path)
             .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;
-        let key = ImageKey {
+        let ask = stills::StillAsk::of(edge, interpret);
+        let ask = ask.normalized(still_facts_at(path, (len, modified)).as_ref());
+        let mut key = ImageKey {
             path: path.to_path_buf(),
             len,
             modified,
@@ -1595,12 +1620,13 @@ impl MediaCache {
             reading: interpret.map(|i| format!("{i:?}")).unwrap_or_default(),
             linear: working == WorkingEncoding::LinearLight,
             hdr_light: self.hdr_light,
-            edge,
+            edge: ask.edge,
         };
-        if let Some(t) = self.images.get(&key) {
-            self.image_seen.insert(key.clone(), self.frame_epoch);
+        if let Some((found, target)) = self.cached_image(&key) {
+            let (found, target) = (found.clone(), target.clone());
+            self.image_seen.insert(found, self.frame_epoch);
             pm_perf::bump(pm_perf::Counter::MediaCacheHits);
-            return Ok(t.clone());
+            return Ok(target);
         }
         pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
         let _span = pm_perf::Span::new(pm_perf::Counter::ImageMicros);
@@ -1611,7 +1637,6 @@ impl MediaCache {
                 path.display()
             )));
         }
-        let ask = stills::StillAsk::of(edge, interpret);
         let issue = |i: ProbeIssue| match i {
             ProbeIssue::Unsupported(f) => MediaFailure::Unsupported(f),
             ProbeIssue::Unreadable(m) => MediaFailure::Failed(m),
@@ -1664,26 +1689,31 @@ impl MediaCache {
         }
         probe_interpreted_image(path, interp).map_err(issue)?;
         let facts = still_facts(path).map_err(issue)?;
-        let preview = edge.filter(|_| facts.previewed(ask.interpreted));
-        // Decoded ahead by a worker as this frame reads it, or here.
-        let mut still = match self.stills.take(path, (len, modified), ask, preview) {
-            Some(still) => still,
-            None => match (preview, whole) {
-                (None, Some(whole)) => whole,
-                (Some(edge), whole) => {
-                    pm_media::image::imageio::read_preview(path, &self.pool, edge).or_else(|e| {
-                        whole.ok_or(e).or_else(|_| {
-                            pm_media::image::read_with(path, &self.pool, ask.rendition)
-                        })
-                    })
+        let preview = facts.preview_edge(ask);
+        // The key records what was decoded, including a worker's larger
+        // preview or a fallback to the original if thumbnailing fails.
+        let (mut still, decoded_edge) = match self.stills.take(path, (len, modified), ask, preview)
+        {
+            Some(decoded) => decoded,
+            None => {
+                let thumbnail = preview.and_then(|edge| {
+                    pm_media::image::imageio::read_preview(path, &self.pool, edge)
+                        .ok()
+                        .map(|still| (still, Some(edge)))
+                });
+                match (thumbnail, whole) {
+                    (Some(decoded), _) => decoded,
+                    (None, Some(whole)) => (whole, None),
+                    (None, None) => {
+                        pm_perf::bump(pm_perf::Counter::StillDecodes);
+                        let still = pm_media::image::read_with(path, &self.pool, ask.rendition)
+                            .map_err(failed)?;
+                        (still, None)
+                    }
                 }
-                .map_err(failed)?,
-                (None, None) => {
-                    pm_perf::bump(pm_perf::Counter::StillDecodes);
-                    pm_media::image::read_with(path, &self.pool, ask.rendition).map_err(failed)?
-                }
-            },
+            }
         };
+        key.edge = decoded_edge;
         let mut read = interpreted_image_color(&still, interp).map_err(issue)?;
         if self.hdr_light {
             read.color.tone_map = None;
@@ -1714,7 +1744,7 @@ impl MediaCache {
         // Standard stores sRGB code values in UNORM (an sRGB GPU view
         // would decode them a second time). Opaque identity conversion is
         // lossless for these 8-bit sources; wide/linear/HDR stay in float.
-        let compact = preview.is_some()
+        let compact = decoded_edge.is_some()
             && !deep
             && working == WorkingEncoding::Standard
             && read.color.primaries == Primaries::Bt709
@@ -1756,9 +1786,6 @@ impl MediaCache {
         if packed.is_none() {
             importer.recycle(normalized);
         }
-        pipelines
-            .resample
-            .fill_mips(device, encoder, &target.texture);
         // The decoded pixels must outlive the commands reading them; the
         // imported textures hold the frame until wgpu releases them.
         drop(imported);
@@ -1771,8 +1798,12 @@ impl MediaCache {
                 &target,
                 Geometry::exif(still.orientation),
                 format,
+                true,
             );
         }
+        pipelines
+            .resample
+            .fill_mips(device, encoder, &target.texture);
         // Older versions of the same file are dropped. This version's other
         // sizes and readings stay: one still drawn at two sizes in a frame
         // (two layers, or a preview and an exact read) would otherwise drop
@@ -1792,7 +1823,22 @@ impl MediaCache {
         // decoded again the ones it reads next. Those it did not read again
         // go once it is submitted ([`Self::flush`]).
         self.evict_images(self.frame_epoch.saturating_sub(1));
+        if self.look_ahead && self.image_bytes() > self.image_budget {
+            self.apply_shares();
+        }
         Ok(target)
+    }
+
+    fn cached_image(&self, key: &ImageKey) -> Option<(&ImageKey, &Target)> {
+        self.images.get_key_value(key).or_else(|| {
+            key.edge?;
+            let full = key.with_edge(None);
+            self.images.get_key_value(&full).or_else(|| {
+                self.images
+                    .range(key..=&key.with_edge(Some(u32::MAX)))
+                    .next()
+            })
+        })
     }
 
     /// A converted picture of the same file read the same way as `key`, at
@@ -1841,20 +1887,22 @@ impl MediaCache {
         edge: Option<u32>,
         interpret: Option<&Interpretation>,
     ) {
-        let edge = edge.filter(|_| self.preview_media);
-        let Some((len, modified)) = stamp(path) else {
+        let Some(stamp) = stamp(path) else {
             return;
         };
-        if self
-            .images
-            .keys()
-            .any(|k| k.path == path && k.len == len && k.modified == modified && k.edge == edge)
-        {
+        let ask = stills::StillAsk::of(edge.filter(|_| self.preview_media), interpret)
+            .normalized(still_facts_at(path, stamp).as_ref());
+        let reading = interpret.map(|i| format!("{i:?}")).unwrap_or_default();
+        if self.images.keys().any(|k| {
+            k.path == path
+                && (k.len, k.modified) == stamp
+                && k.reading == reading
+                && stills::covers_edge(k.edge, ask.edge)
+        }) {
             return;
         }
         self.note_image_request();
-        let ask = stills::StillAsk::of(edge, interpret);
-        self.stills.request(path, (len, modified), ask, &self.pool);
+        self.stills.request(path, stamp, ask, &self.pool);
     }
 
     fn note_image_request(&mut self) {
@@ -2373,6 +2421,7 @@ impl MediaCache {
                 &converted,
                 geometry,
                 working_format(precision),
+                false,
             )
         };
         drop(imported);
@@ -2499,7 +2548,7 @@ impl MediaCache {
     /// Evicts stills last read before frame `floor`, oldest first, until
     /// the budget holds.
     fn evict_images(&mut self, floor: u64) {
-        let budget = self.image_budget;
+        let budget = self.effective_image_budget();
         self.image_seen
             .retain(|key, _| self.images.contains_key(key));
         while self.image_bytes() > budget {
@@ -2654,7 +2703,11 @@ impl MediaCache {
     /// allowance. A zero decoder share closes idle sessions.
     pub fn apply_lease(&mut self, lease: MediaLease) -> MediaUsage {
         *self.lease.lock().unwrap() = lease;
-        self.apply_shares()
+        self.apply_shares();
+        if self.look_ahead {
+            self.evict_images(self.frame_epoch);
+        }
+        self.media_usage()
     }
 
     /// An empty still-image cache can lend its reservation to playing video.
@@ -2672,18 +2725,65 @@ impl MediaCache {
         }
     }
 
-    /// Divides the decoded frame allowance between video and upcoming stills.
-    /// Video may borrow an empty image cache's reservation, within the same
-    /// total of the two allowances; any image request recalls it first.
+    /// Video can lend only unoccupied bytes. The configured lease is the
+    /// original grant, independent of the service's currently reduced cap.
+    fn video_loan(&self, lease: MediaLease) -> usize {
+        if !self.look_ahead || self.idle_media || self.image_pressure || self.image_budget == 0 {
+            return 0;
+        }
+        let usage = self.service.usage();
+        lease
+            .frame_cache
+            .saturating_add(lease.decoders)
+            .saturating_sub(usage.frame_cache.saturating_add(usage.decoders))
+    }
+
+    fn effective_image_budget(&self) -> u64 {
+        let lease = *self.lease.lock().unwrap();
+        let stills = self.stills.limit().max(self.stills.held());
+        self.image_budget
+            .saturating_add(self.video_loan(lease).saturating_sub(stills) as u64)
+    }
+
+    /// Reserve every borrowed byte against the video service's cap so that
+    /// background video and still workers cannot both spend it.
     fn apply_shares(&mut self) -> MediaUsage {
-        let mut lease = *self.lease.lock().unwrap();
-        lease.frame_cache = lease.frame_cache.saturating_add(self.image_loan(lease));
-        let (frames, stills) = still_share(lease, self.look_ahead, self.still_prepared_at.is_some());
+        let lease = *self.lease.lock().unwrap();
+        let loan = self.video_loan(lease);
+        let mut video = lease;
+        video.frame_cache = video.frame_cache.saturating_add(self.image_loan(lease));
+        let (mut video, base_stills) =
+            still_share(video, self.look_ahead, self.still_prepared_at.is_some());
+        let images = (self.image_bytes().saturating_sub(self.image_budget) as usize)
+            .min(loan.saturating_sub(base_stills));
+        let stills = if base_stills == 0 {
+            0
+        } else {
+            // Leave room for the next video frames while a clip is active.
+            let divisor = if self.reads_video() { 4 } else { 2 };
+            base_stills.max(loan.saturating_sub(images) / divisor)
+        };
         if stills <= self.stills.limit() {
             self.stills.set_limit(stills);
-            self.service.apply_lease(frames);
-        } else {
-            self.service.apply_lease(frames);
+        }
+        let extra = stills
+            .max(self.stills.held())
+            .saturating_sub(base_stills)
+            .saturating_add(images);
+        // Keep the core video-frame share available first. Leave some
+        // decoder capacity so a new video can become active at the cut.
+        let from_decoders = extra.min(video.decoders / 2);
+        video.decoders -= from_decoders;
+        let from_frames = (extra - from_decoders).min(video.frame_cache);
+        video.frame_cache -= from_frames;
+        video.decoders = video
+            .decoders
+            .saturating_sub(extra - from_decoders - from_frames);
+        if self.applied_video_lease != Some(video) {
+            self.service.apply_lease(video);
+            self.applied_video_lease = Some(video);
+        }
+        if stills > self.stills.limit() {
             self.stills.set_limit(stills);
         }
         self.media_usage()
@@ -2725,8 +2825,8 @@ impl MediaCache {
             self.apply_shares();
         }
         if self.idle_media {
-            self.apply_shares();
             self.idle_media = false;
+            self.apply_shares();
         }
         self.frame_epoch = self.frame_epoch.wrapping_add(1);
         self.still_pending = false;
@@ -2815,6 +2915,7 @@ impl MediaCache {
             frame_cache: 0,
             decoders: 0,
         });
+        self.applied_video_lease = None;
         self.idle_media = true;
         self.service.pool().trim(0);
         // The importer's reusable normalization textures go too (about
@@ -2865,8 +2966,12 @@ impl MediaCache {
             .filter_map(|(key, _)| self.images.get(key))
             .map(Target::bytes)
             .sum();
-        self.image_over = (current > self.image_budget).then_some((current, self.image_budget));
+        let budget = self.effective_image_budget();
+        self.image_over = (current > budget).then_some((current, budget));
         self.evict_images(if self.image_pressure { u64::MAX } else { epoch });
+        if self.look_ahead && self.still_prepared_at.is_some() {
+            self.apply_shares();
+        }
         self.free_frames.append(&mut self.retired_frames);
         let excess = self.free_frames.len().saturating_sub(2);
         self.free_frames.drain(..excess);
@@ -2929,7 +3034,7 @@ mod still_share_tests {
         let still = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/stills2/png-chrm-srgb-gama-8.png");
         media.prepare_image(&still, Some(64), None);
-        assert_eq!(media.service.usage().cache.budget, lease.frame_cache / 2);
+        assert!(media.service.usage().cache.budget <= lease.frame_cache / 2);
         media.wait_for_stills();
         assert!(media.stills.held() > 0);
         let usage = media.media_usage();

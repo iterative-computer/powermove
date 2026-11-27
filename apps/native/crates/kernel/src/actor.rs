@@ -273,6 +273,214 @@ impl Published {
     pub fn revision(&self) -> u64 {
         self.snapshot.revision
     }
+
+    /// Whether the publication can reuse document facts that depend on layer
+    /// structure and content, but not on transform values. A missed revision,
+    /// a change to a layer's keyframes, or a structural edit requires a read.
+    pub fn only_transform_values_since(&self, doc_id: u64, revision: u64) -> bool {
+        if self.snapshot.doc_id != doc_id || revision > self.revision() {
+            return false;
+        }
+        let mut reached = revision;
+        for change in self
+            .changes
+            .iter()
+            .filter(|change| change.revision > revision)
+        {
+            if change.doc_id != doc_id
+                || change.base_revision != reached
+                || !change.ops.iter().all(transform_value_op)
+            {
+                return false;
+            }
+            reached = change.revision;
+        }
+        reached == self.revision()
+    }
+}
+
+// Scalar transform values and the editor's record of a hand edit have
+// no effect on layer rows, key counts, installed effects, font choices or
+// Studio capability. Match complete paths so structure changes take the
+// ordinary invalidation path.
+fn transform_value_op(op: &pm_model::Op) -> bool {
+    use pm_model::{Op, PathPart, Value};
+
+    let Op::Leaf(patch) = op else {
+        return false;
+    };
+    fn key(part: &PathPart) -> Option<&str> {
+        match part {
+            PathPart::Key(key) => key.as_str(),
+            _ => None,
+        }
+    }
+    let path = match patch.path.as_slice() {
+        [PathPart::Key(comps), PathPart::Key(_), rest @ ..] if comps.as_str() == Some("comps") => {
+            rest
+        }
+        path => path,
+    };
+    let [
+        PathPart::Key(layers),
+        PathPart::Index(_),
+        PathPart::Key(field),
+        rest @ ..,
+    ] = path
+    else {
+        return false;
+    };
+    if layers.as_str() != Some("layers") {
+        return false;
+    }
+    fn transform(channel: &str) -> bool {
+        matches!(channel, "rotation" | "skew" | "skewAxis")
+            || [
+                "position.",
+                "anchor.",
+                "scale.",
+                "rotation.",
+                "orientation.",
+            ]
+            .iter()
+            .any(|prefix| {
+                channel
+                    .strip_prefix(prefix)
+                    .is_some_and(|axis| matches!(axis, "x" | "y" | "z"))
+            })
+    }
+    fn hand_edit(value: &Value) -> bool {
+        value.as_object().is_some_and(|fields| {
+            fields.iter().all(|(k, v)| {
+                matches!(
+                    (k.as_str(), v),
+                    (Some("by"), Value::String(_)) | (Some("at" | "t"), Value::Number(_))
+                )
+            })
+        })
+    }
+    match (field.as_str(), rest) {
+        (Some("p"), [channel, value]) => {
+            key(channel).is_some_and(transform)
+                && key(value) == Some("v")
+                && matches!(patch.value, Some(Value::Number(_)))
+        }
+        (Some("p"), [channel, kf, PathPart::Index(_), value]) => {
+            key(channel).is_some_and(transform)
+                && key(kf) == Some("kf")
+                && key(value) == Some("v")
+                && matches!(patch.value, Some(Value::Number(_)))
+        }
+        (Some("d"), [data, camera, p, _channel, value]) => {
+            key(data) == Some("data")
+                && key(camera) == Some("camera")
+                && key(p) == Some("p")
+                && key(value) == Some("v")
+                && matches!(patch.value, Some(Value::Number(_)))
+        }
+        (Some("d"), [data, camera, p, _channel, kf, PathPart::Index(_), value]) => {
+            key(data) == Some("data")
+                && key(camera) == Some("camera")
+                && key(p) == Some("p")
+                && key(kf) == Some("kf")
+                && key(value) == Some("v")
+                && matches!(patch.value, Some(Value::Number(_)))
+        }
+        (Some("locked_intent"), []) => patch.value.as_ref().is_none_or(|value| {
+            value.as_object().is_some_and(|channels| {
+                channels.iter().all(|(channel, value)| {
+                    channel.as_str().is_some_and(transform) && hand_edit(value)
+                })
+            })
+        }),
+        (Some("locked_intent"), [channel]) => {
+            key(channel).is_some_and(transform) && patch.value.as_ref().is_none_or(hand_edit)
+        }
+        (Some("locked_intent"), [channel, attribute]) => {
+            key(channel).is_some_and(transform)
+                && matches!(
+                    (key(attribute), &patch.value),
+                    (Some("by"), Some(Value::String(_)))
+                        | (Some("at" | "t"), Some(Value::Number(_)))
+                )
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn transform_value_reuse_rejects_structure_and_keyframe_edits() {
+    use pm_model::{Op, Patch, PathPart, Value};
+    let transform = |field: &str| -> Vec<PathPart> {
+        vec![
+            "layers".into(),
+            0_usize.into(),
+            "p".into(),
+            "position.x".into(),
+            field.into(),
+        ]
+    };
+    assert!(transform_value_op(
+        &Patch::set(transform("v"), Value::Number(1.)).into()
+    ));
+    assert!(transform_value_op(
+        &Patch::set(
+            vec![
+                "layers".into(),
+                0_usize.into(),
+                "p".into(),
+                "position.x".into(),
+                "kf".into(),
+                0_usize.into(),
+                "v".into(),
+            ],
+            Value::Number(12.),
+        )
+        .into()
+    ));
+    assert!(transform_value_op(
+        &Patch::set(
+            vec![
+                "layers".into(),
+                0_usize.into(),
+                "d".into(),
+                "data".into(),
+                "camera".into(),
+                "p".into(),
+                "fov".into(),
+                "v".into(),
+            ],
+            Value::Number(32.),
+        )
+        .into()
+    ));
+    assert!(transform_value_op(
+        &Patch::set(
+            vec![
+                "layers".into(),
+                0_usize.into(),
+                "d".into(),
+                "data".into(),
+                "camera".into(),
+                "p".into(),
+                "targetX".into(),
+                "kf".into(),
+                1_usize.into(),
+                "v".into(),
+            ],
+            Value::Number(3.5),
+        )
+        .into()
+    ));
+    assert!(!transform_value_op(
+        &Patch::set(transform("kf"), Value::Array(vec![])).into()
+    ));
+    assert!(!transform_value_op(&Patch::delete(transform("v")).into()));
+    assert!(!transform_value_op(&Op::Delete {
+        path: vec!["layers".into()],
+        id: "title".into()
+    }));
 }
 
 /// What subscribers hear, after publication.
@@ -1151,6 +1359,8 @@ fn contain(
     scope: Scope,
     panic: &(dyn std::any::Any + Send),
 ) {
+    kernel.open_prelude = None;
+    kernel.save_prelude = None;
     shared.published.clear_poison();
     shared.state.clear_poison();
     shared.subscribers.clear_poison();
@@ -1460,7 +1670,11 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                 },
                 Some(done) => {
                     kernel.preparing.retain(|p| *p != id);
-                    kernel.save_prelude = done;
+                    let Some(done) = done else {
+                        reply(Err(not_started()));
+                        return;
+                    };
+                    kernel.save_prelude = Some(done);
                 }
             }
             let result = if document.is_some_and(|expected| {
@@ -1474,6 +1688,7 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             } else {
                 kernel.prepare_session_save(session, path, replace)
             };
+            kernel.save_prelude = None;
             let revision = publish(kernel, shared, &id);
             reply(result);
             for message in kernel.take_log() {
@@ -1620,8 +1835,15 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             reply,
         } => {
             kernel.opening.retain(|p| *p != path);
-            kernel.open_prelude = prelude;
-            shell_step(kernel, shared, call, reply)
+            let Some(prelude) = prelude else {
+                reply(Err(KernelFailure::Storage(
+                    "The file open worker stopped unexpectedly".into(),
+                )));
+                return;
+            };
+            kernel.open_prelude = Some(prelude);
+            shell_step(kernel, shared, call, reply);
+            kernel.open_prelude = None;
         }
         Msg::Call {
             project,
@@ -1630,7 +1852,7 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             reply,
         } => {
             let actor_started = std::time::Instant::now();
-            let before_state = kernel.state().clone();
+            let before_state = shared.state.lock().expect("state").clone();
             let before_selection = kernel
                 .project(&project)
                 .map(|p| p.store().selection().clone());
@@ -1650,15 +1872,16 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
             }
             let workspace_changed = kernel
                 .project(&project)
-                .map(|p| p.workspace().clone())
+                .map(|p| p.workspace())
                 .filter(|ws| {
                     shared
                         .published
                         .lock()
                         .expect("published")
                         .get(&project)
-                        .is_some_and(|p| &p.workspace != ws)
-                });
+                        .is_some_and(|p| &p.workspace != *ws)
+                })
+                .cloned();
             // Publication boundary: publish, then answer, then events.
             let revision = publish_timed(kernel, shared, &project, Some(actor_started));
             let (outbox, notices) = match kernel.project_mut(&project) {

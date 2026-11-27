@@ -77,32 +77,37 @@ fn snapshot(def: &Definition, source: &str, id: &str) -> DefinitionSnapshot {
     }
 }
 pub fn builtin_snapshot() -> DefinitionSetSnapshot {
-    let mut set = crate::all_builtin_definitions();
-    let tagged: Vec<_> = set
-        .definitions
-        .iter()
-        .filter(|d| d.kind == DefinitionKind::Effect)
-        .cloned()
-        .collect();
-    set.definitions.retain(|d| d.kind != DefinitionKind::Effect);
-    for mut old in tagged {
-        old.id = DefinitionId::new(alias(old.id.as_str(), 1, true));
-        set.definitions.push(old);
-    }
-    for (id, version, def) in main_catalog().definitions() {
-        let source = &main_effects()
-            .shaders
-            .iter()
-            .find(|s| s.id == id && s.version == version)
-            .unwrap()
-            .source;
-        set.definitions
-            .push(snapshot(def, source, &alias(id, version, false)));
-        if std::ptr::eq(main_catalog().current(id).unwrap(), def) {
-            set.definitions.push(snapshot(def, source, id));
-        }
-    }
-    set
+    static SNAPSHOT: std::sync::OnceLock<DefinitionSetSnapshot> = std::sync::OnceLock::new();
+    SNAPSHOT
+        .get_or_init(|| {
+            let mut set = crate::all_builtin_definitions();
+            let tagged: Vec<_> = set
+                .definitions
+                .iter()
+                .filter(|d| d.kind == DefinitionKind::Effect)
+                .cloned()
+                .collect();
+            set.definitions.retain(|d| d.kind != DefinitionKind::Effect);
+            for mut old in tagged {
+                old.id = DefinitionId::new(alias(old.id.as_str(), 1, true));
+                set.definitions.push(old);
+            }
+            for (id, version, def) in main_catalog().definitions() {
+                let source = &main_effects()
+                    .shaders
+                    .iter()
+                    .find(|s| s.id == id && s.version == version)
+                    .unwrap()
+                    .source;
+                set.definitions
+                    .push(snapshot(def, source, &alias(id, version, false)));
+                if std::ptr::eq(main_catalog().current(id).unwrap(), def) {
+                    set.definitions.push(snapshot(def, source, id));
+                }
+            }
+            set
+        })
+        .clone()
 }
 impl Effects {
     /// The saved revision of `id` when this build has the effect but cannot

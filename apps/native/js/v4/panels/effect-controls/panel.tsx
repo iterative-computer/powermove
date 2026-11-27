@@ -177,11 +177,21 @@ export function EffectControls(props: PanelProps) {
             display: "flex",
             flexDirection: "row",
             alignItems: "center",
-            justifyContent: "end",
+            justifyContent: "space-between",
             height: t("metrics.header"),
             paddingLeft: t("metrics.inset"),
+            paddingRight: t("metrics.inset"),
           }}
         >
+          <text
+            style={{
+              color: t("colors.text"),
+              fontSize: t("typography.title"),
+              fontWeight: t("typography.semibold_weight"),
+            }}
+          >
+            {PANEL_TITLE}
+          </text>
           {p.target === "Layer" && (
             <UI.ToolbarItem
               id={`${PANEL_ID}:add`}
@@ -300,6 +310,10 @@ export function EffectControls(props: PanelProps) {
               rowCount: p.count,
               effectCount: p.effectCount,
               focus: p.focus,
+              // Embedded in Properties, whose content scrolls: the list is
+              // no scroller of its own (a nested one scrolled a few points
+              // by itself and left stale nested-scroller bounds/culling).
+              ...(props.embedded ? { scrollOwner: "parent" } : {}),
             }}
             onFocus={() => setKeyboard(props.keyboardFocus === true)}
             onPointerDown={() => setKeyboard(false)}

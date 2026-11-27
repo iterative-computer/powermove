@@ -1071,36 +1071,12 @@ impl History {
     /// their labels and forms, and how many are applied). Each step's form
     /// is hashed once.
     pub fn identity(&self) -> String {
-        let mut text = String::new();
-        let applied = self.entries[..self.cursor]
-            .iter()
-            .filter(|r| r.is_document())
-            .count();
-        text.push_str(&applied.to_string());
-        for r in self.entries.iter().filter(|r| r.is_document()) {
-            text.push('\n');
-            text.push_str(r.digest());
-            text.push_str(&pm_model::json::to_canonical_string(&Value::from(
-                r.label.as_str(),
-            )));
-        }
-        pm_model::hash::sha256_hex(text.as_bytes())
+        history_identity(&self.entries, self.cursor)
     }
 
     /// The steps a save writes, by identity: see [`SavedSteps`].
     pub(crate) fn saved_steps(&self) -> SavedSteps {
-        SavedSteps {
-            ids: self
-                .entries
-                .iter()
-                .filter(|r| r.is_document())
-                .map(|r| r.id)
-                .collect(),
-            applied: self.entries[..self.cursor]
-                .iter()
-                .filter(|r| r.is_document())
-                .count(),
-        }
+        history_steps(&self.entries, self.cursor)
     }
 
     /// A copy for a save on another thread (records are shared, not copied).
@@ -1183,6 +1159,41 @@ impl History {
             base_token: self.base_token,
             guard_states: self.guard_states.clone(),
         }
+    }
+}
+
+impl HistorySnapshot {
+    pub(crate) fn identity(&self) -> String {
+        history_identity(&self.records, self.cursor)
+    }
+
+    pub(crate) fn saved_steps(&self) -> SavedSteps {
+        history_steps(&self.records, self.cursor)
+    }
+}
+
+fn history_identity(records: &[HistoryRecord], cursor: usize) -> String {
+    let mut text = String::new();
+    let applied = records[..cursor].iter().filter(|r| r.is_document()).count();
+    text.push_str(&applied.to_string());
+    for r in records.iter().filter(|r| r.is_document()) {
+        text.push('\n');
+        text.push_str(r.digest());
+        text.push_str(&pm_model::json::to_canonical_string(&Value::from(
+            r.label.as_str(),
+        )));
+    }
+    pm_model::hash::sha256_hex(text.as_bytes())
+}
+
+fn history_steps(records: &[HistoryRecord], cursor: usize) -> SavedSteps {
+    SavedSteps {
+        ids: records
+            .iter()
+            .filter(|r| r.is_document())
+            .map(|r| r.id)
+            .collect(),
+        applied: records[..cursor].iter().filter(|r| r.is_document()).count(),
     }
 }
 

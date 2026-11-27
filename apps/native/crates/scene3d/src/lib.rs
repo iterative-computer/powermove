@@ -34,3 +34,29 @@ pub fn to_model(v: &Value) -> pm_model::Value {
 pub fn from_model(v: &pm_model::Value) -> Result<Value> {
     serde_json::from_str(&pm_model::json::to_canonical_string(v)).map_err(|e| Error(e.to_string()))
 }
+
+/// Copy just the fields a Studio operation reads, without walking other content.
+pub fn node_fields(node: &pm_model::Node, keys: &[&str]) -> pm_model::Map {
+    keys.iter()
+        .filter_map(|&key| Some((key.into(), node.get(key)?.to_value())))
+        .collect()
+}
+
+/// Reads a Studio layer's authored role without materializing its content.
+pub fn layer_role(layer: &pm_model::Node) -> Option<schema::Role> {
+    role_from_content(layer.get("d")?)
+}
+
+/// Reads the Studio definition from a layer's content node.
+pub fn role_from_content(content: &pm_model::Node) -> Option<schema::Role> {
+    let definition = content.get("definition")?;
+    let pm_model::NodeKind::String(definition) = definition.kind() else {
+        return None;
+    };
+    match definition.as_str()? {
+        schema::OBJECT => Some(schema::Role::Object),
+        schema::LIGHT => Some(schema::Role::Light),
+        schema::CAMERA => Some(schema::Role::Camera),
+        _ => None,
+    }
+}

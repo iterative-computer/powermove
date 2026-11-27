@@ -649,6 +649,123 @@ fn raster_edges_are_the_exact_pixel_coverage_at_every_level() {
 }
 
 #[test]
+fn near_plane_raster_coverage_survives_sampling_and_mattes() {
+    use pm_eval::space3d::default_camera_25d;
+    use pm_render::OutputKind;
+    use pm_render::plan::Content;
+    use pm_render::sampling::gpu::placement;
+
+    const W: u32 = 240;
+    const H: u32 = 160;
+    let dir = scratch("near_plane_raster_coverage");
+    let path = dir.join("white.png");
+    write_rgb(&path, 8, 8, |_, _| 1.0);
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("src".into(), path);
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_plane_camera(Some(default_camera_25d(f64::from(W), f64::from(H))));
+
+    // The tilt puts the image's top corners behind the eye. The rotation
+    // gives it two angled sides in the frame, ending in a slanted bottom.
+    let mut image = layer(
+        "image",
+        "image",
+        json!({ "asset": "src", "fit": "fill", "w": 960, "h": 24_000 }),
+        120.0,
+        440.0,
+        1.0,
+    );
+    image["threeD"] = json!(true);
+    image["compat"] = json!(2);
+    set(&mut image, "anchor.y", json!(12_000));
+    set(&mut image, "rotation.x", json!(30));
+    set(&mut image, "rotation", json!(24));
+    set(&mut image, "position.z", json!(3_660));
+
+    let document = |layers| {
+        let mut doc = project(W, H, 1.0, no_fill(), layers);
+        doc["colorDepth"] = json!(32);
+        asset(&mut doc, "src", "image", "png", 8, 8, 0.0);
+        load(&doc)
+    };
+    let direct = document(vec![image.clone()]);
+    let solid = |id, color| {
+        layer(
+            id,
+            "solid",
+            json!({ "color": color, "w": W, "h": H }),
+            0.0,
+            0.0,
+            1.0,
+        )
+    };
+    let mut overlay = solid("overlay", "#000000");
+    set(&mut overlay, "opacity", json!(65));
+    overlay["matteSource"] = json!("image");
+    overlay["matteMode"] = ch(json!("alpha"));
+    let composited = document(vec![overlay, image, solid("base", "#FFFFFF")]);
+    let mut request = RenderRequest::sized(Size::new(W, H), Precision::Float32);
+    request.background = false;
+    request.viewer = true;
+    let (plan, _) = renderer
+        .plan(&direct, "Ptest-root", ticks(0.0), &request, &resolver)
+        .unwrap();
+    let Content::Placed(placed) = &plan.draws[0].content else {
+        panic!("expected a projective image");
+    };
+    let plane = placed.plane.unwrap();
+    assert!(plane[8] < 0.0 && plane[2] + plane[8] < 0.0);
+    assert!(plane[5] + plane[8] > 0.0 && plane[2] + plane[5] + plane[8] > 0.0);
+    let polygon = placement(plane, [0.0, 0.0, 1.0, 1.0]).unwrap().polygon;
+    assert_eq!(polygon.iter().filter(|p| p[1] < -1e9).count(), 2);
+
+    let expected: Vec<f32> = (0..H)
+        .flat_map(|y| {
+            let polygon = &polygon;
+            (0..W).map(move |x| pixel_coverage(polygon, f64::from(x), f64::from(y)) as f32)
+        })
+        .collect();
+    let rows = expected.chunks_exact(W as usize);
+    assert!(
+        rows.clone()
+            .filter(|row| row.iter().any(|&a| a > 0.9999))
+            .count()
+            > 80
+    );
+    assert!(
+        rows.filter(|row| row.iter().any(|&a| a > 0.01 && a < 0.99))
+            .count()
+            > 80
+    );
+    assert!(expected.contains(&0.0));
+
+    for sampling in [Sampling::Playback, Sampling::Final] {
+        request.sampling = sampling;
+        request.output_kind = match sampling {
+            Sampling::Playback => OutputKind::Preview,
+            Sampling::Final => OutputKind::Final,
+        };
+        for (doc, matted) in [(&direct, false), (&composited, true)] {
+            let rgba = render(&mut renderer, doc, &resolver, &request);
+            for (index, (pixel, &alpha)) in rgba.chunks_exact(4).zip(&expected).enumerate() {
+                let want = if matted {
+                    let shade = 1.0 - 0.65 * alpha;
+                    [shade, shade, shade, 1.0]
+                } else {
+                    [alpha; 4]
+                };
+                assert!(
+                    pixel.iter().zip(want).all(|(&a, b)| (a - b).abs() < 2e-4),
+                    "{sampling:?}, matted={matted}, pixel ({}, {}): {pixel:?} vs {want:?}",
+                    index % W as usize,
+                    index / W as usize,
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn minified_stills_sample_their_own_mip_chains() {
     use pm_perf::Counter;
 

@@ -203,6 +203,10 @@ fn valid_style(key: &str, value: &Value, table: &Value) -> bool {
     if key == "opacity" && matches!(value.as_u64(), Some(0 | 1)) {
         return true;
     }
+    // A grid column count sets the structure of the row, not a track size.
+    if key == "gridTemplateColumns" && value.as_u64().is_some_and(|n| (1..=64).contains(&n)) {
+        return true;
+    }
     // A zero least size is structural, not a visual value: the item may
     // shrink below its content, which then wraps or truncates.
     if matches!(key, "minWidth" | "minHeight") && value.as_f64() == Some(0.) {

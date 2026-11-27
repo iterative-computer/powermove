@@ -171,7 +171,7 @@ export function ViewerPanel({
   const tierLabel = studioTiers.find((t) => t.v === tier)?.label ?? "Fast";
   const popups = (
     <>
-      {m.studio && !source ? (
+      {m.studio && m.studio.hasScene !== false && !source ? (
         <PopUpButton
           id="viewer.studio.tier"
           data-pm-variant="inline"
@@ -270,7 +270,7 @@ export function ViewerPanel({
   );
   // 3d-studio.md §3 status capsule: Quality's progress, bottom-trailing over
   // the image. Hidden in Fast and while Live; "Clean" shows briefly, then goes.
-  const refine = m.studio?.tier === "refine" ? m.studio?.refine : undefined;
+  const refine = m.studio?.hasScene !== false && m.studio?.tier === "refine" ? m.studio.refine : undefined;
   const [clean, setClean] = useState(false);
   const stage = refine?.stage;
   useEffect(() => {
@@ -289,6 +289,7 @@ export function ViewerPanel({
   // Before the first sample lands (a heavy scene can take a while) the
   // capsule says so, rather than leave a dark stage that looks broken.
   const pending =
+    m.studio?.hasScene !== false &&
     m.studio?.tier === "refine" &&
     (m.studio?.pending === true || (stage === "sampling" && refine?.samplesDone === 0));
   const capsuleText =
@@ -463,64 +464,119 @@ export function ViewerPanel({
             }}
           >
             {dimension}
-            {!source && m.trail && m.trail.ids.length > 0 && (
-              <div
-                id="viewer.path"
-                role="navigation"
-                label="Composition path"
-                style={{
-                  ...row,
-                  gap: token("metrics.gap"),
-                  overflow: "hidden",
-                }}
-              >
-                {m.trail.ids.map((id, index) => (
-                  <div key={id} style={row}>
-                    {index > 0 && <text label="">›</text>}
-                    {index === m.trail!.index ? (
-                      <text
-                        id={`viewer.crumb.${id}`}
-                        label={
-                          m.compositions?.find((c) => c.id === id)?.name ??
-                          "Composition"
-                        }
-                        style={{
-                          color: token("colors.text"),
-                          fontSize: token("typography.body"),
-                          fontWeight: token("typography.medium_weight"),
-                          flexShrink: 0,
-                        }}
-                      >
-                        {m.compositions?.find((c) => c.id === id)?.name ??
-                          "Composition"}
-                      </text>
-                    ) : (
+            {!source &&
+              ((m.trail && m.trail.ids.length > 0) ||
+                (m.focusedGroups && m.focusedGroups.length > 0)) && (
+                <div
+                  id="viewer.path"
+                  role="navigation"
+                  label="Composition path"
+                  style={{
+                    ...row,
+                    gap: token("metrics.gap"),
+                    overflow: "hidden",
+                  }}
+                >
+                  {m.trail && m.trail.ids.length > 0 ? (
+                    m.trail.ids.map((id, index) => {
+                      const activeComp = index === m.trail!.index;
+                      const label =
+                        m.compositions?.find((c) => c.id === id)?.name ??
+                        "Composition";
+                      const hasGroups = !!(
+                        m.focusedGroups && m.focusedGroups.length > 0
+                      );
+                      return (
+                        <div key={id} style={row}>
+                          {index > 0 && <text label="">›</text>}
+                          {activeComp && !hasGroups ? (
+                            <text
+                              id={`viewer.crumb.${id}`}
+                              label={label}
+                              style={{
+                                color: token("colors.text"),
+                                fontSize: token("typography.body"),
+                                fontWeight: token("typography.medium_weight"),
+                                flexShrink: 0,
+                              }}
+                            >
+                              {label}
+                            </text>
+                          ) : (
+                            <ToolbarItem
+                              id={`viewer.crumb.${id}`}
+                              label={label}
+                              style={{
+                                color: token("colors.muted"),
+                                fontSize: token("typography.body"),
+                              }}
+                              onClick={() =>
+                                activeComp
+                                  ? actions.drive("viewer.group.focus", null)
+                                  : actions.drive("viewer.composition.open", id)
+                              }
+                            >
+                              {label}
+                            </ToolbarItem>
+                          )}
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div key="root" style={row}>
                       <ToolbarItem
-                        id={`viewer.crumb.${id}`}
-                        label={
-                          m.compositions?.find((c) => c.id === id)?.name ??
-                          "Composition"
-                        }
+                        id="viewer.crumb.root"
+                        label={m.name || "Composition"}
                         style={{
-                          color: token(
-                            index === m.trail!.index
-                              ? "colors.text"
-                              : "colors.muted",
-                          ),
+                          color: token("colors.muted"),
                           fontSize: token("typography.body"),
                         }}
                         onClick={() =>
-                          actions.drive("viewer.composition.open", id)
+                          actions.drive("viewer.group.focus", null)
                         }
                       >
-                        {m.compositions?.find((c) => c.id === id)?.name ??
-                          "Composition"}
+                        {m.name || "Composition"}
                       </ToolbarItem>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
+                    </div>
+                  )}
+                  {(m.focusedGroups ?? []).map((group, index, all) => {
+                    const last = index === all.length - 1;
+                    return (
+                      <div key={`group:${group.id}`} style={row}>
+                        <text label="">›</text>
+                        {last ? (
+                          <text
+                            id={`viewer.group.${group.id}`}
+                            label={group.name}
+                            style={{
+                              color: token("colors.text"),
+                              fontSize: token("typography.body"),
+                              fontWeight: token("typography.medium_weight"),
+                              flexShrink: 0,
+                            }}
+                          >
+                            {group.name}
+                          </text>
+                        ) : (
+                          <ToolbarItem
+                            id={`viewer.group.${group.id}`}
+                            label={group.name}
+                            style={{
+                              color: token("colors.muted"),
+                              fontSize: token("typography.body"),
+                            }}
+                            onClick={() =>
+                              actions.drive("viewer.group.focus", group.id)
+                            }
+                          >
+                            {group.name}
+                          </ToolbarItem>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             {source ? (
               <>
                 <text

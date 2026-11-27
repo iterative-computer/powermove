@@ -3,7 +3,10 @@
 //! Spec: docs/native/design/panels/timeline.md §2–3. No platform/JS dependency.
 use pm_design::Tokens;
 use serde_json::{Value, json};
-use std::{collections::HashMap, ops::Range};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
@@ -41,6 +44,8 @@ pub struct Op {
     pub text: Option<String>,
     pub font_size: f64,
     pub detail: Value,
+    /// Sampled, softened channels for the native painter, which needs no wire encoding.
+    pub waveform: Option<std::sync::Arc<[Vec<f32>]>>,
     pub clip: Option<Rect>,
     /// A keyframe glyph identical to the key op before it at the same device
     /// half-pixel: painting it changes nothing. It stays for hit testing and
@@ -67,6 +72,7 @@ impl Op {
             text: None,
             font_size: 0.,
             detail: Value::Null,
+            waveform: None,
             clip: None,
             covered: false,
             decorative: false,
@@ -230,6 +236,73 @@ pub struct Waveform {
     /// clip (`crate::waveform::mapped`); `None`: the trim, at speed 1.
     pub map: Option<std::sync::Arc<[f64]>>,
 }
+/// The last sampled region of each native clip. Zoom resamples at the
+/// current zoom, while key drags and other redraws reuse the same peaks.
+#[derive(Default)]
+pub struct WaveformCache {
+    clips: HashMap<String, CachedWaveform>,
+}
+struct CachedWaveform {
+    source: Waveform,
+    duration: f64,
+    left: f64,
+    step: f64,
+    count: usize,
+    stereo: bool,
+    peaks: std::sync::Arc<[Vec<f32>]>,
+}
+impl WaveformCache {
+    pub fn retain(&mut self, visible: &Frame) {
+        self.clips.retain(|id, _| {
+            visible.ops.iter().any(|op| {
+                op.shape == "waveform" && op.id.strip_prefix("clip-content:") == Some(id.as_str())
+            })
+        });
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn sample(
+        &mut self,
+        clip: &Clip,
+        w: &Waveform,
+        left: f64,
+        step: f64,
+        count: usize,
+        stereo: bool,
+        read: impl FnOnce() -> std::sync::Arc<[Vec<f32>]>,
+    ) -> std::sync::Arc<[Vec<f32>]> {
+        if let Some(cached) = self.clips.get(&clip.id)
+            && std::sync::Arc::ptr_eq(&cached.source.levels, &w.levels)
+            && cached.source.trim == w.trim
+            && match (&cached.source.map, &w.map) {
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+            && cached.duration == clip.duration
+            && cached.left == left
+            && cached.step == step
+            && cached.count == count
+            && cached.stereo == stereo
+        {
+            return cached.peaks.clone();
+        }
+        let peaks = read();
+        self.clips.insert(
+            clip.id.clone(),
+            CachedWaveform {
+                source: w.clone(),
+                duration: clip.duration,
+                left,
+                step,
+                count,
+                stereo,
+                peaks: peaks.clone(),
+            },
+        );
+        peaks
+    }
+}
+
 /// An audio clip's level as its line draws it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Level {
@@ -372,23 +445,52 @@ struct TransitionCapsule {
     shortened: bool,
     disabled: bool,
 }
+/// Selected IDs are independent of the immutable row layout.
+#[derive(Clone, Debug)]
+pub struct SceneSelection {
+    layers: HashSet<String>,
+    keys: HashMap<String, HashSet<String>>,
+}
+impl SceneSelection {
+    pub fn new(layers: &[String], keys: &[(String, String)]) -> Self {
+        let mut by_layer: HashMap<String, HashSet<String>> = HashMap::new();
+        for (layer, key) in keys {
+            by_layer.entry(layer.clone()).or_default().insert(key.clone());
+        }
+        Self {
+            layers: layers.iter().cloned().collect(),
+            keys: by_layer,
+        }
+    }
+
+    pub fn key(&self, layer: &str, key: &str) -> bool {
+        self.keys.get(layer).is_some_and(|keys| keys.contains(key))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Scene {
-    rows: Vec<std::sync::Arc<PaintRow>>,
+    rows: std::sync::Arc<Vec<std::sync::Arc<PaintRow>>>,
     // The previewed start and its offset from the stored layer start.
     time_preview: HashMap<String, (f64, f64)>,
-    tops: Vec<f64>,
-    positions: HashMap<String, usize>,
-    control_times: HashMap<String, std::sync::Arc<[f64]>>,
-    track_ends: HashMap<String, Vec<f64>>,
+    tops: std::sync::Arc<Vec<f64>>,
+    layer_rows: std::sync::Arc<Vec<Option<usize>>>,
+    layer_ends: std::sync::Arc<Vec<usize>>,
+    property_layers: std::sync::Arc<Vec<Option<String>>>,
+    property_positions: std::sync::Arc<HashMap<String, Vec<usize>>>,
+    positions: std::sync::Arc<HashMap<String, usize>>,
+    control_times: std::sync::Arc<HashMap<String, std::sync::Arc<[f64]>>>,
+    track_ends: std::sync::Arc<HashMap<String, Vec<f64>>>,
     pub duration: f64,
     pub fps: f64,
     pub work_area: (f64, f64),
     pub markers: Vec<Marker>,
     pub bars: Vec<Bar>,
-    stagger: HashMap<String, Vec<crate::stagger::Band>>,
-    transitions: HashMap<String, Vec<TransitionCapsule>>,
-    clip_selection: std::collections::HashSet<String>,
+    stagger: std::sync::Arc<HashMap<String, Vec<crate::stagger::Band>>>,
+    transitions: std::sync::Arc<HashMap<String, Vec<TransitionCapsule>>>,
+    clip_selection: std::sync::Arc<HashSet<String>>,
+    selection: Option<std::sync::Arc<SceneSelection>>,
+    transition_selection: Option<Option<(String, String)>>,
     /// The timeline holds the keyboard: selected rows take the accent tint
     /// then, the neutral selection fill otherwise (the Mac convention, PM-367).
     pub focused: bool,
@@ -446,59 +548,153 @@ impl Scene {
                 model.index.layer(id).map(|layer| (id.clone(), (*from, from - layer.from)))
             })
             .collect();
-        for row in &mut self.rows {
-            let Ok(id) = crate::v4::parse_row(&row.id) else {
-                continue;
-            };
-            let layer = match &id {
-                crate::RowId::Layer(id) => id,
-                crate::RowId::Property { layer_id, .. }
-                | crate::RowId::Path { layer_id, .. }
-                | crate::RowId::Effect { layer_id, .. } => layer_id,
-            };
-            let Some(&(from, offset)) = offsets.get(layer) else {
-                continue;
-            };
-            let delta = offset - self.time_preview.get(layer).map_or(0., |&(_, offset)| offset);
-            let moving_strip = matches!(&row.content, RowContent::Layer { clip: Some(clip), .. } if clip.from != from);
-            if delta == 0. && !moving_strip {
-                continue;
-            }
-            let row = std::sync::Arc::make_mut(row);
-            match &mut row.content {
-                RowContent::Layer { clip, summary } => {
-                    if let Some(bands) = self.stagger.get_mut(layer) {
-                        for band in bands {band.start += delta;band.end += delta;}
+        let rows = std::sync::Arc::make_mut(&mut self.rows);
+        for (layer, &(from, offset)) in &offsets {
+            let indexed = model
+                .index
+                .layer(layer)
+                .expect("offset has an indexed layer");
+            let delta = offset
+                - self
+                    .time_preview
+                    .get(layer)
+                    .map_or(0., |&(_, offset)| offset);
+            if let Some(&i) = self.positions.get(&indexed.row_id) {
+                let row = &mut rows[i];
+                let is_non_empty_group =
+                    indexed.kind == "group" && model.index.group_has_children(layer);
+                let moving = !is_non_empty_group
+                    && matches!(&row.content, RowContent::Layer { clip: Some(clip), .. } if clip.from != from);
+                if (delta != 0. || moving)
+                    && let RowContent::Layer { clip, summary } =
+                        &mut std::sync::Arc::make_mut(row).content
+                {
+                    if self.stagger.contains_key(layer)
+                        && let Some(bands) =
+                            std::sync::Arc::make_mut(&mut self.stagger).get_mut(layer)
+                    {
+                        for band in bands {
+                            band.start += delta;
+                            band.end += delta;
+                        }
                     }
-                    if let Some(clip) = clip {
+                    if !is_non_empty_group
+                        && let Some(clip) = clip
+                    {
                         clip.from = from;
                     }
-                    *summary = summary
-                        .iter()
-                        .cloned()
-                        .map(|mut k| {
-                            k.seconds += delta;
-                            k
-                        })
-                        .collect();
-                }
-                RowContent::Property { keys, state } => {
-                    for k in keys.iter_mut() {
-                        k.seconds += delta;
+                    for key in std::sync::Arc::make_mut(summary) {
+                        key.seconds += delta;
                     }
-                    *state = if keys.is_empty() {
-                        KeyState::Static
-                    } else if keys.iter().any(|k| k.seconds.abs() <= 1e-5) {
-                        KeyState::AtPlayhead
-                    } else {
-                        KeyState::Animated
-                    };
-                    self.control_times.insert(
-                        row.id.clone(),
-                        keys.iter().map(|k| k.seconds).collect::<Vec<_>>().into(),
-                    );
                 }
-                RowContent::Track { .. } => {}
+            }
+            if delta == 0. {
+                continue;
+            }
+            for &i in self.property_positions.get(layer).into_iter().flatten() {
+                let row = std::sync::Arc::make_mut(&mut rows[i]);
+                let RowContent::Property { keys, state } = &mut row.content else {
+                    continue;
+                };
+                for key in keys.iter_mut() {
+                    key.seconds += delta;
+                }
+                *state = if keys.is_empty() {
+                    KeyState::Static
+                } else if keys.iter().any(|k| k.seconds.abs() <= 1e-5) {
+                    KeyState::AtPlayhead
+                } else {
+                    KeyState::Animated
+                };
+                std::sync::Arc::make_mut(&mut self.control_times).insert(
+                    row.id.clone(),
+                    keys.iter().map(|k| k.seconds).collect::<Vec<_>>().into(),
+                );
+            }
+        }
+        // Recompute live strip extents for any group whose descendants moved.
+        let mut affected_groups: HashSet<usize> = HashSet::new();
+        for id in offsets.keys().chain(self.time_preview.keys()) {
+            let Some(mut cur) = model.index.layer_ordinal(id) else {
+                continue;
+            };
+            if model.index.layers[cur].kind == "group" {
+                affected_groups.insert(cur);
+            }
+            let mut visited = 0usize;
+            while let Some(parent_id) = model.index.layers[cur].group.as_deref() {
+                let Some(parent) = model.index.layer_ordinal(parent_id) else {
+                    break;
+                };
+                if parent == cur || visited >= model.index.layers.len() {
+                    break;
+                }
+                visited += 1;
+                if model.index.layers[parent].kind == "group" {
+                    affected_groups.insert(parent);
+                }
+                cur = parent;
+            }
+        }
+        if !affected_groups.is_empty() {
+            fn extent_of(
+                index: &crate::TimelineIndex,
+                offsets: &HashMap<String, (f64, f64)>,
+                ordinal: usize,
+                memo: &mut HashMap<usize, Option<(f64, f64)>>,
+                visiting: &mut HashSet<usize>,
+            ) -> Option<(f64, f64)> {
+                if let Some(&cached) = memo.get(&ordinal) {
+                    return cached;
+                }
+                if !visiting.insert(ordinal) {
+                    return None;
+                }
+                let layer = &index.layers[ordinal];
+                let result = if layer.kind != "group" {
+                    let from = offsets.get(&layer.id).map_or(layer.from, |&(f, _)| f);
+                    Some((from, from + layer.duration))
+                } else {
+                    let mut bounds: Option<(f64, f64)> = None;
+                    for &child in index.child_ordinals(ordinal) {
+                        if let Some((a, b)) = extent_of(index, offsets, child, memo, visiting) {
+                            bounds = Some(match bounds {
+                                Some((lo, hi)) => (lo.min(a), hi.max(b)),
+                                None => (a, b),
+                            });
+                        }
+                    }
+                    bounds
+                };
+                visiting.remove(&ordinal);
+                memo.insert(ordinal, result);
+                result
+            }
+            let mut memo = HashMap::new();
+            let mut visiting = HashSet::new();
+            for ordinal in affected_groups {
+                let indexed = &model.index.layers[ordinal];
+                let Some(&row_index) = self.positions.get(&indexed.row_id) else {
+                    continue;
+                };
+                if let Some((start, end)) =
+                    extent_of(&model.index, &offsets, ordinal, &mut memo, &mut visiting)
+                {
+                    let duration = (end - start).max(0.);
+                    let changed = matches!(
+                        &rows[row_index].content,
+                        RowContent::Layer { clip: Some(clip), .. }
+                            if clip.from != start || clip.duration != duration
+                    );
+                    if changed
+                        && let RowContent::Layer {
+                            clip: Some(clip), ..
+                        } = &mut std::sync::Arc::make_mut(&mut rows[row_index]).content
+                    {
+                        clip.from = start;
+                        clip.duration = duration;
+                    }
+                }
             }
         }
         self.time_preview = offsets;
@@ -509,8 +705,19 @@ impl Scene {
         t: &Tokens,
         time: f64,
     ) -> Result<Self, Error> {
+        Self::from_model_reusing(model, p, t, time, None)
+    }
+
+    /// Reuse the presentation of rows that survived a disclosure change in
+    /// the same Layers view. The caller pins the index and presenter inputs.
+    pub fn from_model_reusing(
+        model: &crate::TimelineModel,
+        p: &dyn ModelPresenter,
+        t: &Tokens,
+        time: f64,
+        previous: Option<&Self>,
+    ) -> Result<Self, Error> {
         use crate::RowId;
-        use std::collections::HashSet;
         if !time.is_finite() {
             return Err(Error::InvalidTime);
         }
@@ -549,9 +756,24 @@ impl Scene {
                     || matches!(row.id, RowId::Property { .. } | RowId::Path { .. })
             })
             .map(|row| {
+                use std::borrow::Cow;
+                let layer = match &row.id {
+                    RowId::Layer(id) => Some(model.index.layer(id).ok_or(Error::DuplicateId)?),
+                    _ => None,
+                };
+                let id = layer.map_or_else(
+                    || Cow::Owned(crate::v4::row_id(&row.id)),
+                    |layer| Cow::Borrowed(layer.row_id.as_str()),
+                );
+                if let Some(previous) = previous
+                    .and_then(|scene| scene.positions.get(id.as_ref()).map(|&i| &scene.rows[i]))
+                    && previous.depth == row.depth
+                {
+                    return Ok(previous.clone());
+                }
                 let (content, is_selected) = match &row.id {
                     RowId::Layer(id) => {
-                        let layer = model.index.layer(id).ok_or(Error::DuplicateId)?;
+                        let layer = layer.expect("a layer row has an indexed layer");
                         let summary = layer.summary(|layer| {
                             keys(layer, layer.channels.iter().collect())
                                 .into_iter()
@@ -625,15 +847,15 @@ impl Scene {
                         .unwrap_or_else(|| p.accessibility_label(&row.id)),
                     _ => p.accessibility_label(&row.id),
                 };
-                Ok(PaintRow {
-                    id: crate::v4::row_id(&row.id),
+                Ok(std::sync::Arc::new(PaintRow {
+                    id: id.into_owned(),
                     accessibility_label,
                     depth: row.depth,
                     selected: is_selected,
                     hovered: false,
                     focused: false,
                     content,
-                })
+                }))
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let rows = if model.mode == crate::TimelineMode::Tracks {
@@ -672,7 +894,7 @@ impl Scene {
                         .map(|(_, e)| *e),
                 });
             }
-            let mut properties: HashMap<(Area, usize), Vec<PaintRow>> = HashMap::new();
+            let mut properties: HashMap<(Area, usize), Vec<_>> = HashMap::new();
             for row in rows {
                 if let Ok(crate::RowId::Property { layer_id, .. } | crate::RowId::Path { layer_id, .. }) =
                     crate::v4::parse_row(&row.id)
@@ -683,7 +905,7 @@ impl Scene {
             }
             let mut tracks = vec![];
             for (area, lane) in layout.display_order() {
-                tracks.push(PaintRow {
+                tracks.push(std::sync::Arc::new(PaintRow {
                     id: json!(["track", format!("{area:?}"), lane]).to_string(),
                     accessibility_label: p
                         .track_accessibility_label(area, lane)
@@ -695,7 +917,7 @@ impl Scene {
                     content: RowContent::Track {
                         clips: clips.remove(&(area, lane)).unwrap_or_default(),
                     },
-                });
+                }));
                 if !model.track_collapsed(area, lane) {
                     tracks.extend(properties.remove(&(area, lane)).unwrap_or_default());
                 }
@@ -704,8 +926,28 @@ impl Scene {
         } else {
             rows
         };
-        let mut scene = Self::new(rows, model.index.duration, model.index.fps, t)?;
-        scene.stagger = model
+        let mut scene = Self::from_rows(rows, model.index.duration, model.index.fps, t, previous)?;
+        scene.work_area = (model.index.work[0], model.index.work[1]);
+        scene.markers = model
+            .index
+            .markers
+            .iter()
+            .enumerate()
+            .map(|(i, m)| Marker {
+                id: m.id.clone().unwrap_or_else(|| format!("marker-{i}")),
+                seconds: m.time,
+                name: m.name.to_string_lossy(),
+            })
+            .collect();
+        if let Some(previous) = previous {
+            scene.stagger = previous.stagger.clone();
+            scene.preview_selection(std::sync::Arc::new(SceneSelection::new(
+                model.selection.layers(),
+                &model.selected_key_pairs(),
+            )));
+            return Ok(scene);
+        }
+        scene.stagger = std::sync::Arc::new(model
             .index
             .layers
             .iter()
@@ -713,57 +955,46 @@ impl Scene {
                 let bands = p.stagger_bands(l, time);
                 (!bands.is_empty()).then_some((l.id.clone(), bands))
             })
-            .collect();
+            .collect());
         // Only the incoming half paints a paired capsule. The cut stays at
         // the original clip edge, even though rendering uses source handles.
         if let Some(snapshot) = &model.index.source
             && let Some(root) = snapshot.root()
         {
-            let layers = pm_kernel::model::comp_node(root, model.index.comp_id.as_deref())
-                .and_then(|comp| comp.get("layers"));
-            let by_id: HashMap<_, _> = match layers.map(pm_model::Node::kind) {
-                Some(pm_model::NodeKind::Array(layers)) => layers
-                    .iter()
-                    .filter_map(|layer| {
-                        let value = layer.get("id")?.to_value();
-                        Some((value.as_str()?.to_owned(), layer))
-                    })
-                    .collect(),
-                _ => HashMap::new(),
-            };
-            scene.transitions.clear();
+            let layers = model.index.source_layers();
+            let mut transitions: HashMap<String, Vec<TransitionCapsule>> = HashMap::new();
             for clip in &model.index.layers {
-                let Some(layer) = by_id.get(&clip.id) else {
+                if !clip.has_authored_transition {
+                    continue;
+                }
+                let Some(layer) = model
+                    .index
+                    .source_ordinal(&clip.id)
+                    .and_then(|i| layers.get(i))
+                else {
                     continue;
                 };
                 for (field, edge) in [("transitionIn", "in"), ("transitionOut", "out")] {
                     let Some(transition) = layer.get(field) else {
                         continue;
                     };
-                    let value = transition.to_value();
-                    let Some(kind) = value.get("type").and_then(pm_model::Value::as_str) else {
+                    let Some(kind) = transition.get("type").and_then(crate::snapshot::as_str)
+                    else {
                         continue;
                     };
-                    let paired = value
-                        .get("paired")
-                        .and_then(pm_model::Value::as_str)
-                        .is_some();
+                    let peer = transition.get("paired").and_then(crate::snapshot::as_str);
+                    let paired = peer.is_some();
                     if paired && edge == "out" {
                         continue;
                     }
-                    let duration = value
-                        .get("dur")
-                        .and_then(pm_model::Value::as_f64)
-                        .unwrap_or(0.5);
+                    let duration = crate::snapshot::number(transition.get("dur")).unwrap_or(0.5);
                     if !duration.is_finite() || duration <= 0. {
                         continue;
                     }
                     let intended_duration = duration;
                     let fitted = if paired {
-                        value
-                            .get("paired")
-                            .and_then(pm_model::Value::as_str)
-                            .and_then(|id| by_id.get(id))
+                        peer.and_then(|id| model.index.source_ordinal(id))
+                            .and_then(|i| layers.get(i))
                             .and_then(|peer| {
                                 pm_kernel::commands::transition_edges::fitted_pair(
                                     root, layer, peer, true,
@@ -791,8 +1022,7 @@ impl Scene {
                         "zoom" => "Zoom",
                         other => other,
                     };
-                    scene
-                        .transitions
+                    transitions
                         .entry(clip.id.clone())
                         .or_default()
                         .push(TransitionCapsule {
@@ -807,34 +1037,43 @@ impl Scene {
                         });
                 }
             }
+            scene.transitions = std::sync::Arc::new(transitions);
         }
-        scene.work_area = (model.index.work[0], model.index.work[1]);
-        scene.markers = model
-            .index
-            .markers
-            .iter()
-            .enumerate()
-            .map(|(i, m)| Marker {
-                id: m.id.clone().unwrap_or_else(|| format!("marker-{i}")),
-                seconds: m.time,
-                name: m.name.to_string_lossy(),
-            })
-            .collect();
         Ok(scene)
     }
     /// O(rows + keys log keys) on publication, never on a display callback.
     /// Sort presentation indexes only; the source model's ordering is untouched.
-    pub fn new(
-        mut rows: Vec<PaintRow>,
+    pub fn new(rows: Vec<PaintRow>, duration: f64, fps: f64, t: &Tokens) -> Result<Self, Error> {
+        Self::from_rows(
+            rows.into_iter().map(std::sync::Arc::new).collect(),
+            duration,
+            fps,
+            t,
+            None,
+        )
+    }
+
+    fn from_rows(
+        mut rows: Vec<std::sync::Arc<PaintRow>>,
         duration: f64,
         fps: f64,
         t: &Tokens,
+        previous: Option<&Self>,
     ) -> Result<Self, Error> {
         if !duration.is_finite() || duration < 0. || !fps.is_finite() || fps <= 0. {
             return Err(Error::InvalidTime);
         }
-        let mut tops = vec![0.];
-        let mut positions = HashMap::new();
+        let mut tops = Vec::with_capacity(rows.len() + 1);
+        tops.push(0.);
+        let mut positions = HashMap::with_capacity(rows.len());
+        let mut property_layers = Vec::with_capacity(rows.len());
+        let mut property_positions: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut control_times = HashMap::new();
+        let mut track_ends = HashMap::new();
+        let mut layer_rows = Vec::with_capacity(rows.len());
+        let mut layer_ends = vec![rows.len(); rows.len()];
+        let mut ancestors: Vec<(usize, usize)> = Vec::new();
+        let mut layer = None;
         for (i, row) in rows.iter_mut().enumerate() {
             if row.id.is_empty()
                 || row.accessibility_label.is_empty()
@@ -842,122 +1081,161 @@ impl Scene {
             {
                 return Err(Error::DuplicateId);
             }
-            let sorted = |keys: &[Key]| keys.is_sorted_by(|a, b| a.seconds <= b.seconds);
-            let (clips, keys): (Vec<&Clip>, &[Key]) = match &mut row.content {
-                RowContent::Layer { clip, summary } => {
-                    if !sorted(summary) {
-                        let mut keys = summary.to_vec();
-                        keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
-                        *summary = keys.into();
+            // Shared rows already passed validation and sorting in the previous scene.
+            if let Some(row) = std::sync::Arc::get_mut(row) {
+                let sorted = |keys: &[Key]| keys.is_sorted_by(|a, b| a.seconds <= b.seconds);
+                let keys: &[Key] = match &mut row.content {
+                    RowContent::Layer { clip, summary } => {
+                        if clip.as_ref().is_some_and(|clip| !valid_clip(clip)) {
+                            return Err(Error::InvalidTime);
+                        }
+                        if !sorted(summary) {
+                            let mut keys = summary.to_vec();
+                            keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+                            *summary = keys.into();
+                        }
+                        summary
                     }
-                    (clip.iter().collect(), summary)
+                    RowContent::Property { keys, .. } => {
+                        if !sorted(keys) {
+                            keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+                        }
+                        keys
+                    }
+                    RowContent::Track { clips } => {
+                        if clips.iter().any(|clip| !valid_clip(clip)) {
+                            return Err(Error::InvalidTime);
+                        }
+                        clips.sort_by(|a, b| a.from.total_cmp(&b.from));
+                        &[]
+                    }
+                };
+                if keys.iter().any(|key| !key.seconds.is_finite()) {
+                    return Err(Error::InvalidTime);
+                }
+            }
+            let property = match &row.content {
+                RowContent::Layer { .. } => {
+                    while ancestors
+                        .last()
+                        .is_some_and(|&(_, depth)| depth >= row.depth)
+                    {
+                        let (ancestor, _) = ancestors.pop().unwrap();
+                        layer_ends[ancestor] = i;
+                    }
+                    ancestors.push((i, row.depth));
+                    layer = Some(i);
+                    None
                 }
                 RowContent::Property { keys, .. } => {
-                    keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
-                    (vec![], keys)
-                }
-                RowContent::Track { clips } => {
-                    if clips.iter().any(|c| !valid_clip(c)) {
-                        return Err(Error::InvalidTime);
+                    control_times.insert(
+                        row.id.clone(),
+                        keys.iter().map(|k| k.seconds).collect::<Vec<_>>().into(),
+                    );
+                    match crate::v4::parse_row(&row.id) {
+                        Ok(crate::RowId::Property { layer_id, .. }) => {
+                            property_positions
+                                .entry(layer_id.clone())
+                                .or_default()
+                                .push(i);
+                            Some(layer_id)
+                        }
+                        _ => None,
                     }
-                    clips.sort_by(|a, b| a.from.total_cmp(&b.from));
-                    tops.push(tops.last().unwrap() + row.height(t));
-                    continue;
                 }
-            };
-            if clips.iter().any(|c| !valid_clip(c)) || keys.iter().any(|k| !k.seconds.is_finite()) {
-                return Err(Error::InvalidTime);
-            }
-            tops.push(tops.last().unwrap() + row.height(t));
-        }
-        let control_times = rows
-            .iter()
-            .filter_map(|row| match &row.content {
-                RowContent::Property { keys, .. } => Some((
-                    row.id.clone(),
-                    keys.iter().map(|k| k.seconds).collect::<Vec<_>>().into(),
-                )),
-                _ => None,
-            })
-            .collect();
-        let track_ends = rows
-            .iter()
-            .filter_map(|row| match &row.content {
                 RowContent::Track { clips } => {
                     let mut end = f64::NEG_INFINITY;
-                    Some((
+                    track_ends.insert(
                         row.id.clone(),
                         clips
                             .iter()
-                            .map(|c| {
-                                end = end.max(c.from + c.duration);
+                            .map(|clip| {
+                                end = end.max(clip.from + clip.duration);
                                 end
                             })
                             .collect(),
-                    ))
+                    );
+                    None
                 }
-                _ => None,
-            })
-            .collect();
-        let transitions = rows.iter().flat_map(|row| {
-            let clips = match &row.content {
-                RowContent::Layer { clip, .. } => clip.as_slice(),
-                RowContent::Track { clips } => clips.as_slice(),
-                _ => &[],
             };
-            clips.iter().filter_map(|clip| {
-                let edges: Vec<_> = [(Edge::In, "in"), (Edge::Out, "out")].into_iter()
-                    .zip(clip.transitions)
-                    .filter_map(|((kind, edge), duration)| {
-                        let duration = duration?.min(clip.duration);
-                        (duration > 0.).then(|| TransitionCapsule {
+            property_layers.push(property);
+            layer_rows.push(layer);
+            tops.push(tops.last().unwrap() + row.height(t));
+        }
+        let (transitions, clip_selection) = if let Some(previous) = previous {
+            (
+                previous.transitions.clone(),
+                previous.clip_selection.clone(),
+            )
+        } else {
+            let mut transitions = HashMap::new();
+            let mut selection = HashSet::new();
+            for row in &rows {
+                let clips = match &row.content {
+                    RowContent::Layer { clip, .. } => clip.as_slice(),
+                    RowContent::Track { clips } => clips.as_slice(),
+                    _ => &[],
+                };
+                for clip in clips {
+                    if clip.selected {
+                        selection.insert(clip.id.clone());
+                    }
+                    let mut edges = Vec::new();
+                    for ((kind, edge), duration) in [(Edge::In, "in"), (Edge::Out, "out")]
+                        .into_iter()
+                        .zip(clip.transitions)
+                    {
+                        let Some(duration) =
+                            duration.map(|d| d.min(clip.duration)).filter(|d| *d > 0.)
+                        else {
+                            continue;
+                        };
+                        edges.push(TransitionCapsule {
                             paired: false,
                             selected: clip.transition_selected == Some(kind),
                             edge,
-                            from: if kind == Edge::In { clip.from } else { clip.from + clip.duration - duration },
+                            from: if kind == Edge::In {
+                                clip.from
+                            } else {
+                                clip.from + clip.duration - duration
+                            },
                             duration,
                             label: "Transition".into(),
                             shortened: false,
                             disabled: false,
-                        })
-                    }).collect();
-                (!edges.is_empty()).then(|| (clip.id.clone(), edges))
-            })
-        }).collect();
-        let mut clip_selection = std::collections::HashSet::new();
-        for row in &rows {
-            match &row.content {
-                RowContent::Layer {
-                    clip: Some(clip), ..
-                } if clip.selected => {
-                    clip_selection.insert(clip.id.clone());
+                        });
+                    }
+                    if !edges.is_empty() {
+                        transitions.insert(clip.id.clone(), edges);
+                    }
                 }
-                RowContent::Track { clips } => {
-                    clip_selection.extend(
-                        clips
-                            .iter()
-                            .filter(|clip| clip.selected)
-                            .map(|clip| clip.id.clone()),
-                    );
-                }
-                _ => {}
             }
-        }
+            (
+                std::sync::Arc::new(transitions),
+                std::sync::Arc::new(selection),
+            )
+        };
         Ok(Self {
-            rows: rows.into_iter().map(std::sync::Arc::new).collect(),
+            rows: std::sync::Arc::new(rows),
             time_preview: HashMap::new(),
-            tops,
-            positions,
-            control_times,
-            track_ends,
+            tops: std::sync::Arc::new(tops),
+            layer_rows: std::sync::Arc::new(layer_rows),
+            layer_ends: std::sync::Arc::new(layer_ends),
+            property_layers: std::sync::Arc::new(property_layers),
+            property_positions: std::sync::Arc::new(property_positions),
+            positions: std::sync::Arc::new(positions),
+            control_times: std::sync::Arc::new(control_times),
+            track_ends: std::sync::Arc::new(track_ends),
             duration,
             fps,
             work_area: (0., duration),
             markers: vec![],
             bars: vec![],
-            stagger: HashMap::new(),
+            stagger: Default::default(),
             transitions,
             clip_selection,
+            selection: None,
+            transition_selection: None,
             focused: true,
         })
     }
@@ -972,24 +1250,15 @@ impl Scene {
         }
         let ruler = t.metrics.ruler as f64;
         let content = (y - ruler + v.scroll_y).max(0.);
-        let mut i = self
+        let row = self
             .tops
             .partition_point(|top| *top <= content)
             .saturating_sub(1)
             .min(total - 1);
-        let is_layer = |i: usize| matches!(self.rows[i].content, RowContent::Layer { .. });
-        while i > 0 && !is_layer(i) {
-            i -= 1;
-        }
-        if !is_layer(i) {
-            return None;
-        }
+        let i = self.layer_rows[row]?;
         let depth = self.rows[i].depth;
         let height = self.rows[i].height(t).max(1.);
-        let mut end = i + 1;
-        while end < total && (!is_layer(end) || self.rows[end].depth > depth) {
-            end += 1;
-        }
+        let end = self.layer_ends[i];
         let bottom = |j: usize| {
             if j < total {
                 self.tops[j]
@@ -1166,7 +1435,7 @@ impl Scene {
     /// clip, the work-area veils and the column's edge reach as far; the
     /// ruler's ops, before [`Frame::fixed`], are the view's own.
     pub fn prepare_reaching(&self, v: Viewport, t: &Tokens, reach: f64) -> Result<Frame, Error> {
-        self.prepare_in(v, t, reach, Seen::of(v))
+        self.prepare_in(v, t, reach, Seen::of(v), None, None)
     }
     /// [`Self::prepare_reaching`] with the tracks and the ruler `reach_x`
     /// points past each side of the view too: the frame is prepared for a
@@ -1180,6 +1449,28 @@ impl Scene {
         t: &Tokens,
         reach: f64,
         reach_x: f64,
+    ) -> Result<Frame, Error> {
+        self.prepare_with_reach(v, t, reach, reach_x, None, None)
+    }
+    pub fn prepare_native(
+        &self,
+        v: Viewport,
+        t: &Tokens,
+        reach: f64,
+        reach_x: f64,
+        waveforms: &mut WaveformCache,
+        keys: Option<&crate::KeyMovePreview>,
+    ) -> Result<Frame, Error> {
+        self.prepare_with_reach(v, t, reach, reach_x, Some(waveforms), keys)
+    }
+    fn prepare_with_reach(
+        &self,
+        v: Viewport,
+        t: &Tokens,
+        reach: f64,
+        reach_x: f64,
+        waveforms: Option<&mut WaveformCache>,
+        keys: Option<&crate::KeyMovePreview>,
     ) -> Result<Frame, Error> {
         let rx = if reach_x.is_finite() && v.pps > 0. {
             reach_x.max(0.)
@@ -1195,9 +1486,17 @@ impl Scene {
             left: v.layer_column + rx,
             right: v.width + rx,
         };
-        self.prepare_in(wide, t, reach, seen)
+        self.prepare_in(wide, t, reach, seen, waveforms, keys)
     }
-    fn prepare_in(&self, v: Viewport, t: &Tokens, reach: f64, seen: Seen) -> Result<Frame, Error> {
+    fn prepare_in(
+        &self,
+        v: Viewport,
+        t: &Tokens,
+        reach: f64,
+        seen: Seen,
+        mut waveforms: Option<&mut WaveformCache>,
+        keys: Option<&crate::KeyMovePreview>,
+    ) -> Result<Frame, Error> {
         let reach = if reach.is_finite() { reach.max(0.) } else { 0. };
         if !v.valid() {
             return Err(Error::InvalidGeometry);
@@ -1237,12 +1536,27 @@ impl Scene {
         self.ruler(v, t, &mut ops, seen);
         let fixed = ops.len();
         let range = self.range(v, t, reach);
+        let visible = if waveforms.is_some() {
+            self.range(v, t, 0.)
+        } else {
+            range.clone()
+        };
         let mut ax = vec![];
         let mut controls = vec![];
         for i in range.clone() {
             let op_start = ops.len();
             let row = &self.rows[i];
-            self.row_ops(i, v, t, &mut ops, Some(&mut controls), seen);
+            let row_controls = visible.contains(&i).then_some(&mut controls);
+            self.row_ops(
+                i,
+                v,
+                t,
+                &mut ops,
+                row_controls,
+                seen,
+                waveforms.as_deref_mut(),
+                keys,
+            );
             for op in &mut ops[op_start..] {
                 let track = op.id.starts_with("clip")
                     || op.id.starts_with("transition")
@@ -1271,7 +1585,9 @@ impl Scene {
                     },
                 };
             }
-            ax.push(json!({"id":row.id,"role":"row","label":row.accessibility_label,"rowIndex":i,"rowCount":self.total(),"selected":row.selected,"depth":row.depth,"focusable":false}));
+            if waveforms.is_none() && visible.contains(&i) {
+                ax.push(json!({"id":row.id,"role":"row","label":row.accessibility_label,"rowIndex":i,"rowCount":self.total(),"selected":self.row_selected(row),"depth":row.depth,"focusable":false}));
+            }
         }
         // Outside the work area: veil track pixels only, after clips and keys.
         // Names stand over the veil: it fades the strips toward the ground,
@@ -1333,7 +1649,9 @@ impl Scene {
         Ok(Frame {
             viewport: v,
             fixed,
-            range,
+            rows_top: m.ruler as f64,
+            strip_gap: t.strip_gap() as f64,
+            range: visible,
             total: self.total(),
             ops,
             accessibility: ax,
@@ -1359,60 +1677,86 @@ impl Scene {
             .tops
             .partition_point(|y| *y <= bottom)
             .min(self.total());
-        let (mut covered, mut ops) = (Marquee::default(), vec![]);
+        let mut covered = Marquee::default();
+        if area.x + area.width < v.layer_column || area.x > v.width {
+            return covered;
+        }
         for i in first..end {
-            ops.clear();
-            self.row_ops(i, v, t, &mut ops, None, Seen::of(v));
-            for o in ops.iter().filter(|o| intersects(o.bounds, area)) {
-                if let Some(id) = o.id.strip_prefix("clip:") {
-                    covered.clips.push(id.to_owned());
-                } else if o.id.starts_with("key:")
-                    && matches!(self.rows[i].content, RowContent::Property { .. })
+            let row = &self.rows[i];
+            let y = ruler + self.tops[i] - v.scroll_y;
+            let h = row.height(t);
+            let mut pick_clip = |clip: &Clip| {
+                if clip_geometry(clip, y, h, v, t)
+                    .is_some_and(|geometry| intersects(geometry.body, area))
                 {
-                    covered.keys.extend(key_identity(o).and_then(on_layer));
+                    covered.clips.push(clip.id.clone());
+                }
+            };
+            match &row.content {
+                RowContent::Layer { clip, .. } => {
+                    if let Some(clip) = clip {
+                        pick_clip(clip);
+                    }
+                }
+                RowContent::Track { clips } => {
+                    let from = v.scroll_time.max(v.scroll_time + (area.x - v.layer_column - MIN_STRIP * 2.) / v.pps);
+                    let to = v.scroll_time + (v.width.min(area.x + area.width + MIN_STRIP * 2.) - v.layer_column) / v.pps;
+                    let first = self.track_ends[&row.id].partition_point(|end| *end < from);
+                    let last = clips.partition_point(|clip| clip.from <= to);
+                    for clip in &clips[first.min(last)..last] {
+                        pick_clip(clip);
+                    }
+                }
+                RowContent::Property { keys, .. } => {
+                    let size = t.metrics.keyframe as f64;
+                    let top = y + (h - size) / 2.;
+                    if keys.is_empty() || top > area.y + area.height || top + size < area.y {
+                        continue;
+                    }
+                    let lo = v.scroll_time + (area.x - v.layer_column - size / 2.) / v.pps;
+                    let hi = v.scroll_time + (area.x + area.width - v.layer_column + size / 2.) / v.pps;
+                    let from = lo.max(v.scroll_time - size / v.pps);
+                    let to = hi.min(v.scroll_time + (v.width - v.layer_column + size) / v.pps);
+                    if from > to {
+                        continue;
+                    }
+                    let start = keys.partition_point(|key| key.seconds < from);
+                    let end = keys.partition_point(|key| key.seconds <= to);
+                    if let Some(layer_id) = &self.property_layers[i] {
+                        covered.keys.extend(
+                            keys[start..end].iter().map(|key| (layer_id.clone(), key.id.clone())),
+                        );
+                    }
                 }
             }
         }
         covered
     }
-    /// v1 textStagger.draw: each animator's cascade in the clip's foot.
-    pub fn select_transition(&mut self, target: Option<(&str, &str)>) {
-        // Restore the model's explicit selection when leaving a capsule.
-        let scope = target.filter(|(owner, _)| {
-            self.clip_selection.len() == 1 && self.clip_selection.contains(*owner)
-        });
-        let selected = |clip: &Clip| {
-            self.clip_selection.contains(&clip.id)
-                && !scope.is_some_and(|(owner, _)| owner == clip.id)
-        };
-        for row in &mut self.rows {
-            let changed = match &row.content {
-                RowContent::Layer { clip: Some(clip), .. } => clip.selected != selected(clip),
-                RowContent::Track { clips } => clips.iter().any(|clip| clip.selected != selected(clip)),
-                _ => false,
-            };
-            if !changed {
-                continue;
-            }
-            match &mut std::sync::Arc::make_mut(row).content {
-                RowContent::Layer { clip: Some(clip), .. } => clip.selected = selected(clip),
-                RowContent::Track { clips } => {
-                    for clip in clips {
-                        clip.selected = selected(clip);
-                    }
-                }
-                _ => {}
-            }
-        }
-        for (layer, capsules) in &mut self.transitions {
-            for capsule in capsules {
-                capsule.selected =
-                    target.is_some_and(|(id, edge)| id == layer && edge == capsule.edge);
-            }
-        }
+    pub fn preview_selection(&mut self, selection: std::sync::Arc<SceneSelection>) {
+        self.selection = Some(selection);
     }
+
+    fn row_selected(&self, row: &PaintRow) -> bool {
+        let Some(selection) = &self.selection else {
+            return row.selected;
+        };
+        matches!(&row.content, RowContent::Layer { clip: Some(clip), .. }
+            if selection.layers.contains(&clip.id))
+    }
+
+    fn clip_selected(&self, clip: &Clip) -> bool {
+        let layers = self.selection.as_ref().map_or(self.clip_selection.as_ref(), |s| &s.layers);
+        let selected = self.selection.as_ref().map_or(clip.selected, |_| layers.contains(&clip.id));
+        selected && !self.transition_selection.as_ref().and_then(Option::as_ref)
+            .is_some_and(|(owner, _)| layers.len() == 1 && *owner == clip.id)
+    }
+
+    pub fn select_transition(&mut self, target: Option<(&str, &str)>) {
+        self.transition_selection = Some(target.map(|(layer, edge)| (layer.to_owned(), edge.to_owned())));
+    }
+
     pub fn preview_transition(&mut self, layer: &str, edge: &str, start: f64, duration: f64) {
-        if let Some(capsules) = self.transitions.get_mut(layer) {
+        if let Some(capsules) = std::sync::Arc::make_mut(&mut self.transitions).get_mut(layer) {
             for capsule in capsules.iter_mut().filter(|c| c.edge == edge) {
                 capsule.from = start;
                 capsule.duration = duration;
@@ -1420,6 +1764,7 @@ impl Scene {
                 capsule.selected = true;
             }
         }
+        self.select_transition(Some((layer, edge)));
     }
     /// Trim or move clip names so a transition never paints across them.
     fn keep_names_clear(ops: &mut [Op], bounds: Rect) {
@@ -1453,6 +1798,9 @@ impl Scene {
         ops: &mut Vec<Op>,
     ) {
         for capsule in self.transitions.get(&clip.id).into_iter().flatten() {
+            let selected = self.transition_selection.as_ref().map_or(capsule.selected, |target| {
+                target.as_ref().is_some_and(|(layer, edge)| *layer == clip.id && edge == capsule.edge)
+            });
             let width = if capsule.disabled {
                 18.
             } else {
@@ -1464,7 +1812,7 @@ impl Scene {
                 width,
                 (strip.height - 4.).min(18.).max(6.),
             );
-            let material = t.strip(clip.label.color(t), strip_state(clip));
+            let material = t.strip(clip.label.color(t), strip_state(clip, self.clip_selected(clip)));
             if !capsule.paired {
                 let gap = t.strip_gap() as f64 / 2.;
                 let x = v.x(capsule.from) + if capsule.edge == "in" { gap } else { -gap };
@@ -1473,7 +1821,7 @@ impl Scene {
                 let edge = if capsule.edge == "in" { Edge::In } else { Edge::Out };
                 let tooltip = format!("{} · {:.2} s", capsule.label, capsule.duration);
                 let detail = json!({"layer":clip.id,"edge":capsule.edge,
-                    "selected":capsule.selected,"effectiveDuration":capsule.duration,
+                    "selected":selected,"effectiveDuration":capsule.duration,
                     "effectiveFrom":capsule.from,"tooltip":tooltip});
                 let wedge = |id: String, color| {
                     let mut op = Op::new(id, "wedge", bounds, color);
@@ -1486,7 +1834,7 @@ impl Scene {
                 let mut tint = wedge(transition_op(&clip.id, edge), material.primary);
                 tint.opacity = 0.35;
                 ops.push(tint);
-                if capsule.selected {
+                if selected {
                     let selected = t.strip(clip.label.color(t), pm_design::StripState::Selected);
                     let mut ring = wedge(format!("transition-selection:{}:{}", clip.id, capsule.edge), selected.ring.0);
                     ring.stroke = 2.;
@@ -1519,7 +1867,7 @@ impl Scene {
                 "effectiveDuration":capsule.duration,"effectiveFrom":capsule.from,
                 "tooltip":if capsule.shortened {Some(pm_kernel::commands::transition_edges::SHORTENED_REASON)} else {None}});
             ops.push(op);
-            if capsule.selected {
+            if selected {
                 let mut outline = Op::new(
                     format!("transition-selection:{}:{}", clip.id, capsule.edge),
                     "ring",
@@ -1560,7 +1908,7 @@ impl Scene {
                 format!("stagger:{}:{}", clip.id, band.animator),
                 "stagger",
                 Rect::new(x(band.start), y0, x(band.end) - x(band.start), y1 - y0),
-                t.strip(clip.label.color(t), strip_state(clip)).foreground,
+                t.strip(clip.label.color(t), strip_state(clip, self.clip_selected(clip))).foreground,
             );
             op.opacity = 0.8;
             op.clip = Some(strip);
@@ -1578,24 +1926,54 @@ impl Scene {
         ops: &mut Vec<Op>,
         controls: Option<&mut Vec<Control>>,
         seen: Seen,
+        mut waveforms: Option<&mut WaveformCache>,
+        key_preview: Option<&crate::KeyMovePreview>,
     ) {
         let (m, c) = (t.metrics, &t.colors);
         let row = &self.rows[i];
+        let preview = key_preview
+            .filter(|preview| !preview.layers.is_empty())
+            .and_then(|preview| match crate::v4::parse_row(&row.id).ok()? {
+                crate::RowId::Layer(layer)
+                | crate::RowId::Property {
+                    layer_id: layer, ..
+                } => preview.layers.get(&layer),
+                _ => None,
+            });
+        let preview_keys = |keys: &[Key]| {
+            let changes = preview?;
+            if !keys.iter().any(|key| changes.contains_key(&key.id)) {
+                return None;
+            }
+            let mut keys: Vec<_> = keys
+                .iter()
+                .filter_map(|key| {
+                    let seconds = changes.get(&key.id).copied().unwrap_or(Some(key.seconds))?;
+                    Some(Key {
+                        seconds,
+                        ..key.clone()
+                    })
+                })
+                .collect();
+            keys.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+            Some(keys)
+        };
         let y = m.ruler as f64 + self.tops[i] - v.scroll_y;
         let h = row.height(t);
         // Selection and hover fill the outline column only; in the tracks
         // the clip's accent ring marks the selection (the owner's demo).
         let rect = Rect::new(0., y, v.layer_column, h);
-        if row.selected || row.hovered {
+        let selected = self.row_selected(row);
+        if selected || row.hovered {
             ops.push(Op::new(
                 format!("row:{}", row.id),
                 "rect",
                 rect,
-                if row.selected && !self.focused {
+                if selected && !self.focused {
                     c.selected_fill
-                } else if row.selected && row.hovered {
+                } else if selected && row.hovered {
                     c.timeline_selected_hover
-                } else if row.selected {
+                } else if selected {
                     c.timeline_selected
                 } else {
                     c.hover
@@ -1623,9 +2001,21 @@ impl Scene {
         }
         match &row.content {
             RowContent::Layer { clip, summary } => {
-                let strip = clip
-                    .as_ref()
-                    .and_then(|clip| paint_clip(clip, y, h, v, self.label_step(v).0, seen, true, t, ops));
+                let strip = clip.as_ref().and_then(|clip| {
+                    paint_clip(
+                        clip,
+                        self.clip_selected(clip),
+                        y,
+                        h,
+                        v,
+                        self.label_step(v).0,
+                        seen,
+                        true,
+                        t,
+                        ops,
+                        waveforms.as_deref_mut(),
+                    )
+                });
                 if let (Some(clip), Some(strip)) = (clip, strip) {
                     self.paint_stagger(clip, strip, v, t, ops);
                     self.paint_transitions(clip, strip, v, t, ops);
@@ -1639,7 +2029,7 @@ impl Scene {
                     .get(i + 1)
                     .is_some_and(|next| matches!(next.content, RowContent::Property { .. }));
                 if let (false, Some(clip), Some(strip)) = (open, clip, strip) {
-                    let ink = t.strip(clip.label.color(t), strip_state(clip)).foreground;
+                    let ink = t.strip(clip.label.color(t), strip_state(clip, self.clip_selected(clip))).foreground;
                     // In the strip's foot, under the name's descenders.
                     let size = (m.keyframe - SUMMARY_KEY_INSET) as f64;
                     let within = Within {
@@ -1647,10 +2037,12 @@ impl Scene {
                         to: v.x(clip.from + clip.duration),
                         strip,
                     };
+                    let preview = preview_keys(summary);
                     paint_keys(
                         &row.id,
-                        summary,
+                        preview.as_deref().unwrap_or(summary),
                         Some((ink, within)),
+                        None,
                         strip.y + strip.height - 1.5 * m.border as f64 - size / 2.,
                         v,
                         t,
@@ -1665,13 +2057,27 @@ impl Scene {
                 });
                 let grid = self.label_step(v).0;
                 for clip in &clips[first.min(last)..last] {
-                    if let Some(strip) = paint_clip(clip, y, h, v, grid, seen, false, t, ops) {
+                    if let Some(strip) = paint_clip(
+                        clip,
+                        self.clip_selected(clip),
+                        y,
+                        h,
+                        v,
+                        grid,
+                        seen,
+                        false,
+                        t,
+                        ops,
+                        waveforms.as_deref_mut(),
+                    ) {
                         self.paint_stagger(clip, strip, v, t, ops);
                         self.paint_transitions(clip, strip, v, t, ops);
                     }
                 }
             }
             RowContent::Property { state, keys } => {
+                let preview = preview_keys(keys);
+                let keys = preview.as_deref().unwrap_or(keys);
                 let mut o = Op::new(
                     format!("toggle:{}", row.id),
                     match state {
@@ -1693,7 +2099,11 @@ impl Scene {
                 );
                 o.detail = json!({"navigationVisible":*state!=KeyState::Static,"labelX":m.inset+3.*m.hit+m.gap});
                 if let Some(controls) = controls {
-                    controls.push((o.clone(), self.control_times[&row.id].clone()));
+                    let times = preview.as_ref().map_or_else(
+                        || self.control_times[&row.id].clone(),
+                        |keys| keys.iter().map(|key| key.seconds).collect(),
+                    );
+                    controls.push((o.clone(), times));
                 }
                 ops.push(o);
                 // The lane the keys sit on (v1): a faint line across the tracks.
@@ -1712,7 +2122,10 @@ impl Scene {
                     lane.opacity = t.translucency.grid as f64;
                     ops.push(lane);
                 }
-                paint_keys(&row.id, keys, None, y + h / 2., v, t, ops);
+                let selected_keys = self.selection.as_ref().map(|selection| {
+                    self.property_layers[i].as_ref().and_then(|layer| selection.keys.get(layer))
+                });
+                paint_keys(&row.id, keys, None, selected_keys, y + h / 2., v, t, ops);
             }
         }
     }
@@ -2041,11 +2454,11 @@ const MISSING_EFFECT_ADVANCE: f64 = 6.6;
 /// the bright rim, and the clip whose edge is under the pointer is hovered
 /// (it also shows the trim grip). A surface that drags a clip paints it with
 /// `StripState::Dragging` itself.
-fn strip_state(c: &Clip) -> pm_design::StripState {
+fn strip_state(c: &Clip, selected: bool) -> pm_design::StripState {
     use pm_design::StripState;
     if c.hidden {
         StripState::Disabled
-    } else if c.selected {
+    } else if selected {
         StripState::Selected
     } else if c.trim.is_some() {
         StripState::Hover
@@ -2069,11 +2482,33 @@ const TRIM_INSIDE: f64 = 6.;
 const TRANSITION_GRAB: f64 = 4.;
 /// The least width a strip is drawn at, in points (v1's 4 px).
 const MIN_STRIP: f64 = 4.;
+struct ClipGeometry {
+    visible: Rect,
+    body: Rect,
+    start: f64,
+    end: f64,
+    radius: f64,
+}
+
+fn clip_geometry(c: &Clip, y: f64, h: f64, v: Viewport, t: &Tokens) -> Option<ClipGeometry> {
+    let gap = t.strip_gap() as f64;
+    let start = v.x(c.from) + gap / 2.;
+    let end = (v.x(c.from + c.duration) - gap / 2.).max(start + MIN_STRIP);
+    let visible = span(start, end, y + gap, h - 2. * gap, v)?;
+    let radius = t.strip_radius(visible.height as f32) as f64;
+    // Extend the body past the viewport so clipped ends have no rounded corner.
+    let reach = radius + gap + 2. * t.metrics.border as f64;
+    let (x0, x1) = (start.max(v.layer_column - reach), end.min(v.width + reach));
+    let body = Rect::new(x0, visible.y, x1 - x0, visible.height);
+    Some(ClipGeometry { visible, body, start, end, radius })
+}
+
 /// Paints clip `c` and gives back its strip's box on screen (none when the
 /// clip is off screen).
 #[allow(clippy::too_many_arguments)]
 fn paint_clip(
     c: &Clip,
+    selected: bool,
     y: f64,
     h: f64,
     v: Viewport,
@@ -2082,29 +2517,12 @@ fn paint_clip(
     layers: bool,
     t: &Tokens,
     ops: &mut Vec<Op>,
+    waveforms: Option<&mut WaveformCache>,
 ) -> Option<Rect> {
     let m = t.metrics;
     let colors = &t.colors;
-    // Each strip is its own object: an even gap all round (pm-design `strip_gap`).
-    // A layer shorter than a few points at this zoom (a tenth of a second
-    // zoomed out) still shows, `MIN_STRIP` wide from its start (v1 drew every
-    // clip at least 4 px wide).
-    let gap = t.strip_gap() as f64;
-    let start = v.x(c.from) + gap / 2.;
-    let end = (v.x(c.from + c.duration) - gap / 2.).max(start + MIN_STRIP);
-    // `r` is the strip's part in view: what sits inside it (its name, marks,
-    // waveform) stays in sight.
-    let r = span(start, end, y + gap, h - 2. * gap, v)?;
-    // What of it keeps the name, the marks and the grip (all of it, unless
-    // the frame reaches past what is seen).
+    let ClipGeometry { visible: r, body, start, end, radius } = clip_geometry(c, y, h, v, t)?;
     let n = seen.inside(r);
-    let radius = t.strip_radius(r.height as f32) as f64;
-    // The body runs on past the view's edges by more than its corner, so a
-    // strip that goes on out of view is cut straight by the tracks, never
-    // rounded at the edge as if it ended there (where it has no trim).
-    let reach = radius + gap + 2. * m.border as f64;
-    let (x0, x1) = (start.max(v.layer_column - reach), end.min(v.width + reach));
-    let body = Rect::new(x0, r.y, x1 - x0, r.height);
     // Media Offline (docs/native/design/media-offline.md): the viewer's
     // ground with the danger hatch, as the engine's card.
     let offline = c.media == Media::Offline;
@@ -2116,7 +2534,7 @@ fn paint_clip(
     // The strip (pm-design `strip`): a slab of tinted glass in the layer's
     // hue, a rim of light inside its edge, no outline. Its state carries
     // selection, the hovered edge and a hidden layer.
-    let material = t.strip(fill, strip_state(c));
+    let material = t.strip(fill, strip_state(c, selected));
     let strength = 1.;
     let grid_from = if grid > 0. {
         let time = v.scroll_time + (r.x - v.layer_column) / v.pps;
@@ -2133,7 +2551,7 @@ fn paint_clip(
         "sourceEdges":[v.x(c.from),v.x(c.from+c.duration)],
         // The strip's own ends as drawn (inside the layer's times).
         "stripEdges":[start,end],
-        "selected":c.selected,
+        "selected":selected,
         "top":material.top,"bottom":material.bottom,
         // The ruler's grid reads through the body: its first line inside
         // the strip and the distance between lines, in points.
@@ -2302,26 +2720,51 @@ fn paint_clip(
             let read = |p: &crate::waveform::Pyramid| {
                 crate::waveform::columns(p, w.levels.rate, &*source, left_time, step, count)
             };
-            match sides {
-                Some([left, right]) => {
-                    let (lp, lr) = read(left);
-                    let (rp, rr) = read(right);
-                    detail["peak"] = json!(crate::waveform::encode(&lp));
-                    detail["rms"] = json!(crate::waveform::encode(&lr));
-                    detail["peak2"] = json!(crate::waveform::encode(&rp));
-                    detail["rms2"] = json!(crate::waveform::encode(&rr));
-                }
-                None => {
-                    let (peak, rms) = read(&w.levels.combined);
-                    detail["peak"] = json!(crate::waveform::encode(&peak));
-                    detail["rms"] = json!(crate::waveform::encode(&rms));
+            if let Some(cache) = waveforms {
+                let peaks = |p: &crate::waveform::Pyramid| {
+                    crate::waveform::native_peaks(
+                        p,
+                        w.levels.rate,
+                        &*source,
+                        left_time,
+                        step,
+                        count,
+                    )
+                };
+                o.waveform = Some(cache.sample(
+                    c,
+                    w,
+                    left_time,
+                    step,
+                    count,
+                    sides.is_some(),
+                    || match sides {
+                        Some([left, right]) => vec![peaks(left), peaks(right)].into(),
+                        None => vec![peaks(&w.levels.combined)].into(),
+                    },
+                ));
+            } else {
+                match sides {
+                    Some([left, right]) => {
+                        let (lp, lr) = read(left);
+                        let (rp, rr) = read(right);
+                        detail["peak"] = json!(crate::waveform::encode(&lp));
+                        detail["rms"] = json!(crate::waveform::encode(&lr));
+                        detail["peak2"] = json!(crate::waveform::encode(&rp));
+                        detail["rms2"] = json!(crate::waveform::encode(&rr));
+                    }
+                    None => {
+                        let (peak, rms) = read(&w.levels.combined);
+                        detail["peak"] = json!(crate::waveform::encode(&peak));
+                        detail["rms"] = json!(crate::waveform::encode(&rms));
+                    }
                 }
             }
         }
         o.detail = detail;
         ops.push(o);
         if let Some(level) = c.level {
-            ops.push(level_line(c, level, r, v, inset, material.level, strength));
+            ops.push(level_line(c, selected, level, r, v, inset, material.level, strength));
         }
     } else {
         let mut o = Op::new(
@@ -2412,6 +2855,7 @@ fn paint_keys(
     row: &str,
     keys: &[Key],
     summary: Option<(u32, Within)>,
+    selected_keys: Option<Option<&HashSet<String>>>,
     y: f64,
     v: Viewport,
     t: &Tokens,
@@ -2463,7 +2907,8 @@ fn paint_keys(
                 Interpolation::Hold => "square",
             }
         };
-        let selected = summary.is_none() && key.selected;
+        let selected = summary.is_none()
+            && selected_keys.map_or(key.selected, |keys| keys.is_some_and(|keys| keys.contains(&key.id)));
         let color = match summary {
             Some(ink) => ink,
             None if selected => t.colors.accent,
@@ -2602,6 +3047,8 @@ pub struct Marquee {
 }
 #[derive(Clone, Debug)]
 pub struct Frame {
+    rows_top: f64,
+    strip_gap: f64,
     pub viewport: Viewport,
     /// The ops before this index (the ground, the column's ground and the
     /// ruler with its grid) stand still while the rows scroll.
@@ -2731,9 +3178,12 @@ impl Frame {
             .map(str::to_owned)
     }
     pub fn hit_op(&self, prefix: &str, x: f64, y: f64, slop: f64) -> Option<&Op> {
-        self.ops.iter().rev().find(|o| {
+        self.ops.iter().enumerate().rev().find_map(|(i, o)| {
             let b = o.bounds;
-            !o.decorative && o.id.starts_with(prefix)
+            let within_rows = y >= self.rows_top && y < self.viewport.height;
+            ((i < self.fixed || within_rows)
+                && !o.decorative
+                && o.id.starts_with(prefix)
                 && Rect::new(
                     b.x - slop,
                     b.y - slop,
@@ -2741,7 +3191,8 @@ impl Frame {
                     b.height + 2. * slop,
                 )
                 .contains(x, y)
-                && o.clip.is_none_or(|clip| clip.contains(x, y))
+                && o.clip.is_none_or(|clip| clip.contains(x, y)))
+            .then_some(o)
         })
     }
     /// `(row id, key id)` of the key under the point, with a hit target padded
@@ -2754,6 +3205,9 @@ impl Frame {
     /// from `x`, in the row under `y` (`row` high). Further off, a press on
     /// the row starts a marquee and moves no key.
     pub fn hit_key_across(&self, x: f64, y: f64, reach: f64, row: f64) -> Option<(String, String)> {
+        if y < self.rows_top || y >= self.viewport.height {
+            return None;
+        }
         let centre = |o: &Op| {
             (
                 o.bounds.x + o.bounds.width / 2.,
@@ -2800,7 +3254,7 @@ impl Frame {
                     None => o.bounds,
                 };
                 let bottom = (bounds.y + bounds.height).min(self.viewport.height);
-                bounds.y = bounds.y.max(0.);
+                bounds.y = bounds.y.max(self.rows_top);
                 bounds.height = bottom - bounds.y;
                 if bounds.width <= 0. || bounds.height <= 0. {
                     return None;
@@ -2819,7 +3273,11 @@ impl Frame {
     /// Topmost transition under the pointer. A wedge leaves the clip's trim
     /// edge and the area below its slope available to normal clip gestures.
     pub fn transition_at(&self, x: f64, y: f64) -> Option<&Op> {
-        if y < 0. || y >= self.viewport.height || x < self.viewport.layer_column || x > self.viewport.width {
+        if y < self.rows_top
+            || y >= self.viewport.height
+            || x < self.viewport.layer_column
+            || x > self.viewport.width
+        {
             return None;
         }
         self.ops.iter().rev().find(|o| {
@@ -2847,15 +3305,21 @@ impl Frame {
         Some((layer, edge))
     }
     pub fn hit_clip<'a>(&'a self, x: f64, y: f64) -> Option<(&'a str, Option<Edge>)> {
-        if y < 0.
+        if y < self.rows_top
             || y >= self.viewport.height
             || x < self.viewport.layer_column
             || x > self.viewport.width
         {
             return None;
         }
-        let hit = |o: &'a Op, inside: bool| {
+        let hit = |o: &'a Op, gap: f64, inside: bool| {
             if !o.id.starts_with("clip:") || o.clip.is_some_and(|clip| !clip.contains(x, y)) {
+                return None;
+            }
+            let bounds = o.bounds;
+            let band = bounds.y - gap..bounds.y + bounds.height + gap;
+            let horizontal = bounds.x..=bounds.x + bounds.width;
+            if !band.contains(&y) || (inside && !horizontal.contains(&x)) {
                 return None;
             }
             let edges = o.detail["sourceEdges"].as_array()?;
@@ -2874,23 +3338,26 @@ impl Frame {
                 (false, true) => Some(Edge::Out),
                 _ => None,
             };
-            let b = o.bounds;
-            let level = y >= b.y && y < b.y + b.height;
-            let found = if inside {
-                b.contains(x, y)
-            } else {
-                level && edge.is_some()
-            };
-            found.then(|| (&o.id[5..], edge))
+            (inside || edge.is_some()).then(|| (&o.id[5..], edge))
         };
-        // The strip under the point first (two that meet: each trims its own
-        // end); else a trim zone, which reaches past a strip's drawn end to
-        // its layer's edge and beyond, over the strip's height.
+        // Prefer a painted body, then let each strip own the padding inside
+        // its row. Trim grips can reach past the drawn ends on that same row.
         self.ops
             .iter()
             .rev()
-            .find_map(|o| hit(o, true))
-            .or_else(|| self.ops.iter().rev().find_map(|o| hit(o, false)))
+            .find_map(|o| hit(o, 0., true))
+            .or_else(|| {
+                self.ops
+                    .iter()
+                    .rev()
+                    .find_map(|o| hit(o, self.strip_gap, true))
+            })
+            .or_else(|| {
+                self.ops
+                    .iter()
+                    .rev()
+                    .find_map(|o| hit(o, self.strip_gap, false))
+            })
     }
 }
 
@@ -3029,6 +3496,7 @@ pub fn decoration_ops(ops: &[Op], decorations: &Decorations) -> Vec<Op> {
                 text: None,
                 font_size: 0.,
                 detail: Value::Null,
+                waveform: None,
                 clip: within,
                 covered: false,
                 decorative: false,
@@ -3280,6 +3748,84 @@ mod key_cover_tests {
         }
     }
 
+    #[test]
+    fn marquee_on_600_layers_shares_geometry_and_updates_four_key_highlights() {
+        use crate::{MarqueeSession, RowId, TimelineModel};
+
+        let t = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let rows = (0..600)
+            .flat_map(|i| {
+                let layer = format!("layer-{i}");
+                let row = |id, content, depth| PaintRow {
+                    id: crate::v4::row_id(&id),
+                    accessibility_label: "row".into(),
+                    depth,
+                    selected: false,
+                    hovered: false,
+                    focused: false,
+                    content,
+                };
+                let property = |channel: &str| row(
+                    RowId::Property { layer_id: layer.clone(), channel: channel.into() },
+                    RowContent::Property {
+                        state: KeyState::Animated,
+                        keys: vec![
+                            key(&format!("{channel}-1"), 1., false),
+                            key(&format!("{channel}-2"), 2., false),
+                        ],
+                    },
+                    1,
+                );
+                [
+                    row(RowId::Layer(layer.clone()), RowContent::Layer {
+                        clip: None,
+                        summary: Default::default(),
+                    }, 0),
+                    property("position.x"),
+                    property("position.y"),
+                ]
+            })
+            .collect();
+        let scene = Scene::new(rows, 5., 30., &t).unwrap();
+        let v = Viewport {
+            width: 1000.,
+            height: 300.,
+            scroll_y: scene.tops[520 * 3 + 1],
+            scroll_time: 0.,
+            pps: 100.,
+            layer_column: 200.,
+        };
+        let y = f64::from(t.metrics.ruler);
+        let height = scene.tops[520 * 3 + 3] - v.scroll_y;
+        let model = TimelineModel::default();
+        let mut marquee = MarqueeSession::begin(&model, false, false);
+        let empty = scene.marquee(v, &t, Rect::new(v.x(3.), y, 30., height));
+        assert!(!marquee.preview(empty.keys, empty.clips));
+        for sample in 0..100 {
+            let box_left = v.x(1.) - 20. + f64::from(sample) / 10.;
+            let hit = scene.marquee(v, &t, Rect::new(box_left, y, 150., height));
+            assert_eq!(hit.keys.len(), 4);
+            assert_eq!(marquee.preview(hit.keys, hit.clips), sample == 0);
+        }
+        let (layers, keys) = marquee.current();
+        let mut preview = scene.clone();
+        preview.preview_selection(std::sync::Arc::new(SceneSelection::new(layers, keys)));
+        assert!(std::sync::Arc::ptr_eq(&scene.rows, &preview.rows));
+        assert!(std::sync::Arc::ptr_eq(&scene.tops, &preview.tops));
+
+        let selected = |scene: &Scene| {
+            scene.prepare(v, &t).unwrap().ops.into_iter()
+                .filter(|op| op.id.starts_with("key:") && !op.detail["keyline"].is_null())
+                .map(|op| op.id)
+                .collect::<Vec<_>>()
+        };
+        assert!(selected(&scene).is_empty());
+        let keys = selected(&preview);
+        assert_eq!(keys.len(), 4);
+        assert!(keys.iter().all(|id| id.contains("layer-520")));
+        assert_eq!(marquee.finish_local().calls.len(), 2);
+    }
+
     /// Dense keys: a glyph identical to the one before it on the same device
     /// half-pixel is marked covered (paint leaves it out); every key keeps
     /// its op for hit testing and marquee selection.
@@ -3307,7 +3853,7 @@ mod key_cover_tests {
             key("end", 9., false),
         ];
         let mut ops = vec![];
-        paint_keys("L1", &keys, None, 50., v, &t, &mut ops);
+        paint_keys("L1", &keys, None, None, 50., v, &t, &mut ops);
         let covered: Vec<bool> = ops.iter().map(|o| o.covered).collect();
         // b repeats a on its half-pixel; c is selected (another glyph) and d
         // is on top of it again; f repeats e.
@@ -3373,7 +3919,7 @@ pub fn snap_guide(v: Viewport, ruler: f64, target: Option<f64>) -> Vec<Op> {
 /// only on a selected clip (`shown`) or under the pointer (the surface's
 /// hover paints it there, with its handle): at rest a clip shows its
 /// waveform alone.
-fn level_line(c: &Clip, level: Level, r: Rect, v: Viewport, inset: f64, light: (u32, f32), strength: f64) -> Op {
+fn level_line(c: &Clip, selected: bool, level: Level, r: Rect, v: Viewport, inset: f64, light: (u32, f32), strength: f64) -> Op {
     let top = r.y + inset;
     let room = (r.height - 2. * inset).max(0.);
     let floor = top + room;
@@ -3404,7 +3950,7 @@ fn level_line(c: &Clip, level: Level, r: Rect, v: Viewport, inset: f64, light: (
         "db": crate::level::format_db(crate::level::gain_db(level.gain)),
         "animated": level.animated,
         "cursor": "resizeUpDown",
-        "shown": c.selected,
+        "shown": selected,
     });
     o
 }

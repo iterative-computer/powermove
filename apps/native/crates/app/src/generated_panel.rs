@@ -89,18 +89,51 @@ impl WorkspaceJson {
 
 #[cfg(test)]
 mod build_repaint_tests {
-    use super::build_repaint;
+    use super::{BuildRepaint, build_repaint, panel_build, reduced_build_deadline};
+    use std::time::Duration;
 
     #[test]
-    fn building_panels_follow_the_display_unless_playing() {
-        // Paused: the next display frame (CADisplayLink, 120 Hz on
-        // ProMotion), not a 16 ms timer.
-        assert_eq!(build_repaint(false), None);
-        // Playing: unchanged, a 33 ms wait.
+    fn aurora_and_reveal_follow_the_display_until_finished() {
+        use panel_build::Stage;
+        let mut state = panel_build::State::default();
+        let now = state.changed;
+        for stage in [Stage::Wake, Stage::Sketch, Stage::Rest] {
+            state.stage = stage;
+            assert_eq!(build_repaint(&state, now, false), Some(BuildRepaint::Aurora));
+        }
+        for stage in [Stage::Ink, Stage::Ready, Stage::Erase] {
+            state.stage = stage;
+            assert_eq!(build_repaint(&state, now, false), Some(BuildRepaint::Reveal));
+            assert_eq!(build_repaint(&state, now, true), None);
+        }
+        for stage in [Stage::Ready, Stage::Erase] {
+            state.stage = stage;
+            assert_eq!(
+                build_repaint(&state, now + Duration::from_secs(1), false),
+                None
+            );
+        }
+        state.stage = Stage::Ink;
         assert_eq!(
-            build_repaint(true),
-            Some(std::time::Duration::from_millis(33))
+            build_repaint(&state, now + Duration::from_secs(1), false),
+            Some(BuildRepaint::Aurora)
         );
+    }
+
+    #[test]
+    fn reduced_motion_wakes_at_ink_deadlines() {
+        let mut state = panel_build::State::default();
+        state.stage = panel_build::Stage::Ink;
+        state.complete = true;
+        let opacity_done = state.changed + Duration::from_secs_f32(0.28);
+        let ink_done = state.changed + Duration::from_secs_f32(0.82);
+
+        assert_eq!(
+            reduced_build_deadline(&state, state.changed),
+            Some(opacity_done)
+        );
+        assert_eq!(reduced_build_deadline(&state, opacity_done), Some(ink_done));
+        assert_eq!(reduced_build_deadline(&state, ink_done), None);
     }
 }
 
@@ -206,56 +239,178 @@ pub(crate) fn publication(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuildRepaint {
+    Aurora,
+    Reveal,
+}
+
+/// Every visible animation follows the display. Only the reveal stage needs
+/// the enclosing panel to recompute its filters and opacity.
+fn build_repaint(
+    state: &panel_build::State,
+    now: std::time::Instant,
+    reduced: bool,
+) -> Option<BuildRepaint> {
+    use panel_build::Stage;
+    if reduced || !state.animating(now, reduced) {
+        return None;
+    }
+    Some(match state.stage {
+        Stage::Ink
+            if now.saturating_duration_since(state.changed).as_secs_f32()
+                < pm_design::dots::REFINE_SECONDS =>
+        {
+            BuildRepaint::Reveal
+        }
+        Stage::Ready | Stage::Erase => BuildRepaint::Reveal,
+        _ => BuildRepaint::Aurora,
+    })
+}
+
+/// Reduced motion still needs a wake-up to advance timed build stages and
+/// hand off ready content. There is no display-rate animation in this mode.
+fn reduced_build_deadline(
+    state: &panel_build::State,
+    now: std::time::Instant,
+) -> Option<std::time::Instant> {
+    use panel_build::Stage;
+    use std::time::Duration;
+
+    let elapsed = now.saturating_duration_since(state.changed).as_secs_f32();
+    let seconds = match state.stage {
+        Stage::Wake if elapsed < 0.24 => 0.24,
+        Stage::Sketch if !state.explicit => 0.65,
+        Stage::Ink if elapsed < 0.28 => 0.28, // Reduced-motion control opacity finishes.
+        Stage::Ink if elapsed < 0.82 => 0.82,
+        Stage::Ready => pm_design::dots::RESOLVE_SECONDS,
+        Stage::Wake | Stage::Sketch | Stage::Ink
+            if (state.explicit || state.stage == Stage::Ink)
+                && !state.complete
+                && state.pending.is_empty() =>
+        {
+            2.
+        }
+        _ => return None,
+    };
+    (elapsed < seconds).then(|| state.changed + Duration::from_secs_f32(seconds))
+}
+
+/// The GPU aurora owns its display-frame requests while the slot is waiting.
+pub(crate) struct BuildAuroraView {
+    state: panel_build::State,
+    rect: pm_shell::layout::Rect,
+    tokens: pm_design::Tokens,
+    playing: bool,
+    parent: gpui::WeakEntity<Controller>,
+    reduced_wakeup: Option<(std::time::Instant, Task<()>)>,
+}
+
+impl BuildAuroraView {
+    fn schedule_reduced_wakeup(&mut self, now: std::time::Instant, cx: &mut Context<Self>) {
+        let deadline = if self.tokens.accessibility.reduce_motion {
+            reduced_build_deadline(&self.state, now)
+        } else {
+            None
+        };
+        if self.reduced_wakeup.as_ref().map(|(at, _)| *at) != deadline {
+            self.reduced_wakeup = deadline.map(|deadline| {
+                let parent = self.parent.clone();
+                let task = cx.spawn(async move |_, cx| {
+                    cx.background_executor()
+                        .timer(deadline.saturating_duration_since(std::time::Instant::now()))
+                        .await;
+                    let _ = parent.update(cx, |_, cx| cx.notify());
+                });
+                (deadline, task)
+            });
+        }
+    }
+}
+
+impl Render for BuildAuroraView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = std::time::Instant::now();
+        self.schedule_reduced_wakeup(now, cx);
+        if build_repaint(&self.state, now, self.tokens.accessibility.reduce_motion)
+            == Some(BuildRepaint::Aurora)
+        {
+            let mut next = self.state.clone();
+            next.tick();
+            if (next.stage, next.row) != (self.state.stage, self.state.row) {
+                let parent = self.parent.clone();
+                window.on_next_frame(move |_, cx| {
+                    let _ = parent.update(cx, |_, cx| cx.notify());
+                });
+            } else {
+                window.request_animation_frame();
+            }
+        }
+        build_frame(
+            &self.state,
+            self.rect,
+            &self.tokens,
+            self.playing,
+            now.saturating_duration_since(self.state.started).as_secs_f32(),
+            now.saturating_duration_since(self.state.changed)
+                .as_secs_f32(),
+        )
+    }
+}
+
 /// The canvas owns no hit targets or focus handles. Every primitive is clipped
 /// to the reserved body, so the viewer and neighbouring panels stay untouched.
 fn build_surface(
+    v: &mut Controller,
+    id: &str,
     state: panel_build::State,
     rect: pm_shell::layout::Rect,
     t: &pm_design::Tokens,
     playing: bool,
-    fraction: f32,
     window: &Window,
     cx: &mut Context<Controller>,
 ) -> AnyElement {
-    let entity = cx.entity().downgrade();
-    if state.animating(std::time::Instant::now(), t.accessibility.reduce_motion) {
-        match build_repaint(playing) {
-            // The display link paces it (120 Hz on ProMotion). Renders in
-            // one frame share one next frame, where a timer per render kept
-            // a chain of wake-ups going for each extra render.
-            None => window.on_next_frame(move |_, cx| {
-                let _ = entity.update(cx, |_, cx| cx.notify());
-            }),
-            Some(wait) => cx
-                .spawn(async move |_, cx| {
-                    cx.background_executor().timer(wait).await;
-                    let _ = entity.update(cx, |_, cx| cx.notify());
-                })
-                .detach(),
-        }
+    if build_repaint(&state, std::time::Instant::now(), t.accessibility.reduce_motion)
+        == Some(BuildRepaint::Reveal)
+    {
+        window.request_animation_frame();
     }
-    let age = state.started.elapsed().as_secs_f32();
-    let elapsed = state.changed.elapsed().as_secs_f32();
-    build_frame(state, rect, t, playing, age, elapsed, fraction, false)
-}
-
-/// When a building panel's animation draws again: at the display's next
-/// frame (`None`), or while playing after a fixed wait, at most 30 times a
-/// second, so the window does not draw at the display rate beside playback.
-fn build_repaint(playing: bool) -> Option<std::time::Duration> {
-    playing.then_some(std::time::Duration::from_millis(33))
+    let parent = cx.entity().downgrade();
+    let view = if let Some(existing) = v.panel_build_views.get(id).cloned() {
+        existing.update(cx, |view, _| {
+            view.state = state;
+            view.rect = rect;
+            view.tokens = t.clone();
+            view.playing = playing;
+        });
+        existing
+    } else {
+        let created = cx.new(|_| BuildAuroraView {
+            state,
+            rect,
+            tokens: t.clone(),
+            playing,
+            parent,
+            reduced_wakeup: None,
+        });
+        v.panel_build_views.insert(id.to_owned(), created.clone());
+        created
+    };
+    div()
+        .absolute()
+        .inset_0()
+        .child(view)
+        .into_any_element()
 }
 
 /// Fixed event-relative times let headless captures exercise the live painter.
 fn build_frame(
-    state: panel_build::State,
+    state: &panel_build::State,
     rect: pm_shell::layout::Rect,
     t: &pm_design::Tokens,
     playing: bool,
     age: f32,
     elapsed: f32,
-    fraction: f32,
-    ink_only: bool,
 ) -> AnyElement {
     let reduced = t.accessibility.reduce_motion;
     let height = (rect.h - t.metrics.header).max(0.);
@@ -264,64 +419,28 @@ fn build_frame(
         panel_build::Stage::Erase => 1. - panel_build::fade(elapsed, 0.24),
         _ => panel_build::fade(age, 0.24),
     };
-    let (accent, text, muted) = (t.colors.accent, t.colors.text, t.colors.muted);
-    let radius = t.radius.lg;
     let dim = panel_build::playback(playing).0;
-    let _ = fraction;
+    let alpha = (fade * dim).clamp(0., 1.);
+    if reduced || alpha <= 0. {
+        return div()
+            .absolute()
+            .inset_0()
+            .h(px(height))
+            .into_any_element();
+    }
+    let opening = panel_build::fade(age, 0.48);
     div()
         .absolute()
         .inset_0()
         .h(px(height))
         .overflow_hidden()
         .rounded(px(t.radius.lg))
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |bounds, _, window, _| {
-                    if ink_only || reduced || fade <= 0. {
-                        return;
-                    }
-                    let size = [f32::from(bounds.size.width), f32::from(bounds.size.height)];
-                    let opening = panel_build::fade(age, 0.48);
-                    window.with_content_mask(
-                        Some(ContentMask {
-                            bounds,
-                            ..Default::default()
-                        }),
-                        |window| {
-                            for dot in pm_design::dots::aurora(size, age, accent, text, muted) {
-                                if !inside_ground(dot.center, size, radius) {
-                                    continue;
-                                }
-                                // The thin initial row expands into a sparse-to-dense slot field.
-                                if dot.center[1] > 3. + (size[1] - 3.) * opening {
-                                    continue;
-                                }
-                                if pm_design::dots::hash(dot.center) > opening {
-                                    continue;
-                                }
-                                let p = bounds.origin
-                                    + point(
-                                        px(dot.center[0] - dot.radius),
-                                        px(dot.center[1] - dot.radius),
-                                    );
-                                window.paint_quad(
-                                    PaintQuad::new(Bounds::new(
-                                        p,
-                                        gpui::size(px(dot.radius * 2.), px(dot.radius * 2.)),
-                                    ))
-                                    .corner_radii(px(dot.radius))
-                                    .background(
-                                        pm_shell::kit::ink(dot.color, dot.alpha * fade * dim),
-                                    ),
-                                );
-                            }
-                        },
-                    );
-                },
-            )
-            .size_full(),
-        )
+        .filter(vec![Filter::DotAurora {
+            age,
+            opening,
+            fade: alpha,
+            palette: pm_design::dots::aurora_palette(t.colors.accent, t.colors.text, t.colors.muted),
+        }])
         .into_any_element()
 }
 
@@ -334,67 +453,12 @@ fn slot_surface(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> u3
     t.colors.panel
 }
 
-fn inside_ground(point: [f32; 2], size: [f32; 2], radius: f32) -> bool {
-    let r = radius.min(size[0].min(size[1]) * 0.5);
-    let dx = point[0] - point[0].clamp(r, size[0] - r);
-    let dy = point[1] - point[1].clamp(r, size[1] - r);
-    dx * dx + dy * dy <= r * r
-}
-
-fn ground(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> Div {
-    let resolve = build.map_or(1., |b| b.resolve(b.now()));
-    if resolve >= 1. || t.accessibility.reduce_motion {
-        return div()
-            .absolute()
-            .inset_0()
-            .rounded(px(t.radius.lg))
-            .bg(rgb(t.colors.panel));
-    }
-    let color = t.colors.panel;
-    let radius = t.radius.lg;
-    div().absolute().inset_0().child(
-        canvas(
-            |_, _, _| (),
-            move |bounds, _, window, _| {
-                window.with_content_mask(
-                    Some(ContentMask {
-                        bounds,
-                        ..Default::default()
-                    }),
-                    |window| {
-                        if resolve > 0. {
-                            window.paint_quad(
-                                PaintQuad::new(bounds)
-                                    .corner_radii(px(radius))
-                                    .background(pm_shell::kit::ink(color, resolve)),
-                            );
-                        }
-                        let dimensions =
-                            [f32::from(bounds.size.width), f32::from(bounds.size.height)];
-                        for dot in pm_design::dots::matrix(dimensions, 4., |_| [1.; 4]) {
-                            if !inside_ground(dot.center, dimensions, radius) {
-                                continue;
-                            }
-                            let p = bounds.origin
-                                + point(
-                                    px(dot.center[0] - dot.radius),
-                                    px(dot.center[1] - dot.radius),
-                                );
-                            window.paint_quad(
-                                PaintQuad::new(Bounds::new(
-                                    p,
-                                    size(px(dot.radius * 2.), px(dot.radius * 2.)),
-                                ))
-                                .corner_radii(px(dot.radius))
-                                .background(pm_shell::kit::ink(color, 1. - resolve)),
-                            );
-                        }
-                    },
-                );
-            },
-        )
-        .size_full(),
-    )
+fn ground(t: &pm_design::Tokens, _build: Option<&panel_build::State>) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(px(t.radius.lg))
+        .bg(rgb(t.colors.panel))
 }
 
 fn panel_title(def: &Value, t: &pm_design::Tokens) -> Div {
@@ -1123,31 +1187,13 @@ fn render(
     let t = v.host.borrow().tokens.clone();
     let (c, m, ty, tr) = (&t.colors, &t.metrics, &t.typography, &t.translucency);
     let build = v.panel_builds.get(id).cloned();
-    let overlay = build
+    let aurora = build
         .as_ref()
         .filter(|b| b.stage != panel_build::Stage::Ready || b.changed.elapsed().as_secs_f32() < 0.7)
         .map(|b| {
-            let control = &def["controls"][b.row];
-            let current = value(v, def, control).unwrap_or_else(|_| control["def"].clone());
-            let fraction = control_fraction(control, &current);
-            (
-                build_surface(b.clone(), rect, &t, v.running(), fraction, window, cx),
-                build_frame(
-                    b.clone(),
-                    rect,
-                    &t,
-                    v.running(),
-                    b.started.elapsed().as_secs_f32(),
-                    b.changed.elapsed().as_secs_f32(),
-                    fraction,
-                    true,
-                ),
-            )
+            let running = v.running();
+            build_surface(v, id, b.clone(), rect, &t, running, window, cx)
         });
-    let (under, over) = match overlay {
-        Some((under, over)) => (Some(under), Some(over)),
-        None => (None, None),
-    };
     let Some(controls) = def["controls"].as_array() else {
         let title = def["title"].as_str().unwrap_or("Controls");
         return pm_shell::view::empty_state(
@@ -1173,7 +1219,7 @@ fn render(
         .overflow_y_scroll()
         .text_size(px(ty.body))
         .child(ground(&t, build.as_ref()))
-        .children(under)
+        .children(aurora)
         .child(panel_title(def, &t).filter(dot_filter(build.as_ref(), None, &t)));
     if let Some(note) = def["note"].as_str().filter(|n| !n.is_empty()) {
         body = body.child(
@@ -1809,19 +1855,13 @@ mod panel_build_capture {
                 w: 300.,
                 h: 260. + self.tokens.metrics.header,
             };
-            let fraction = super::control_fraction(
-                &self.definition["controls"][self.state.row.min(4)],
-                &self.definition["controls"][self.state.row.min(4)]["def"],
-            );
             body = body.child(build_frame(
-                self.state.clone(),
+                &self.state,
                 rect,
                 &self.tokens,
                 false,
                 self.age,
                 self.elapsed,
-                fraction,
-                false,
             ));
             body = body.child(
                 panel_title(&self.definition, &self.tokens).filter(super::dot_filter(
@@ -1850,16 +1890,6 @@ mod panel_build_capture {
                         )),
                 );
             }
-            body = body.child(build_frame(
-                self.state.clone(),
-                rect,
-                &self.tokens,
-                false,
-                self.age,
-                self.elapsed,
-                fraction,
-                true,
-            ));
             let body = body.opacity(if self.state.stage == panel_build::Stage::Erase {
                 1. - panel_build::fade(self.elapsed, 0.24)
             } else {
@@ -2068,7 +2098,6 @@ pub(crate) fn agent_slot(
 ) -> Option<AnyElement> {
     let build = v.agent_panel_builds.get(id)?.clone();
     let mut content = None;
-    let mut generated = false;
     let mut native_tree = false;
     let mut web_capture = None;
     if let Some(target) = &build.target {
@@ -2126,16 +2155,19 @@ pub(crate) fn agent_slot(
                     }
                     content = None;
                     if !done && web_capture.is_none() {
+                        let tokens = v.host.borrow().tokens.clone();
+                        let running = v.running();
                         return Some(
                             div()
                                 .relative()
                                 .size_full()
                                 .child(build_surface(
+                                    v,
+                                    id,
                                     state,
                                     rect,
-                                    &v.host.borrow().tokens.clone(),
-                                    v.running(),
-                                    0.5,
+                                    &tokens,
+                                    running,
                                     window,
                                     cx,
                                 ))
@@ -2155,27 +2187,26 @@ pub(crate) fn agent_slot(
                 state.complete = rendered;
             }
         }
-        if content.is_none() {
-            if let Some((_, _, def)) = section(v, target) {
-                generated = true;
-                if let Some(state) = v.panel_builds.get(id).cloned() {
-                    v.panel_builds.insert(target.clone(), state);
-                }
-                content = Some(render(v, target, &def, rect, window, cx));
-            }
-        }
     }
     let state = v.panel_builds.get_mut(id)?;
     state.tick();
     let state = state.clone();
-    if generated && state.stage != panel_build::Stage::Erase {
-        return content;
+    if content.is_none()
+        && let Some(target) = &build.target
+        && let Some((_, _, def)) = section(v, target)
+    {
+        v.panel_builds.insert(target.clone(), state.clone());
+        content = Some(render(v, target, &def, rect, window, cx));
+        if state.stage != panel_build::Stage::Erase {
+            return content;
+        }
     }
     if state.stage == panel_build::Stage::Ready && state.changed.elapsed().as_secs_f32() >= 0.7 {
         return content;
     }
     let tokens = v.host.borrow().tokens.clone();
-    let overlay = build_surface(state.clone(), rect, &tokens, v.running(), 0.5, window, cx);
+    let running = v.running();
+    let overlay = build_surface(v, id, state.clone(), rect, &tokens, running, window, cx);
     let root_alpha = if state.stage == panel_build::Stage::Erase {
         1. - panel_build::fade(state.changed.elapsed().as_secs_f32(), 0.36)
     } else {
@@ -2250,7 +2281,8 @@ pub(crate) fn extension_build(
     if state.stage == panel_build::Stage::Ready && state.changed.elapsed().as_secs_f32() >= 0.7 {
         return content;
     }
-    let field = build_surface(state.clone(), rect, &t, v.running(), 0.5, window, cx);
+    let running = v.running();
+    let field = build_surface(v, id, state.clone(), rect, &t, running, window, cx);
     div()
         .relative()
         .size_full()
@@ -2284,9 +2316,11 @@ impl Controller {
                     page.borrow_mut().finish_panel_build(&target);
                 }
                 self.panel_builds.remove(&target);
+                self.panel_build_views.remove(&target);
             }
         }
         self.panel_builds.remove(id);
+        self.panel_build_views.remove(id);
     }
 }
 pub(crate) fn sweep_agent_builds(v: &mut Controller, cx: &mut Context<Controller>) -> bool {

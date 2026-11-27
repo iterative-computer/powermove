@@ -809,7 +809,11 @@ fn plan_on(
             "delete_layers" => {
                 let ids = targets(&c, &p, &batch.selection)?;
                 data = json!({"ids":ids});
-                LayerCommand::Delete { layer_ids: ids }.into()
+                LayerCommand::DeleteAt {
+                    layer_ids: ids,
+                    time,
+                }
+                .into()
             }
             "reorder_layer" => {
                 let id = target()?;

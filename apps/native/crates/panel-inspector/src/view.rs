@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
@@ -6,7 +7,7 @@ use pm_kernel::model;
 use pm_kernel::{
     Ack, Caller, KernelFailure, KernelHandle, Pending, Published, QueryError, QueryMirror, Request,
 };
-use pm_model::{JsString, Map, Node, Value};
+use pm_model::{JsString, Map, Node, NodeKind, Value};
 
 use crate::{Binding, EffectClipboard, EffectSelection};
 
@@ -92,6 +93,8 @@ pub struct Inspector {
     pub(crate) published: Arc<Published>,
     pub(crate) mirror: QueryMirror,
     pub(crate) selected: Vec<String>,
+    layer_locations: RefCell<HashMap<String, model::LayerLoc>>,
+    layer_locks: RefCell<HashMap<String, bool>>,
     pub(crate) definitions: HashMap<String, crate::EffectDefinition>,
     pub(crate) effect_catalog: Option<pm_fx_defs::catalog::EffectCatalog>,
     pub(crate) definition_generation: u64,
@@ -103,6 +106,7 @@ pub struct Inspector {
     pub clipboard: EffectClipboard,
     pub scroll: ScrollMemory,
     pub clock: ReadoutClock,
+    reads_time: bool,
 }
 impl Inspector {
     pub fn new(published: Arc<Published>, clipboard: EffectClipboard) -> Self {
@@ -111,6 +115,8 @@ impl Inspector {
             published,
             mirror,
             selected: Vec::new(),
+            layer_locations: Default::default(),
+            layer_locks: Default::default(),
             definitions: HashMap::new(),
             effect_catalog: None,
             definition_generation: 0,
@@ -121,6 +127,7 @@ impl Inspector {
             clipboard,
             scroll: ScrollMemory::default(),
             clock: ReadoutClock::default(),
+            reads_time: false,
         };
         this.refresh_selection();
         this
@@ -128,20 +135,32 @@ impl Inspector {
     /// Call after an acknowledgement or a kernel event. Same-revision selection
     /// changes are adopted too; document replacement clears transient addresses.
     pub fn sync(&mut self, published: Arc<Published>) {
+        if Arc::ptr_eq(&self.published, &published) {
+            return;
+        }
         let replaced = self.published.snapshot.doc_id != published.snapshot.doc_id;
         let changed = replaced || self.published.revision() != published.revision();
+        let selection_changed = self.published.selection.layers() != published.selection.layers();
+        let structure_changed =
+            changed && !published.only_transform_values_since(self.document_id(), self.revision());
         self.mirror.sync(&published);
         self.published = published;
         if changed {
             self.property_ids.clear();
+        }
+        if structure_changed {
+            self.layer_locations.get_mut().clear();
+            self.layer_locks.get_mut().clear();
         }
         if replaced {
             self.disclosure.clear();
             self.effects = EffectSelection::default();
             self.scroll = ScrollMemory::default();
         }
-        self.refresh_selection();
-        if let Some(layer) = self.effects.layer.clone() {
+        if structure_changed || selection_changed {
+            self.refresh_selection();
+        }
+        if structure_changed && let Some(layer) = self.effects.layer.clone() {
             let ids = self.effect_ids(&layer).unwrap_or_default();
             self.effects.retain(&ids);
         }
@@ -212,7 +231,11 @@ impl Inspector {
         let value = self.read_binding(binding, time)?;
         let mut values = Vec::new();
         for target in &targets {
-            values.push(self.read_binding(target, time)?);
+            values.push(if target == binding {
+                value.clone()
+            } else {
+                self.read_binding(target, time)?
+            });
         }
         let ids = targets
             .iter()
@@ -233,11 +256,10 @@ impl Inspector {
             .and_then(Value::as_str)
             .filter(|e| !e.is_empty())
             .map(str::to_owned);
-        let at = if let Some(id) = &primary {
-            self.key_at(id, time)?.is_some()
-        } else {
-            false
-        };
+        let at = animated
+            && self
+                .key_at(primary.as_ref().expect("animated property"), time)?
+                .is_some();
         Ok(FieldState {
             value,
             mixed: values
@@ -288,25 +310,40 @@ impl Inspector {
             rows,
         })
     }
-    pub(crate) fn layer_node(&self, id: &str) -> Result<&Node, InspectorError> {
-        let root = self
-            .published
+    fn layer_location(&self, root: &Node, id: &str) -> Option<model::LayerLoc> {
+        if let Some(loc) = self.layer_locations.borrow().get(id) {
+            return Some(loc.clone());
+        }
+        let loc = model::find_layer(root, id)?;
+        self.layer_locations
+            .borrow_mut()
+            .insert(id.into(), loc.clone());
+        Some(loc)
+    }
+    /// Borrow the layer tree to read individual fields without copying geometry.
+    pub fn layer_node(&self, id: &str) -> Result<&Node, InspectorError> {
+        self.published
             .snapshot
             .root()
-            .ok_or_else(|| InspectorError::MissingLayer(id.into()))?;
-        let loc =
-            model::find_layer(root, id).ok_or_else(|| InspectorError::MissingLayer(id.into()))?;
-        model::layer_at(root, &loc).ok_or_else(|| InspectorError::MissingLayer(id.into()))
+            .and_then(|root| model::layer_at(root, &self.layer_location(root, id)?))
+            .ok_or_else(|| InspectorError::MissingLayer(id.into()))
     }
     pub fn layer(&self, id: &str) -> Result<Value, InspectorError> {
         Ok(self.layer_node(id)?.to_value())
     }
     pub fn editable(&self, id: &str) -> bool {
-        self.published
-            .snapshot
-            .root()
-            .and_then(|root| model::find_layer(root, id).map(|loc| !model::is_locked(root, &loc)))
-            .unwrap_or(false)
+        if let Some(locked) = self.layer_locks.borrow().get(id) {
+            return !locked;
+        }
+        let Some(root) = self.published.snapshot.root() else {
+            return false;
+        };
+        let Some(loc) = self.layer_location(root, id) else {
+            return false;
+        };
+        let locked = model::is_locked(root, &loc);
+        self.layer_locks.borrow_mut().insert(id.into(), locked);
+        !locked
     }
     pub(crate) fn refresh_selection(&mut self) {
         let Some(root) = self.published.snapshot.root() else {
@@ -326,7 +363,7 @@ impl Inspector {
             .layers()
             .iter()
             .filter(|id| {
-                let Some(loc) = model::find_layer(root, id) else {
+                let Some(loc) = self.layer_location(root, id) else {
                     return false;
                 };
                 let Some(layer) = model::layer_at(root, &loc) else {
@@ -335,12 +372,9 @@ impl Inspector {
                 let Some(comp) = model::comp_node(root, loc.comp_id.as_deref()) else {
                     return false;
                 };
-                !model::group_ancestors(comp, layer).iter().any(|g| {
-                    g.get("id")
-                        .map(Node::to_value)
-                        .and_then(|v| v.as_str().map(|s| ids.contains(s)))
-                        .unwrap_or(false)
-                })
+                !model::group_ancestors(comp, layer)
+                    .iter()
+                    .any(|g| ids.contains(node_text(g, "id")))
             })
             .cloned()
             .collect();
@@ -358,7 +392,8 @@ impl Inspector {
             .snapshot
             .root()
             .ok_or_else(|| InspectorError::MissingLayer(layer.into()))?;
-        let loc = model::find_layer(root, layer)
+        let loc = self
+            .layer_location(root, layer)
             .ok_or_else(|| InspectorError::MissingLayer(layer.into()))?;
         let mut request = object([
             ("op", op.into()),
@@ -401,32 +436,53 @@ impl Inspector {
         )?;
         Ok(result.as_str().map(str::to_owned))
     }
+    /// Begin tracking whether a projection reads any playhead-dependent value.
+    pub fn begin_readout(&mut self) {
+        self.reads_time = false;
+    }
+    pub fn reads_time(&self) -> bool {
+        self.reads_time
+    }
     pub(crate) fn evaluate(&mut self, id: &PropertyId, time: f64) -> Result<Value, InspectorError> {
-        if let Some(prop) = self.property(id)? {
+        let channel = pm_eval::address::find_prop(
+            self.layer_node(&id.layer)?,
+            &JsString::from(id.path.as_str()),
+        )
+        .map_err(eval_error)?;
+        if let Some(prop) = channel.node() {
+            let animated = !matches!(prop.get("kf").map(Node::kind), None | Some(NodeKind::Null))
+                && !matches!(prop.get("kf").map(Node::kind), Some(NodeKind::Array(keys)) if keys.is_empty());
+            let expressed = pm_eval::node::truthy(prop.get("expr"));
+            // The evaluator returns the stored value for ordinary static channels.
+            if !animated && !expressed && matches!(prop.kind(), NodeKind::Object(_)) {
+                return Ok(prop.get("v").map(Node::to_value).unwrap_or(Value::Null));
+            }
+            let prop = prop.to_value();
+            self.reads_time |= animated || expressed;
             return self.query("evP", &id.layer, Some(&id.path), Some(prop), time);
         }
-        let layer = self.layer(&id.layer)?;
+        let layer = self.layer_node(&id.layer)?;
         let value = if let Some(k) = id.path.strip_prefix("c.") {
             layer.get("d").and_then(|d| d.get(k))
         } else if let Some(k) = id.path.strip_prefix("l.") {
             layer.get(k)
         } else if let Some(fx) = id.path.strip_suffix(".$enabled") {
-            array(layer.get("fx"))
+            node_array(layer.get("fx"))
                 .iter()
-                .find(|f| text(f, "id") == fx)
+                .find(|f| node_text(f, "id") == fx)
                 .and_then(|f| f.get("on"))
         } else if let Some(m) = id.path.strip_prefix("m.") {
             m.split_once('.').and_then(|(mid, k)| {
-                array(layer.get("masks"))
+                node_array(layer.get("masks"))
                     .iter()
-                    .find(|m| text(m, "id") == mid)
+                    .find(|m| node_text(m, "id") == mid)
                     .and_then(|m| m.get(k))
             })
         } else {
             None
         };
         value
-            .cloned()
+            .map(Node::to_value)
             .ok_or_else(|| InspectorError::MissingProperty(id.clone()))
     }
     pub(crate) fn key_at(
@@ -472,6 +528,18 @@ impl Inspector {
     }
     pub fn select_channel(&self, caller: Caller, path: Option<String>) -> Request {
         Request::new(caller, pm_kernel::SelectionCall::Channel(path))
+    }
+}
+pub(crate) fn node_array(node: Option<&Node>) -> &[Node] {
+    match node.map(Node::kind) {
+        Some(NodeKind::Array(items)) => items,
+        _ => &[],
+    }
+}
+pub(crate) fn node_text<'a>(node: &'a Node, key: &str) -> &'a str {
+    match node.get(key).map(Node::kind) {
+        Some(NodeKind::String(s)) => s.as_str().unwrap_or_default(),
+        _ => "",
     }
 }
 pub(crate) fn array(v: Option<&Value>) -> &[Value] {

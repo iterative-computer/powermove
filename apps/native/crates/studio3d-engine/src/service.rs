@@ -118,6 +118,7 @@ pub trait FastRenderer: Send {
 #[derive(Default)]
 pub struct StudioService {
     renderer: Option<Renderer>,
+    shared_device: Option<(wgpu::Device, wgpu::Queue)>,
     extractor: Extractor,
     fast: Option<Box<dyn FastRenderer>>,
     previous: Option<(SceneRequest, Vec<u8>)>,
@@ -165,24 +166,57 @@ impl StudioService {
     pub fn with_device(
         device: wgpu::Device,
         queue: wgpu::Queue,
-        width: u32,
-        height: u32,
+        _width: u32,
+        _height: u32,
     ) -> Result<Self, String> {
-        let rt = device
-            .features()
-            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
-            && std::env::var_os("STUDIO_NO_RT").is_none();
+        // Defer creating the full path-tracing Renderer (its ~29 compute/RT
+        // shader modules and accumulation buffers) until a Full/Live/Refine or
+        // surface-pick call actually needs it. Interactive Fast preview only
+        // needs the lightweight forward rasterizer.
         Ok(Self {
-            renderer: Some(Renderer::with_device(
-                device,
-                queue,
-                "shared engine device".into(),
-                rt,
-                width,
-                height,
-            )?),
+            shared_device: Some((device, queue)),
             ..Self::default()
         })
+    }
+
+    fn ensure_renderer(&mut self, width: u32, height: u32) -> Result<&mut Renderer, String> {
+        if self.renderer.is_none() {
+            let renderer = if let Some((device, queue)) = &self.shared_device {
+                let rt = device
+                    .features()
+                    .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+                    && std::env::var_os("STUDIO_NO_RT").is_none();
+                Renderer::with_device(
+                    device.clone(),
+                    queue.clone(),
+                    "shared engine device".into(),
+                    rt,
+                    width,
+                    height,
+                )?
+            } else {
+                Renderer::new(width, height)?
+            };
+            self.renderer = Some(renderer);
+        }
+        Ok(self.renderer.as_mut().unwrap())
+    }
+
+    /// Precompile the lightweight Fast forward raster pipelines so the first
+    /// 3D frame encountered during scrubbing or playback does not stall.
+    pub fn prewarm_fast(&mut self) -> Result<(), String> {
+        if self.fast.is_some() {
+            return Ok(());
+        }
+        let (device, queue) = if let Some((device, queue)) = &self.shared_device {
+            (device.clone(), queue.clone())
+        } else if let Some(r) = &self.renderer {
+            (r.device().clone(), r.queue().clone())
+        } else {
+            return Ok(());
+        };
+        self.fast_renderer(Box::new(crate::fast::Raster::new(device, queue)));
+        Ok(())
     }
 
     pub fn fast_renderer(&mut self, fast: Box<dyn FastRenderer>) {
@@ -304,10 +338,10 @@ impl StudioService {
             Tier::QualityLive if input.view.orthographic_span.is_none() => (request.width.div_ceil(2), request.height.div_ceil(2)),
             _ => (request.width, request.height),
         };
-        if let Some(r) = self.renderer.as_mut() {
-            r.resize(width, height)?;
+        if self.renderer.is_some() {
+            self.renderer.as_mut().unwrap().resize(width, height)?;
         } else {
-            self.renderer = Some(Renderer::new(width, height)?);
+            self.ensure_renderer(width, height)?;
         }
         let r = self.renderer.as_mut().unwrap();
         let limit = u64::from(r.device().limits().max_storage_buffer_binding_size);
@@ -438,11 +472,16 @@ impl StudioService {
         if tier == Tier::Fast {
             let input = source.scene(&request)?;
             // Lazily attach on every construction path, keeping Full-only
-            // workers free of raster pipelines and preview resources.
+            // workers free of raster pipelines and Fast-only viewers free of
+            // path-tracing shaders and accumulation buffers.
             if self.fast.is_none() {
-                if self.renderer.is_none() { self.renderer = Some(Renderer::new(request.width, request.height)?); }
-                let r = self.renderer.as_ref().unwrap();
-                self.fast_renderer(Box::new(crate::fast::Raster::new(r.device().clone(), r.queue().clone())));
+                let (device, queue) = if let Some((device, queue)) = &self.shared_device {
+                    (device.clone(), queue.clone())
+                } else {
+                    let r = self.ensure_renderer(request.width, request.height)?;
+                    (r.device().clone(), r.queue().clone())
+                };
+                self.fast_renderer(Box::new(crate::fast::Raster::new(device, queue)));
             }
             let fast = self.fast.as_mut().unwrap();
             let mut rendered = fast.render_outputs(&input, &request, flip_y, &source.auxiliary_layers(&request)?)?;
@@ -628,10 +667,16 @@ impl StudioService {
         self.extractor.builds
     }
     pub fn device(&self) -> Option<&wgpu::Device> {
-        self.renderer.as_ref().map(Renderer::device)
+        self.renderer
+            .as_ref()
+            .map(Renderer::device)
+            .or_else(|| self.shared_device.as_ref().map(|(device, _)| device))
     }
     pub fn queue(&self) -> Option<&wgpu::Queue> {
-        self.renderer.as_ref().map(Renderer::queue)
+        self.renderer
+            .as_ref()
+            .map(Renderer::queue)
+            .or_else(|| self.shared_device.as_ref().map(|(_, queue)| queue))
     }
 }
 

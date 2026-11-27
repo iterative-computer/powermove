@@ -30,6 +30,7 @@ struct PanelDrag {
     stack: bool,
     start: Point<Pixels>,
     original: Layout,
+    original_maximized: Option<String>,
     at: Point<Pixels>,
     moved: bool,
     preview: Option<DropPreview>,
@@ -133,6 +134,7 @@ pub struct Editor {
     /// Docking area of the last render, in window points.
     dock_bounds: Rect,
     gesture: Option<Gesture>,
+    cancelled_press: bool,
     panel_undo: Vec<(Layout, Layout)>,
     panel_redo: Vec<(Layout, Layout)>,
     focus: FocusHandle,
@@ -307,6 +309,7 @@ impl Editor {
             dismissed_panels: workspace::dismissed_panels(&record),
             dock_bounds: Rect::default(),
             gesture: None,
+            cancelled_press: false,
             panel_undo: Vec::new(),
             panel_redo: Vec::new(),
             focus: cx.focus_handle(),
@@ -411,7 +414,11 @@ impl Editor {
             return;
         };
         let moved = matches!(&g, Gesture::Panel(d) if d.moved);
-        if !matches!(g, Gesture::Panel(_)) {
+        if let Gesture::Panel(drag) = g {
+            if drag.live {
+                self.maximized_panel = drag.original_maximized;
+            }
+        } else {
             self.layout = g.original();
         }
         self.resize_live = false;
@@ -1909,6 +1916,7 @@ impl Editor {
             stack,
             start: at,
             original: self.layout.clone(),
+            original_maximized: self.maximized_panel.clone(),
             at,
             moved: false,
             preview: None,
@@ -2833,10 +2841,10 @@ fn measure_tab_text(text: &str, size: f32, weight: FontWeight, window: &Window) 
         .shape_line(text.to_string().into(), px(size), &[run]);
     f32::from(line.width).ceil()
 }
-// The docked trigger has a label, a chevron and two insets; the new-thread
-// button keeps its whole hit target. Round up for the native text layout.
+// The docked trigger has a label, a chevron and two insets. Round up for the
+// native text layout.
 fn agent_header_width(label: f32, m: &pm_design::Metrics) -> f32 {
-    label.ceil() + m.symbol_inline + 4. * m.pill_inset + m.hit
+    label.ceil() + m.symbol_inline + 4. * m.pill_inset
 }
 
 /// Room for a header's tabs: its width less the tools, the ⌄ menu when the
@@ -3039,14 +3047,13 @@ pub use crate::kit::tooltip;
 impl Editor {
     /// Home fills the window below the toolbar: no docks, no viewer slot,
     /// no native panel bodies and no status bar (v1's Projects screen).
-    /// The title bar's empty band, `top` points tall. AppKit passes a press
-    /// on the toolbar's empty space through to this view, so the title bar's
-    /// own double-click never runs; a double-click here does what the person
-    /// chose in System Settings (Fill, Zoom or Minimize). Single presses fall
-    /// through untouched: AppKit still moves the window from here.
-    /// It paints nothing: the window's ground (and on Home the sidebar's
-    /// glass) runs on under the toolbar, so the title bar is the chrome's one
-    /// tone, never a third band of its own.
+    /// The title bar's empty band, `top` points tall. AppKit passes presses
+    /// on the toolbar's empty space through to GPUI's full-size content view,
+    /// so a single press starts the window move (`start_window_move`) and a
+    /// double-click does what the person chose in System Settings (Fill, Zoom
+    /// or Minimize). It paints nothing: the window's ground (and on Home the
+    /// sidebar's glass) runs on under the toolbar, so the title bar is the
+    /// chrome's one tone, never a third band of its own.
     fn titlebar_band(top: f32) -> Div {
         div()
             .absolute()
@@ -3057,6 +3064,8 @@ impl Editor {
             .on_mouse_down(MouseButton::Left, |e: &MouseDownEvent, window, _| {
                 if e.click_count == 2 {
                     window.titlebar_double_click();
+                } else if e.click_count == 1 && !e.modifiers.modified() {
+                    window.start_window_move();
                 }
             })
     }
@@ -3438,7 +3447,6 @@ impl Editor {
         // viewer a border inside its panel, an extension body its inset).
         let viewer_radius = (m.panel_radius - m.border).max(0.);
         let body_radius = (m.panel_radius - m.border.max(m.splitter_reach)).max(0.);
-        let (line, line_alpha) = t.line();
         // This paint and AppKit share one placement. The background canvas
         // paints first, after the render below has resolved the panel rects.
         let native_geometry = Rc::new(OnceCell::<NativePanelGeometry>::new());
@@ -3572,6 +3580,12 @@ impl Editor {
             )
             .on_mouse_move_all({
                 let listener = cx.listener(|this, (e, phase): &(MouseMoveEvent, DispatchPhase), _, cx| {
+                    if *phase == DispatchPhase::Capture
+                        && this.cancelled_press && e.pressed_button.is_some()
+                    {
+                        cx.stop_propagation();
+                        return;
+                    }
                     // An already-pressed shell gesture owns motion even over
                     // a panel whose own pointer handlers consume the bubble.
                     if (*phase == DispatchPhase::Capture) != this.gesture.is_some() {
@@ -3673,6 +3687,17 @@ impl Editor {
             })
             .on_mouse_up_all({
                 let listener = cx.listener(|this, e: &MouseUpEvent, _, cx| {
+                    if e.button == MouseButton::Right && this.cancelled_press {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if e.button != MouseButton::Left {
+                        return;
+                    }
+                    if std::mem::take(&mut this.cancelled_press) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if let Some(Gesture::Area(drag)) = &mut this.gesture {
                         drag.at = e.position;
                         if drag.moved {
@@ -3689,22 +3714,37 @@ impl Editor {
                     this.end_gesture(Some(e.position), cx);
                 });
                 move |e: &MouseUpEvent, phase, _, w, cx| {
-                    if phase == DispatchPhase::Capture && e.button == MouseButton::Left {
+                    if phase == DispatchPhase::Capture {
                         listener(e, w, cx);
                     }
                 }
             })
-            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                crate::input::noted();
-                // A drag still in flight (its release never came) ends where
-                // it showed before this press is handled, never on it.
-                if this.gesture.is_some() {
-                    this.end_gesture(None, cx);
+            .on_mouse_down_all({
+                let listener = cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                    crate::input::noted();
+                    if e.button == MouseButton::Right
+                        && (this.gesture.is_some() || this.cancelled_press)
+                    {
+                        this.cancel_gesture(cx);
+                        this.cancelled_press = true;
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if e.button == MouseButton::Left {
+                        this.cancelled_press = false;
+                        // A release that never came ends where the drag showed.
+                        this.end_gesture(None, cx);
+                    }
+                    if this.ringed_panel.take().is_some() {
+                        cx.notify();
+                    }
+                });
+                move |e, phase, _, window, cx| {
+                    if phase == DispatchPhase::Capture {
+                        listener(e, window, cx);
+                    }
                 }
-                if this.ringed_panel.take().is_some() {
-                    cx.notify();
-                }
-            }))
+            })
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
                 if e.keystroke.key == "escape" {
                     this.cancel_gesture(cx);
@@ -3884,9 +3924,8 @@ impl Editor {
                     tint(c.panel, t.translucency.panel)
                 });
             }
-            // A panel may supply its own header content (viewer: pop-ups, no
-            // title; timeline: transport). The shell keeps the tab strip only
-            // when the group has more than one tab.
+            // Most custom headers supply a solo title. The Viewer
+            // deliberately has none, and the native Scopes header is tools only.
             let own_ground = self
                 .integration
                 .as_ref()
@@ -3919,10 +3958,6 @@ impl Editor {
                     (is_viewer && native) || own_ground || header_offset > 0.,
                     |h| h.bg(tint(c.panel, t.translucency.panel)),
                 )
-                .when(!is_viewer, |h| {
-                    h.border_b(px(m.border))
-                        .border_color(tint(line, line_alpha))
-                })
                 // The header's empty area moves the whole stack; a tab moves one panel.
                 .on_mouse_down(
                     MouseButton::Left,
@@ -3950,7 +3985,7 @@ impl Editor {
                         this.tab_menu(&menu_header, e.position, cx);
                     }),
                 );
-            if custom.is_some() && !multi {
+            if custom.is_some() && !multi && id != "scopes" {
                 header = header.px(px(0.));
             }
             // The strip stands as far in from the panel's edge as its tabs
@@ -3964,7 +3999,7 @@ impl Editor {
                     .pr(px(t.space.hair))
                     .gap(px(t.space.xs));
             }
-            if multi || custom.is_none() {
+            if shell_title {
                 // Quiet text tabs (language §9): the active title in `text`, the
                 // rest in `muted`; a pill appears only on hover. The whole tab is
                 // the drag handle. A single panel shows its title the same way.
@@ -4231,7 +4266,7 @@ impl Editor {
                                 })
                                 .child(crate::symbol::symbol(
                                     "xmark",
-                                    m.symbol_inline - 3.,
+                                    (m.symbol_inline - 5.).max(8.),
                                     crate::symbol::Weight::Semibold,
                                     c.secondary,
                                     w,
@@ -4288,7 +4323,7 @@ impl Editor {
                     let strip = div()
                         .id(format!("tab-strip-{}-{}", p.dock, p.group))
                         .relative()
-                        .w(px(viewport))
+                        .w(px(clip_width))
                         .min_w(px(0.))
                         .flex_shrink(1.)
                         .overflow_hidden()
@@ -4398,6 +4433,12 @@ impl Editor {
                         })),
                 );
             }
+            let ext_actions = self
+                .integration
+                .as_ref()
+                .map(|i| i.panel_header_actions(&id, cx))
+                .unwrap_or_default();
+            let has_custom = custom.is_some();
             if let Some(custom) = custom {
                 header = header.child(
                     div()
@@ -4419,7 +4460,71 @@ impl Editor {
                         .h_full()
                         .child(custom),
                 );
-            } else if !is_viewer {
+            }
+            if !ext_actions.is_empty() {
+                let mut strip = div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(t.space.hair))
+                    .when(!has_custom, |d| d.ml_auto());
+                for action in ext_actions {
+                    let cmd = action.command.clone();
+                    let tip = action.tooltip.clone();
+                    let active = action.active;
+                    let has_label = action.label.as_ref().is_some_and(|l| !l.is_empty());
+                    let mut btn = div()
+                        .id(SharedString::from(format!("ext-hdr-{}-{}", id, action.id)))
+                        .role(Role::Button)
+                        .aria_label(tip.clone())
+                        .h(px(m.hit))
+                        .when(!has_label, |d| d.w(px(m.hit)))
+                        .when(has_label, |d| d.px(px(t.space.sm)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(t.space.hair))
+                        .rounded(px(m.control_radius))
+                        .when(active, |d| {
+                            d.bg(rgb(c.selected_fill)).text_color(rgb(c.accent))
+                        })
+                        .when(!active, |d| d.text_color(rgb(c.secondary)))
+                        .when(!dragging, |d| {
+                            d.tooltip(tooltip(&t, &tip))
+                                .hover_style(|s| s.bg(rgb(c.hover)).text_color(rgb(c.text)))
+                        })
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |this, _, _, _| {
+                            if let Some(host) = &this.host {
+                                host.borrow().send_command(&cmd, vec![]);
+                            }
+                        }));
+                    if let Some(icon) = &action.icon {
+                        btn = btn.child(crate::symbol::symbol(
+                            icon,
+                            m.symbol_inline,
+                            crate::symbol::Weight::Medium,
+                            if active { c.accent } else { c.secondary },
+                            w,
+                        ));
+                    }
+                    if let Some(label) = &action.label
+                        && !label.is_empty()
+                    {
+                        btn = btn.child(
+                            div()
+                                .text_size(px(t.typography.label))
+                                .font_family(pm_design::TEXT_FONT)
+                                .font_weight(FontWeight::MEDIUM)
+                                .whitespace_nowrap()
+                                .child(label.clone()),
+                        );
+                    }
+                    strip = strip.child(btn);
+                }
+                header = header.child(strip);
+            }
+            if !has_custom && !is_viewer {
                 // The original app's “…” button: this panel's menu (Add Panel
                 // as Tab is in it).
                 let options_group: SharedString = format!("options-{}-{}", p.dock, p.group).into();
@@ -7973,6 +8078,54 @@ mod tests {
         });
         cx.simulate_mouse_up(at((from.0 + 6., from.1)), gpui::MouseButton::Left, drag_none());
         view.read_with(cx, |v, _| assert_eq!(v.layout, before));
+    }
+
+    #[gpui::test]
+    fn right_click_cancels_a_dock_tab_drag_and_a_splitter_resize(cx: &mut TestAppContext) {
+        use gpui::MouseButton;
+
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
+        cx.run_until_parked();
+        let before = view.read_with(cx, |v, _| v.layout.clone());
+        let writes = view.read_with(cx, |v, _| v.outbox.len());
+        let from = view.read_with(cx, |v, _| tab_middle(v, "inspector"));
+        let target = view.read_with(cx, |v, _| stack_rect(v, "assets"));
+        let to = (target.x + target.w / 2., target.y + target.h * 0.9);
+        let cancel = |cx: &mut gpui::VisualTestContext, at| {
+            cx.simulate_mouse_down(at, MouseButton::Right, drag_none());
+            cx.simulate_mouse_up(at, MouseButton::Right, drag_none());
+            cx.simulate_mouse_move(at, MouseButton::Left, drag_none());
+            cx.simulate_mouse_up(at, MouseButton::Left, drag_none());
+        };
+        press(cx, from);
+        pull(cx, from, to);
+        assert!(view.read_with(cx, |v, _| v.dragging_panel()));
+        cancel(cx, at(to));
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert_eq!(v.layout, before);
+            assert_eq!(v.outbox.len(), writes);
+        });
+
+        let d = view.read_with(cx, |v, _| {
+            v.geometry.dividers.iter().find(|d| !d.horizontal).unwrap().clone()
+        });
+        let from = (d.rect.x + d.rect.w / 2., d.rect.y + d.rect.h / 2.);
+        let to = (from.0 + 50., from.1);
+        press(cx, from);
+        pull(cx, from, to);
+        view.read_with(cx, |v, _| {
+            assert!(v.resize_live);
+            assert!(v.layout != before);
+        });
+        cancel(cx, at(to));
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert!(!v.resize_live);
+            assert_eq!(v.layout, before);
+            assert_eq!(v.outbox.len(), writes);
+        });
     }
 
     /// Each kind of drop (a tab position, a column position beside a panel,

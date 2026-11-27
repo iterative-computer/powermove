@@ -8,77 +8,91 @@ use pm_scene3d::{
     to_model,
 };
 use serde_json::{Value, json};
-fn composition(p: &Published) -> Result<Value> {
-    let root = p.snapshot.root().ok_or_else(|| invalid("No project"))?;
-    from_model(
-        &pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())
-            .ok_or_else(|| invalid("No composition"))?
-            .to_value(),
-    )
-    .map_err(Into::into)
+pub(crate) fn node_str(node: &pm_model::Node) -> Option<&str> {
+    pm_eval::node::string(Some(node))?.as_str()
 }
-/// Whether the open composition has a 3D layer (`schema::role`), read on
-/// the document tree.
-fn has_3d_layer(p: &Published) -> bool {
-    let Some(comp) = p
-        .snapshot
-        .root()
-        .and_then(|root| pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref()))
-    else {
-        return false;
+pub(crate) fn node_bool(node: &pm_model::Node) -> Option<bool> {
+    match node.kind() {
+        pm_model::NodeKind::Bool(value) => Some(*value),
+        _ => None,
+    }
+}
+pub(crate) fn composition(p: &Published) -> Result<&pm_model::Node> {
+    let root = p.snapshot.root().ok_or_else(|| invalid("No project"))?;
+    pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())
+        .ok_or_else(|| invalid("No composition"))
+}
+
+pub(crate) fn layer_by_id<'a>(
+    comp: &'a pm_model::Node,
+    id: &str,
+) -> Option<(usize, &'a pm_model::Node)> {
+    pm_kernel::model::layers_of(comp)
+        .enumerate()
+        .find(|(_, layer)| layer.get("id").and_then(node_str) == Some(id))
+}
+
+pub(crate) fn layer_json(layer: &pm_model::Node) -> Result<Value> {
+    let mut fields = pm_scene3d::node_fields(
+        layer,
+        &["id", "type", "name", "from", "lock", "p", "locked_intent"],
+    );
+    if let Some(d) = layer.get("d") {
+        fields.insert(
+            "d",
+            pm_model::Value::Object(pm_scene3d::node_fields(d, &["definition", "data"])),
+        );
+    }
+    Ok(from_model(&pm_model::Value::Object(fields))?)
+}
+
+fn selected(p: &Published) -> Result<Value> {
+    let [id] = p.selection.layers() else {
+        return Err(invalid("Choose one 3D layer"));
     };
-    let Some(pm_model::NodeKind::Array(layers)) = comp.get("layers").map(pm_model::Node::kind)
-    else {
-        return false;
-    };
-    layers.iter().any(|layer| {
-        let definition = layer
-            .get("d")
-            .and_then(|d| d.get("definition"))
-            .map(pm_model::Node::kind);
-        matches!(definition, Some(pm_model::NodeKind::String(s))
-            if [schema::OBJECT, schema::LIGHT, schema::CAMERA]
-                .iter()
-                .any(|d| s.as_str() == Some(*d)))
+    let (_, layer) =
+        layer_by_id(composition(p)?, id).ok_or_else(|| invalid("Layer disappeared"))?;
+    layer_json(layer)
+}
+fn first_camera(comp: &pm_model::Node) -> Option<&pm_model::Node> {
+    pm_kernel::model::layers_of(comp).find(|layer| {
+        pm_scene3d::layer_role(layer) == Some(Role::Camera)
+            && layer.get("on").and_then(node_bool) != Some(false)
     })
 }
-fn selected(p: &Published) -> Result<Value> {
-    if p.selection.layers().len() != 1 {
-        return Err(invalid("Choose one 3D layer"));
-    }
-    composition(p)?["layers"]
-        .as_array()
-        .and_then(|layers| layers.iter().find(|l| l["id"] == p.selection.layers()[0]))
-        .cloned()
-        .ok_or_else(|| invalid("Layer disappeared"))
-}
+
 pub(crate) fn orthographic(p: &Published) -> Result<bool> {
-    Ok(composition(p)?["layers"]
-        .as_array()
-        .ok_or_else(|| invalid("No layers"))?
-        .iter()
-        .find(|l| schema::role(l) == Some(Role::Camera) && l["on"] != false)
-        .is_some_and(|l| l["d"]["data"]["camera"]["projection"] == "orthographic"))
+    Ok(first_camera(composition(p)?)
+        .and_then(|l| l.get("d")?.get("data")?.get("camera")?.get("projection"))
+        .and_then(node_str)
+        == Some("orthographic"))
 }
 pub(crate) fn allow_transform(p: &Published, action: &str) -> Result<()> {
     let comp = composition(p)?;
-    let layers = comp["layers"]
-        .as_array()
-        .ok_or_else(|| invalid("No layers"))?;
     for id in p.selection.layers() {
-        let l = layers
-            .iter()
-            .find(|l| l["id"] == *id)
-            .ok_or_else(|| invalid("Layer disappeared"))?;
-        let role = schema::role(l).ok_or_else(|| invalid("Not available for this layer."))?;
-        let kind = l["d"]["data"]["light"]["type"].as_str();
-        if l["lock"] == true
+        let (_, l) = layer_by_id(comp, id).ok_or_else(|| invalid("Layer disappeared"))?;
+        let locked = l.get("lock").and_then(node_bool) == Some(true);
+        if l.get("type").and_then(node_str) == Some("null")
+            && l.get("threeD").and_then(node_bool) == Some(true)
+        {
+            if locked {
+                return Err(invalid("Layer is locked"));
+            }
+            continue;
+        }
+        let role =
+            pm_scene3d::layer_role(l).ok_or_else(|| invalid("Not available for this layer."))?;
+        let kind = l
+            .get("d")
+            .and_then(|d| d.get("data")?.get("light")?.get("type"))
+            .and_then(node_str);
+        if locked
             || (role == Role::Camera && action == "scale")
             || (role == Role::Light
-                && ((kind == Some("sun") && action != "rotate")
+                && ((kind == Some("sun") && action == "scale")
                     || (kind == Some("point") && action != "move")))
         {
-            return Err(invalid(if l["lock"] == true {
+            return Err(invalid(if locked {
                 "Layer is locked"
             } else {
                 "Not available for this layer."
@@ -89,36 +103,21 @@ pub(crate) fn allow_transform(p: &Published, action: &str) -> Result<()> {
 }
 pub(crate) fn inspector(
     p: &Published,
-    comp: &Value,
+    fps: f64,
+    index: usize,
     l: &Value,
     time: f64,
     mirror: &mut QueryMirror,
 ) -> Result<Value> {
-    let Some(role) = schema::role(l) else {
-        if l.get("native3dUpgradeDiagnostic").is_some() {
-            return Ok(
-                json!({"id":l["id"],"error":"This 3D layer couldn’t be upgraded.","diagnostic":l["native3dUpgradeDiagnostic"]}),
-            );
-        }
-        return Ok(Value::Null);
-    };
+    let role = schema::role(l).ok_or_else(|| invalid("Choose a 3D layer"))?;
     let data = &l["d"]["data"];
     let mut rows = fields::catalog(role.key(), data);
-    let index = comp["layers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .position(|a| a["id"] == l["id"])
-        .unwrap();
     for f in &mut rows {
         let c = fields::channel(data, f.channel.as_deref().unwrap());
         f.value=from_model(&mirror.queries().query(&to_model(&json!({"op":"evP","comp":p.snapshot.open_comp(),"open":p.snapshot.open_comp(),"layer":index,"t":time,"key":f.channel,"prop":c}))).map_err(|e|invalid(e.to_string()))?)?;
         f.animated = c["kf"].as_array().is_some_and(|k| !k.is_empty());
-        let local = ((time - l["from"].as_f64().unwrap_or(0.))
-            * comp["fps"].as_f64().unwrap_or(30.))
-        .round()
-            / comp["fps"].as_f64().unwrap_or(30.);
-        let half = 0.5 / comp["fps"].as_f64().unwrap_or(30.);
+        let local = ((time - l["from"].as_f64().unwrap_or(0.)) * fps).round() / fps;
+        let half = 0.5 / fps;
         f.keyed = c["kf"].as_array().is_some_and(|k| {
             k.iter()
                 .any(|k| k["t"].as_f64().is_some_and(|t| (t - local).abs() < half))
@@ -132,7 +131,7 @@ pub(crate) fn inspector(
 pub fn add_menu() -> Value {
     json!([
     {"id":"box","label":"Cube"},{"id":"sphere","label":"Sphere"},{"id":"plane","label":"Plane"},{"id":"cylinder","label":"Cylinder"},{"id":"cone","label":"Cone"},{"id":"torus","label":"Torus"},{"id":"capsule","label":"Capsule"},{"id":"icosahedron","label":"Icosphere"},
-    {"id":"import","label":"Import 3D Model…"},{"id":"area","label":"Softbox"},{"id":"spot","label":"Spotlight"},{"id":"point","label":"Bulb"},{"id":"sun","label":"Sun"},{"id":"camera","label":"Camera"}])
+    {"id":"import","label":"Import 3D Model…"},{"id":"area","label":"Softbox"},{"id":"spot","label":"Spotlight"},{"id":"point","label":"Bulb"},{"id":"sun","label":"Sun"},{"id":"camera","label":"Camera"},{"id":"null","label":"3D Null"}])
 }
 pub fn shots() -> Value {
     json!([
@@ -147,56 +146,63 @@ pub fn shots() -> Value {
 fn contains(
     comp: &str,
     target: &str,
-    comps: &Value,
+    comps: &pm_model::Node,
     seen: &mut std::collections::HashSet<String>,
 ) -> bool {
     if !seen.insert(comp.into()) {
         return false;
     }
-    comps[comp]["layers"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|l| {
-            l["id"] == target
+    comps.get(comp).is_some_and(|comp| {
+        pm_kernel::model::layers_of(comp).any(|l| {
+            l.get("id").and_then(node_str) == Some(target)
                 || [
-                    l["comp"].as_str(),
-                    l["compId"].as_str(),
-                    l["d"]["data"]["object"]["material"]["screen"].as_str(),
+                    l.get("comp"),
+                    l.get("compId"),
+                    l.get("d")
+                        .and_then(|d| d.get("data")?.get("object")?.get("material")?.get("screen")),
                 ]
                 .into_iter()
                 .flatten()
+                .filter_map(node_str)
                 .any(|c| contains(c, target, comps, seen))
         })
+    })
 }
 pub(crate) fn screen_options(p: &Published, target: &str) -> Result<Vec<Value>> {
-    let root = from_model(
-        &p.snapshot
-            .root()
-            .ok_or_else(|| invalid("No project"))?
-            .to_value(),
-    )?;
+    let root = p.snapshot.root().ok_or_else(|| invalid("No project"))?;
+    let comps = root
+        .get("comps")
+        .ok_or_else(|| invalid("No compositions"))?;
     let mut out = vec![json!({"v":null,"label":"None","disabled":false})];
-    for (id, comp) in root["comps"]
-        .as_object()
-        .ok_or_else(|| invalid("No compositions"))?
-    {
-        let disabled = p.snapshot.open_comp().as_deref() == Some(id)
-            || contains(id, target, &root["comps"], &mut Default::default());
-        out.push(json!({"v":id,"label":comp["name"].as_str().unwrap_or(""),"disabled":disabled,"detail":if disabled {Some("A composition can’t play inside itself.")}else{None}}));
+    let open = p.snapshot.open_comp();
+    for (id, comp) in named_compositions(comps) {
+        let disabled =
+            open.as_deref() == Some(id) || contains(id, target, comps, &mut Default::default());
+        let name = comp.get("name").and_then(node_str).unwrap_or("");
+        out.push(json!({"v":id,"label":name,"disabled":disabled,"detail":if disabled {Some("A composition can’t play inside itself.")}else{None}}));
     }
     Ok(out)
+}
+
+pub(crate) fn named_compositions(comps: &pm_model::Node) -> Vec<(&str, &pm_model::Node)> {
+    let pm_model::NodeKind::Object(comps) = comps.kind() else {
+        return vec![];
+    };
+    let mut entries: Vec<_> = comps
+        .iter()
+        .filter_map(|(id, comp)| Some((id.as_str()?, comp)))
+        .collect();
+    entries.sort_unstable_by_key(|(id, _)| *id);
+    entries
 }
 /// The camera's channels at `time`, in its parent's space: position and
 /// rotation (x, y, z) from the layer, its point of interest from its data.
 fn camera_channels(p: &Published, time: f64, l: &Value) -> Result<(Vec3, Vec3, Vec3)> {
     let comp = composition(p)?;
-    let index = comp["layers"]
-        .as_array()
-        .and_then(|ls| ls.iter().position(|x| x["id"] == l["id"]))
-        .ok_or_else(|| invalid("Camera not in the composition"))?;
-    let open = p.snapshot.open_comp();
     let id = l["id"].as_str().unwrap_or_default();
+    let (index, _) =
+        layer_by_id(comp, id).ok_or_else(|| invalid("Camera not in the composition"))?;
+    let open = p.snapshot.open_comp();
     let mut mirror = QueryMirror::new(p);
     let mut layer = |key: &str| -> Result<f64> {
         mirror
@@ -272,26 +278,24 @@ pub fn dof_focus_options(
     focus_distance: f64,
 ) -> Result<(String, Vec<Value>)> {
     let comp = composition(p)?;
-    let layers = comp["layers"].as_array().cloned().unwrap_or_default();
-    let cam = layers
-        .iter()
-        .find(|l| l["id"] == camera_layer)
-        .ok_or_else(|| invalid("Missing camera"))?;
-    let cam_pos = camera_channels(p, time, cam).map(|(pos, _, _)| pos).ok();
+    let (_, cam) = layer_by_id(comp, camera_layer).ok_or_else(|| invalid("Missing camera"))?;
+    let cam_pos = camera_channels(p, time, &layer_json(cam)?)
+        .map(|(pos, _, _)| pos)
+        .ok();
     let mut options = vec![json!({
         "v": "target",
         "label": "Point of Interest (Auto)",
         "detail": "Keeps focus locked to the camera's point of interest."
     })];
     let mut matched: Option<String> = None;
-    for l in &layers {
-        if schema::role(l) != Some(Role::Object)
-            || crate::fields::environment(&l["d"]["data"]).is_some()
-        {
+    for l in pm_kernel::model::layers_of(comp) {
+        if pm_scene3d::layer_role(l) != Some(Role::Object) || environment_node(l).is_some() {
             continue;
         }
-        let Some(id) = l["id"].as_str() else { continue };
-        let name = l["name"].as_str().unwrap_or("3D Object");
+        let Some(id) = l.get("id").and_then(node_str) else {
+            continue;
+        };
+        let name = l.get("name").and_then(node_str).unwrap_or("3D Object");
         let v = format!("layer:{id}");
         if focus_distance > 0.
             && matched.is_none()
@@ -372,33 +376,64 @@ fn auto_orient(p: &Published, time: f64, l: &Value, id: &str, off: bool) -> Resu
     Ok(commands)
 }
 /// The commands that store a flight (Fly navigation through the shot camera)
-/// on the active camera, as one Undo: the camera moves by the flight, and
-/// with Auto-Orient Off its rotation takes the flown heading and pitch (its
-/// roll stays); aiming at a point of interest, that point moves so the
-/// camera looks where the flight ended. `from` and `to` are world poses;
-/// the camera's channels change by the same amounts, as a gizmo drag does.
+/// on the active camera, as one Undo: the camera lands on `to` directly in
+/// its parent's space (never drifting from a stale `from` pose or non-zero
+/// `rotation.x`/`rotation.y` under two-node Auto-Orient), keeping its roll.
 pub fn fly_camera(
     p: &Published,
     time: f64,
-    from: pm_scene3d::navigation::Pose,
+    _from: pm_scene3d::navigation::Pose,
     to: pm_scene3d::navigation::Pose,
 ) -> Result<(String, Vec<Command>)> {
+    const IDENTITY: [f64; 16] = [
+        1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+    ];
     let comp = composition(p)?;
-    let l = comp["layers"]
-        .as_array()
-        .and_then(|ls| {
-            ls.iter()
-                .find(|l| schema::role(l) == Some(Role::Camera) && l["on"] != false)
-        })
-        .cloned()
+    let resolved = pm_kernel::commands::scene3d::resolve_scene(
+        &p.snapshot,
+        p.snapshot.open_comp().as_deref(),
+        time,
+    )
+    .ok();
+    let l = resolved
+        .as_ref()
+        .and_then(|r| r.camera_id.as_deref())
+        .and_then(|id| layer_by_id(comp, id).map(|(_, layer)| layer))
+        .or_else(|| first_camera(comp))
         .ok_or_else(|| invalid("This composition has no camera"))?;
+    let l = layer_json(l)?;
     if l["lock"] == true {
         return Err(invalid("The camera is locked"));
     }
     let id = l["id"]
         .as_str()
         .ok_or_else(|| invalid("Missing camera ID"))?;
-    let (position, rotation, target) = camera_channels(p, time, &l)?;
+    let (position, _rotation, _target) = camera_channels(p, time, &l)?;
+    let parent = resolved
+        .as_ref()
+        .and_then(|r| r.parent_worlds.get(id).copied())
+        .unwrap_or(IDENTITY);
+    let inv_parent = pm_scene3d::geometry::inverse(parent).unwrap_or(IDENTITY);
+    let parent_vec = |w: Vec3| -> Vec3 {
+        let a = pm_scene3d::render::gltf::math::apply(&inv_parent, w);
+        let o = pm_scene3d::render::gltf::math::apply(&inv_parent, [0.; 3]);
+        sub(a, o)
+    };
+    let current_world_pos = resolved
+        .as_ref()
+        .filter(|r| r.camera_id.as_deref() == Some(id))
+        .and_then(|r| r.camera_position);
+    let new_pos = match current_world_pos {
+        Some(cur) => {
+            let delta = parent_vec(sub(to.position, cur));
+            [
+                position[0] + delta[0],
+                position[1] + delta[1],
+                position[2] + delta[2],
+            ]
+        }
+        None => pm_scene3d::render::gltf::math::apply(&inv_parent, to.position),
+    };
     let set = |path: &str, v: f64| -> Command {
         let mut set =
             pm_kernel::commands::properties::SetProperty::new(id, path, to_model(&json!(v)), time);
@@ -406,24 +441,36 @@ pub fn fly_camera(
         set.mark_intent = true;
         pm_kernel::PropertyCommand::Set(set).into()
     };
-    let moved = sub(to.position, from.position);
     let mut commands = vec![];
     for (i, path) in ["position.x", "position.y", "position.z"]
         .iter()
         .enumerate()
     {
-        commands.push(set(path, position[i] + moved[i]));
+        commands.push(set(path, new_pos[i]));
     }
-    if l["d"]["data"]["camera"]["autoOrient"] == "off" {
-        let r = camera_rotation(sub(to.target, to.position));
-        commands.push(set("rotation.x", r[0]));
-        commands.push(set("rotation.y", r[1]));
-        let _ = rotation;
-    } else {
-        let aimed = sub(to.target, from.target);
-        for (i, key) in ["targetX", "targetY", "targetZ"].iter().enumerate() {
-            commands.push(set(&format!("camera.{key}"), target[i] + aimed[i]));
+    let forward = parent_vec(sub(to.target, to.position));
+    let r = camera_rotation(forward);
+    commands.push(set("rotation.x", r[0]));
+    commands.push(set("rotation.y", r[1]));
+    let mut mirror = QueryMirror::new(p);
+    for key in ["orientation.x", "orientation.y"] {
+        let v = mirror
+            .queries()
+            .evaluate(None, id, key, time)
+            .ok()
+            .and_then(|v| from_model(&v).ok())
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.);
+        if v.abs() > 1e-6 {
+            commands.push(set(key, 0.));
         }
+    }
+    if l["d"]["data"]["camera"]["autoOrient"] != "off" {
+        commands.push(scene(
+            p,
+            time,
+            json!({"operation":"set_camera","target":id,"patch":{"autoOrient":"off"}}),
+        ));
     }
     Ok(("Fly Camera".into(), commands))
 }
@@ -454,13 +501,21 @@ pub fn part_commands(
     name: &str,
     values: &Value,
 ) -> Result<Vec<Command>> {
-    let record = composition(p)?["layers"]
-        .as_array()
-        .and_then(|layers| layers.iter().find(|l| l["id"] == layer))
-        .cloned()
-        .ok_or_else(|| invalid("Model disappeared"))?;
+    let (_, record) =
+        layer_by_id(composition(p)?, layer).ok_or_else(|| invalid("Model disappeared"))?;
+    part_edits(&layer_json(record)?, time, layer, key, name, values)
+}
+
+fn part_edits(
+    record: &Value,
+    time: f64,
+    layer: &str,
+    key: &str,
+    name: &str,
+    values: &Value,
+) -> Result<Vec<Command>> {
     let mut out = vec![];
-    if let Some(data) = pm_scene3d::part_material::install_part(&record, key, name)? {
+    if let Some(data) = pm_scene3d::part_material::install_part(record, key, name)? {
         out.push(
             Scene3dCommand::SetData {
                 layer_id: layer.into(),
@@ -487,6 +542,61 @@ pub fn part_commands(
     Ok(out)
 }
 
+pub fn part_control(
+    p: &Published,
+    time: f64,
+    key: &str,
+    field: &str,
+    name: &str,
+    arg: Value,
+) -> Result<(String, Vec<Command>)> {
+    use pm_scene3d::part_material::{TRANSFORM_FIELDS, reset_part};
+    let record = selected(p)?;
+    let layer = record["id"]
+        .as_str()
+        .ok_or_else(|| invalid("Missing layer ID"))?;
+    let fallback = format!("Part {}", key.replace('_', "."));
+    let name = if name.is_empty() {
+        record["d"]["data"]["object"]["parts"][key]["name"]
+            .as_str()
+            .unwrap_or(&fallback)
+    } else {
+        name
+    };
+    if field == "reset" {
+        if !arg.is_null() && arg != true {
+            return Err(invalid("Expected a reset"));
+        }
+        let commands = reset_part(&record, key)?
+            .into_iter()
+            .map(|data| {
+                Scene3dCommand::SetData {
+                    layer_id: layer.into(),
+                    data: to_model(&data),
+                }
+                .into()
+            })
+            .collect();
+        return Ok((format!("Reset {name}"), commands));
+    }
+    let (_, label) = TRANSFORM_FIELDS
+        .iter()
+        .find(|(property, _)| *property == field)
+        .ok_or_else(|| invalid("Unknown part property"))?;
+    let label = if field == "visible" {
+        let visible = arg
+            .as_bool()
+            .ok_or_else(|| invalid("Expected visibility"))?;
+        format!("{} {name}", if visible { "Show" } else { "Hide" })
+    } else {
+        format!("Part {label}")
+    };
+    Ok((
+        label,
+        part_edits(&record, time, layer, key, name, &json!({(field):arg}))?,
+    ))
+}
+
 pub fn select_part(layer: &str, key: Option<&str>) -> Result<pm_kernel::SelectionCall> {
     if key.is_some_and(|key| !pm_scene3d::part_material::valid_part_key(key)) {
         return Err(invalid("Choose a model part"));
@@ -509,13 +619,8 @@ pub(crate) fn commands(
     {
         let chosen = p.selection.layers().first().cloned();
         let comp = composition(p)?;
-        let layers = comp["layers"].as_array().cloned().unwrap_or_default();
-        let role_of = |id: &str| {
-            layers
-                .iter()
-                .find(|l| l["id"] == id)
-                .and_then(schema::role)
-        };
+        let role_of =
+            |id: &str| layer_by_id(comp, id).and_then(|(_, layer)| pm_scene3d::layer_role(layer));
         return match key {
             "preset" => {
                 let preset = arg.as_str().ok_or_else(|| invalid("Choose a light preset"))?;
@@ -575,6 +680,10 @@ pub(crate) fn commands(
     }
     if id == "add" {
         let kind = arg.as_str().ok_or_else(|| invalid("Invalid layer kind"))?;
+        if kind == "null" {
+            let (label, commands, _) = add_layer(p, time, "null", &pm_kernel::new_id("null"))?;
+            return Ok((label, commands));
+        }
         let args = match kind {
             "camera" => json!({"operation":"add_camera"}),
             "area" | "spot" | "point" | "sun" => {
@@ -618,21 +727,12 @@ pub(crate) fn commands(
     }
     if let Some(control) = id.strip_prefix("part.") {
         if let Some((key, field)) = control.split_once('.')
-            && let Some((_, label)) = pm_scene3d::part_material::TRANSFORM_FIELDS
-                .iter()
-                .find(|(property, _)| *property == field)
+            && (field == "reset"
+                || pm_scene3d::part_material::TRANSFORM_FIELDS
+                    .iter()
+                    .any(|(property, _)| *property == field))
         {
-            let record = selected(p)?;
-            let layer = record["id"]
-                .as_str()
-                .ok_or_else(|| invalid("Missing layer ID"))?;
-            let name = record["d"]["data"]["object"]["parts"][key]["name"]
-                .as_str()
-                .unwrap_or("");
-            return Ok((
-                format!("Part {label}"),
-                part_commands(p, time, layer, key, name, &json!({(field):arg}))?,
-            ));
+            return part_control(p, time, key, field, "", arg);
         }
         return crate::extrude::part_commands(p, time, control, arg);
     }
@@ -826,16 +926,72 @@ pub(crate) fn commands(
         }
         (Role::Camera, "dof.enabled") => {
             let on = arg.as_bool().ok_or_else(|| invalid("Expected checkbox"))?;
-            let f_stop = if on { 2.8 } else { 0.0 };
-            let mut set = pm_kernel::commands::properties::SetProperty::new(
-                target,
-                "camera.fStop",
-                to_model(&json!(f_stop)),
-                time,
-            );
-            set.preserve_hand_edits = false;
-            set.mark_intent = true;
-            return Ok(("Depth of Field".into(), vec![pm_kernel::PropertyCommand::Set(set).into()]));
+            let set = |path: &str, v: f64| -> Command {
+                let mut set = pm_kernel::commands::properties::SetProperty::new(
+                    target,
+                    path,
+                    to_model(&json!(v)),
+                    time,
+                );
+                set.preserve_hand_edits = false;
+                set.mark_intent = true;
+                pm_kernel::PropertyCommand::Set(set).into()
+            };
+            let has_blur_channel = l["d"]["data"]["camera"]["p"].get("blur").is_some();
+            if on {
+                let existing_focus = l["d"]["data"]["camera"]["p"]["focusDistance"]["v"]
+                    .as_f64()
+                    .unwrap_or(0.);
+                let focus_dist = if existing_focus > 0.05 {
+                    existing_focus
+                } else {
+                    // Focus on the first visible 3D object or the composition
+                    // center (origin) so turning DoF on immediately lands near
+                    // the subject.
+                    let (cam_pos, _, _) =
+                        camera_channels(p, time, &l).unwrap_or(([0., 0., 6.], [0.; 3], [0.; 3]));
+                    let mut subject = [0., 0., 0.];
+                    if let Ok(comp) = composition(p) {
+                        for item in pm_kernel::model::layers_of(comp) {
+                            if pm_scene3d::layer_role(item) == Some(Role::Object)
+                                && environment_node(item).is_none()
+                                && let Some(oid) = item.get("id").and_then(node_str)
+                                && let Ok(op) = object_position(p, time, oid)
+                            {
+                                subject = op;
+                                break;
+                            }
+                        }
+                    }
+                    let d = ((subject[0] - cam_pos[0]).powi(2)
+                        + (subject[1] - cam_pos[1]).powi(2)
+                        + (subject[2] - cam_pos[2]).powi(2))
+                    .sqrt()
+                    .max(0.5);
+                    (d * 100.).round() / 100.
+                };
+                if !has_blur_channel {
+                    return Ok((
+                        "Depth of Field".into(),
+                        vec![scene(
+                            p,
+                            time,
+                            json!({"operation":"set_camera","target":target,"patch":{"p":{"blur":35.0,"fStop":0.0,"focusDistance":focus_dist}}}),
+                        )],
+                    ));
+                }
+                let mut cmds = vec![set("camera.blur", 35.0), set("camera.fStop", 0.0)];
+                if existing_focus <= 0.05 {
+                    cmds.push(set("camera.focusDistance", focus_dist));
+                }
+                return Ok(("Depth of Field".into(), cmds));
+            } else {
+                let mut cmds = vec![set("camera.fStop", 0.0)];
+                if has_blur_channel {
+                    cmds.push(set("camera.blur", 0.0));
+                }
+                return Ok(("Depth of Field".into(), cmds));
+            }
         }
         (Role::Camera, "dof.focusTarget") => {
             let choice = arg.as_str().ok_or_else(|| invalid("Choose a focus target"))?;
@@ -1125,6 +1281,7 @@ pub fn new_menu() -> Vec<(&'static str, &'static str)> {
         ("point", "Bulb"),
         ("sun", "Sun"),
         ("camera", "Camera"),
+        ("null", "3D Null"),
         ("", ""),
         ("sky", "Sky"),
         ("fog", "Fog Volume"),
@@ -1231,9 +1388,49 @@ impl pm_scene3d::geometry::AssetGeometry for RetainedBounds {
         })
     }
 }
+pub(crate) fn setup_layers(comp: &pm_model::Node) -> Result<Vec<Value>> {
+    pm_kernel::model::layers_of(comp)
+        .map(|layer| {
+            let text = |key| layer.get(key).and_then(node_str);
+            let mut row = json!({"id":text("id"),"name":text("name"),"type":text("type")});
+            if let Some(role) = pm_scene3d::layer_role(layer) {
+                row["d"]["definition"] = json!(role.definition());
+            }
+            if let Some(object) = layer.get("d").and_then(|d| d.get("data")?.get("object")) {
+                let mut info = json!({});
+                for kind in ["world", "fog", "terrain", "scatter"] {
+                    if let Some(data) = object.get(kind)
+                        && matches!(data.kind(), pm_model::NodeKind::Object(_))
+                    {
+                        info[kind] = if kind == "world" {
+                            from_model(&data.to_value())?
+                        } else {
+                            json!({})
+                        };
+                    }
+                }
+                if let Some(primitive) = object
+                    .get("source")
+                    .and_then(|s| s.get("primitive"))
+                    .and_then(node_str)
+                {
+                    info["source"]["primitive"] = json!(primitive);
+                }
+                row["d"]["data"]["object"] = info;
+            }
+            if let Some(intent) = layer.get("locked_intent")
+                && environment_node(layer) == Some("world")
+            {
+                row["locked_intent"] = from_model(&intent.to_value())?;
+            }
+            Ok(row)
+        })
+        .collect()
+}
+
 pub fn set_up_studio(p: &Published, time: f64) -> Result<(String, Vec<Command>)> {
     let comp = composition(p)?;
-    let layers = comp["layers"].as_array().cloned().unwrap_or_default();
+    let layers = setup_layers(comp)?;
     // The set frames the product: the selected model, else the first model
     // that isn't an environment or a flat plane (a floor would make the set
     // the size of the floor).
@@ -1315,43 +1512,61 @@ pub fn set_up_studio(p: &Published, time: f64) -> Result<(String, Vec<Command>)>
         .collect(),
     ))
 }
-/// What the composition's 3D summary shows, or `None` when it has no 3D layer:
-/// its saved render quality and its World's sky (`none`, a preset or `hdri`).
-pub fn scene_summary(p: &Published) -> Result<Option<Value>> {
-    // Most compositions have no 3D layer: answer that from the tree, without
-    // converting every layer (and its keyframes) to JSON first.
-    if !has_3d_layer(p) {
-        return Ok(None);
-    }
-    let comp = composition(p)?;
-    let layers = comp["layers"].as_array().cloned().unwrap_or_default();
-    if !layers.iter().any(|l| schema::role(l).is_some()) {
-        return Ok(None);
-    }
-    let quality = pm_scene3d::quality::get(&comp)?;
-    let world = layers.iter().find_map(|l| {
-        l["d"]["data"]["object"]
-            .get("world")
-            .filter(|w| w.is_object())
-    });
-    let sky = match world {
-        None => "none".to_string(),
-        Some(w) if w["mode"] == "sky" => w["preset"].as_str().unwrap_or("clear-noon").into(),
-        Some(w) => w["mode"].as_str().unwrap_or("none").into(),
-    };
-    let models = layers
-        .iter()
-        .filter(|l| {
-            schema::role(l) == Some(Role::Object) && fields::environment(&l["d"]["data"]).is_none()
+fn environment_node(layer: &pm_model::Node) -> Option<&'static str> {
+    environment_of_object(layer.get("d")?.get("data")?.get("object")?)
+}
+fn environment_of_object(object: &pm_model::Node) -> Option<&'static str> {
+    ["world", "fog", "terrain", "scatter"]
+        .into_iter()
+        .find(|k| {
+            matches!(
+                object.get(*k).map(pm_model::Node::kind),
+                Some(pm_model::NodeKind::Object(_))
+            )
         })
-        .count();
-    let lights = layers
-        .iter()
-        .filter(|l| schema::role(l) == Some(Role::Light))
-        .count();
+}
+
+/// The saved render quality, sky and layer counts for a Studio composition.
+pub fn scene_summary(p: &Published) -> Result<Option<Value>> {
+    let Ok(comp) = composition(p) else {
+        return Ok(None);
+    };
+    let mut has_role = false;
+    let mut models = 0;
+    let mut lights = 0;
+    let mut world = None;
+    let mut terrain = false;
+    for layer in pm_kernel::model::layers_of(comp) {
+        let Some(content) = layer.get("d") else {
+            continue;
+        };
+        let role = pm_scene3d::role_from_content(content);
+        has_role |= role.is_some();
+        lights += usize::from(role == Some(Role::Light));
+        let object = content.get("data").and_then(|data| data.get("object"));
+        let current_world = object
+            .and_then(|object| object.get("world"))
+            .filter(|w| matches!(w.kind(), pm_model::NodeKind::Object(_)));
+        world = world.or(current_world);
+        let environment = object.and_then(environment_of_object);
+        models += usize::from(role == Some(Role::Object) && environment.is_none());
+        terrain |= environment == Some("terrain");
+    }
+    if !has_role {
+        return Ok(None);
+    }
+    let mut policy = json!({});
+    if let Some(quality) = comp.get("studioQuality") {
+        policy["studioQuality"] = from_model(&quality.to_value())?;
+    }
+    let quality = pm_scene3d::quality::get(&policy)?;
+    let sky = world.map_or("none", |w| match w.get("mode").and_then(node_str) {
+        Some("sky") => w.get("preset").and_then(node_str).unwrap_or("clear-noon"),
+        Some(mode) => mode,
+        None => "none",
+    });
     Ok(Some(
-        json!({"quality":quality,"sky":sky,"models":models,"lights":lights,
-        "terrain":layers.iter().any(|l| fields::environment(&l["d"]["data"]) == Some("terrain"))}),
+        json!({"quality":quality,"sky":sky,"models":models,"lights":lights,"terrain":terrain}),
     ))
 }
 /// A rough per-frame export time for a quality policy at a pixel size, from
@@ -1383,7 +1598,7 @@ pub fn add_layer(
     id: &str,
 ) -> Result<(String, Vec<Command>, String)> {
     let comp = composition(p)?;
-    let layers = comp["layers"].as_array().cloned().unwrap_or_default();
+    let layers = setup_layers(comp)?;
     if let Some(species) = kind.strip_prefix("scatter:") {
         let label = NATURE
             .iter()
@@ -1482,6 +1697,60 @@ pub fn add_layer(
         .find(|(k, _)| *k == kind && !k.is_empty())
         .ok_or_else(|| invalid("Unknown 3D layer"))?
         .1;
+    if kind == "null" {
+        let mut properties = pm_model::Map::new();
+        for key in [
+            "position.x",
+            "position.y",
+            "position.z",
+            "anchor.x",
+            "anchor.y",
+            "anchor.z",
+        ] {
+            properties.insert(key, pm_model::Value::Number(0.0));
+        }
+        let mut content = pm_model::Map::new();
+        content.insert("studio3d", pm_model::Value::Bool(true));
+        let fps = pm_eval::node::number(comp.get("fps"))
+            .filter(|f| f.is_finite() && *f > 0.)
+            .unwrap_or(30.);
+        let dur = pm_eval::node::number(comp.get("dur")).unwrap_or(5.);
+        let from = (time * fps).round() / fps;
+        let duration = (dur - from).max(1.);
+        let add = pm_kernel::commands::layers::AddLayer {
+            id: id.into(),
+            layer_type: "null".into(),
+            comp: None,
+            name: Some(label.into()),
+            from: Some(from),
+            duration: Some(duration),
+            content,
+            properties,
+            color: None,
+            index: None,
+            parent: None,
+            blend: None,
+            motion_blur: None,
+            visible: None,
+            shy: None,
+            collapsed: None,
+            track: None,
+            time,
+        };
+        let set_3d = pm_kernel::LayerCommand::Set {
+            layer_id: id.into(),
+            patch: pm_kernel::commands::layers::LayerPatch {
+                three_d: Some(true),
+                time,
+                ..Default::default()
+            },
+        };
+        return Ok((
+            format!("Add {label}"),
+            vec![pm_kernel::LayerCommand::Add(Box::new(add)).into(), set_3d.into()],
+            id.into(),
+        ));
+    }
     let world = layers
         .iter()
         .find(|l| fields::environment(&l["d"]["data"]) == Some("world"))
@@ -1642,7 +1911,7 @@ const FIRST_SHAPE: f64 = 0.37;
 fn first_shape_scale(kind: &str) -> Option<f64> {
     let shape = pm_geom3d::primitives::Primitive::from_parameters(kind, &Default::default())?;
     let positions = shape.geometry().positions;
-    let eye = [3., 2., 6.];
+    let eye = [0., 0., 6.];
     let len = |a: [f64; 3]| (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
     let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
     let f = [-eye[0] / len(eye), -eye[1] / len(eye), -eye[2] / len(eye)];
@@ -1683,16 +1952,16 @@ fn key_light(layers: &[Value], id: &str) -> Vec<Value> {
         .collect()
 }
 
-/// The first object in an empty scene arrives lit (3d-studio.md's product
-/// film): a clear sky, a key softbox placed for a highlight, and a floor so
-/// it has a contact shadow and a reflection. Nothing is added
-/// when the composition already has a light or a sky.
+/// The first 3D model in a composition with no 3D layers yet arrives lit:
+/// a clear sky, a key softbox, and a floor (when no 2D layers are present).
+/// Once the composition already contains any 3D layer (model, light, camera,
+/// or world), importing another 3D model adds nothing extra.
 pub fn starter(layers: &[Value], id: &str) -> Vec<Value> {
-    let lit = layers.iter().any(|l| {
-        schema::role(l) == Some(Role::Light)
+    let has_3d = layers.iter().any(|l| {
+        schema::role(l).is_some()
             || fields::environment(&l["d"]["data"]) == Some("world")
     });
-    if lit {
+    if has_3d {
         return vec![];
     }
     // Among 2D layers the 3D layer composites in stack order over a clear
@@ -1743,31 +2012,27 @@ pub fn add_models(
     time: f64,
     assets: &[(String, String)],
 ) -> Result<(String, Vec<Command>, Vec<String>)> {
-    let root = from_model(
-        &p.snapshot
-            .root()
-            .ok_or_else(|| invalid("No project"))?
-            .to_value(),
-    )?;
+    let root = p.snapshot.root().ok_or_else(|| invalid("No project"))?;
     let mut commands = vec![];
     let mut names = vec![];
     let mut select = vec![];
     for (asset, layer) in assets {
-        let record = &root["assets"][asset];
-        if record["kind"] != "model" {
+        let record = root.get("assets").and_then(|assets| assets.get(asset));
+        let text = |key| record.and_then(|record| record.get(key)).and_then(node_str);
+        if text("kind") != Some("model") {
             continue;
         }
-        let file = record["name"].as_str().unwrap_or("3D Model").to_string();
-        let obj = record["format"].as_str().map_or_else(
+        let file = text("name").unwrap_or("3D Model");
+        let obj = text("format").map_or_else(
             || file.to_ascii_lowercase().ends_with(".obj"),
             |format| format == "obj",
         );
         // The layer is named for the model, not its file: "Bottle".
-        let name = std::path::Path::new(&file)
+        let name = std::path::Path::new(file)
             .file_stem()
             .and_then(|s| s.to_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or(&file)
+            .unwrap_or(file)
             .to_string();
         commands.push(scene(
             p,
@@ -1782,7 +2047,7 @@ pub fn add_models(
     // does: a soft sky, a key softbox and a floor for its contact shadow.
     if let Some(first) = select.first() {
         let comp = composition(p)?;
-        let layers = comp["layers"].as_array().cloned().unwrap_or_default();
+        let layers = setup_layers(comp)?;
         for args in starter(&layers, first) {
             commands.push(scene(p, time, args));
         }
@@ -1801,19 +2066,19 @@ pub fn add_models(
 pub fn scatter_options(p: &Published, scatter: &str, key: &str) -> Result<Vec<Value>> {
     let comp = composition(p)?;
     let mut out = vec![];
-    for l in comp["layers"].as_array().into_iter().flatten() {
-        if schema::role(l) != Some(Role::Object) || l["id"] == scatter {
+    for l in pm_kernel::model::layers_of(comp) {
+        let id = l.get("id").and_then(node_str);
+        if pm_scene3d::layer_role(l) != Some(Role::Object) || id == Some(scatter) {
             continue;
         }
-        let env = fields::environment(&l["d"]["data"]);
+        let env = environment_node(l);
         let ok = match key {
             "model" => env.is_none(),
             _ => env.is_none() || env == Some("terrain"),
         };
         if ok {
-            // Older projects named the hidden model "… Source".
-            let name = l["name"].as_str().unwrap_or("Model");
-            out.push(json!({"v":l["id"],"label":name.trim_end_matches(" Source")}));
+            let name = l.get("name").and_then(node_str).unwrap_or("Model");
+            out.push(json!({"v":id,"label":name.trim_end_matches(" Source")}));
         }
     }
     Ok(out)
@@ -1910,6 +2175,104 @@ mod model_part_tests {
         assert_eq!(x(1.), 6.);
         call(pm_kernel::HistoryCall::Undo.into());
         assert_eq!(x(1.), 2.);
+    }
+
+    #[test]
+    fn fly_camera_lands_on_exact_pose_despite_stale_from_and_rotation_offset() {
+        use pm_kernel::{Call, Caller, KernelActor, KernelConfig, OpenSource, Reply, Request, WriteBody};
+        use pm_scene3d::navigation::Pose;
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let project = "fly-camera-exact";
+        let root = json!({
+            "id": project,
+            "name": "Fly exact",
+            "compId": "c",
+            "w": 1920,
+            "h": 1080,
+            "fps": 30,
+            "dur": 5,
+            "assets": {},
+            "comps": {},
+            "layers": []
+        });
+        kernel
+            .open(project, OpenSource::Untitled(to_model(&root)))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let transact = |commands| {
+            let ack = kernel
+                .call(
+                    project,
+                    Request::new(
+                        Caller::native(),
+                        Call::Transact {
+                            label: None,
+                            expected_revision: None,
+                            body: WriteBody::Commands(commands),
+                        },
+                    ),
+                )
+                .wait()
+                .unwrap()
+                .unwrap();
+            assert!(!matches!(ack.reply, Reply::Throw(_)), "{:?}", ack.reply);
+        };
+        let read = || kernel.published(project).unwrap();
+        transact(vec![scene(
+            &read(),
+            0.,
+            json!({"operation":"add_camera","id":"cam"}),
+        )]);
+        // Introduce a non-zero rotation.y (like real user projects) on a two-node
+        // camera, plus pass a completely stale `from` pose to `fly_camera`.
+        let mut set_ry = pm_kernel::commands::properties::SetProperty::new(
+            "cam",
+            "rotation.y",
+            to_model(&json!(0.375)),
+            0.,
+        );
+        set_ry.preserve_hand_edits = false;
+        transact(vec![pm_kernel::PropertyCommand::Set(set_ry).into()]);
+
+        let stale_from = Pose {
+            position: [99., -42., 18.],
+            target: [-50., 20., 12.],
+            roll: 0.,
+            zoom: 1.,
+            ortho: false,
+        };
+        let to = Pose {
+            position: [-0.268, 1.15, 4.82],
+            target: [3.32, 0.45, -1.2],
+            roll: 0.,
+            zoom: 1.,
+            ortho: false,
+        };
+        let (_, cmds) = fly_camera(&read(), 0., stale_from, to).unwrap();
+        transact(cmds);
+
+        let p = read();
+        let resolved = pm_kernel::commands::scene3d::resolve_scene(
+            &p.snapshot,
+            p.snapshot.open_comp().as_deref(),
+            0.,
+        )
+        .unwrap();
+        let pos = resolved.camera_position.unwrap();
+        let target = resolved.targets["cam"];
+        let unit = |a: [f64; 3], b: [f64; 3]| {
+            let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            [d[0] / l, d[1] / l, d[2] / l]
+        };
+        let got_dir = unit(pos, target);
+        let want_dir = unit(to.position, to.target);
+        for i in 0..3 {
+            assert!((pos[i] - to.position[i]).abs() < 1e-6, "pos[{i}]: {pos:?} vs {:?}", to.position);
+            assert!((got_dir[i] - want_dir[i]).abs() < 1e-6, "dir[{i}]: {got_dir:?} vs {want_dir:?}");
+        }
     }
 
 }

@@ -5,6 +5,32 @@ import { fixture, event, find, nodes, wire } from "./helpers";
 import { projection } from "../contract";
 import type { Json } from "../../../src";
 
+test("the dock header contains the visible Effect Controls title", async () => {
+  const f = await fixture(selected());
+  try {
+    await f.root.render(
+      <EffectControls controller={f.controller} rowHeight={24} />,
+    );
+    const header = find(f.root, (p) => p["data-pm-slot"] === "header");
+    expect(
+      header.children.filter((node) => node.textContent === "Effect Controls"),
+    ).toHaveLength(1);
+    expect(
+      header.children.some((node) => node.props.label === "Add Effect"),
+    ).toBe(true);
+
+    await f.root.render(
+      <EffectControls controller={f.controller} rowHeight={24} embedded />,
+    );
+    expect(
+      nodes(f.root).some((node) => node.props["data-pm-slot"] === "header"),
+    ).toBe(false);
+  } finally {
+    await f.root.dispose();
+    await f.controller.dispose();
+  }
+});
+
 for (const [name, value] of Object.entries(states())) {
   test(`spec §3 ${name}: native op-tree and accessibility snapshot`, async () => {
     const f = await fixture(value);

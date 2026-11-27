@@ -7,7 +7,8 @@ use objc2::{
 };
 use objc2_app_kit::*;
 use objc2_foundation::{
-    NSArray, NSNotification, NSPoint, NSRange, NSRect, NSSize, NSString, NSUndoManager,
+    NSArray, NSDictionary, NSNotFound, NSNotification, NSPoint, NSRange, NSRect, NSSize,
+    NSString, NSUndoManager,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -20,6 +21,7 @@ mod selection;
 /// The tag of a field in which Escape cancels the edit; see
 /// `NativeTextSlot::set_escape_cancels`.
 pub const ESCAPE_CANCELS: isize = 0x504d_4543;
+const INPUT_TRAIT_NO: isize = 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextKind {
     Primary,
@@ -121,6 +123,7 @@ struct State {
     /// view it finds (Powermove: Space then typed instead of playing).
     armed: Cell<bool>,
     original: RefCell<String>,
+    last_font: RefCell<Option<(String, u64)>>,
     /// A composer's own undo (PM-749): its typing undo names ranges of the
     /// text typed, so a text the host sets (the field emptied after a send)
     /// clears it. ⌘Z then never reaches text the field no longer holds.
@@ -206,6 +209,50 @@ define_class!(
     struct CanvasTextView;
     unsafe impl NSObjectProtocol for CanvasTextView {}
     impl CanvasTextView {
+        // AppKit's completions can otherwise edit the invisible backing string
+        // and move its selection. Marked text still uses NSTextView's input client.
+        #[unsafe(method(inlinePredictionType))]
+        fn inline_prediction_type(&self) -> isize {
+            INPUT_TRAIT_NO
+        }
+        #[unsafe(method(textCompletionType))]
+        fn text_completion_type(&self) -> isize {
+            INPUT_TRAIT_NO
+        }
+        #[unsafe(method(autocorrectionType))]
+        fn autocorrection_type(&self) -> isize {
+            INPUT_TRAIT_NO
+        }
+        #[unsafe(method(mathExpressionCompletionType))]
+        fn math_expression_completion_type(&self) -> isize {
+            INPUT_TRAIT_NO
+        }
+        #[unsafe(method(isAutomaticTextCompletionEnabled))]
+        fn automatic_text_completion_enabled(&self) -> bool {
+            false
+        }
+        #[unsafe(method(isAutomaticSpellingCorrectionEnabled))]
+        fn automatic_spelling_correction_enabled(&self) -> bool {
+            false
+        }
+        #[unsafe(method(rangeForUserCompletion))]
+        fn range_for_user_completion(&self) -> NSRange {
+            NSRange::new(NSNotFound as usize, 0)
+        }
+        #[unsafe(method(completionsForPartialWordRange:indexOfSelectedItem:))]
+        fn completions(&self, _: NSRange, _: *mut isize) -> *mut NSArray<NSString> {
+            std::ptr::null_mut()
+        }
+        #[unsafe(method(complete:))]
+        fn complete(&self, _: Option<&AnyObject>) {}
+        #[unsafe(method(insertCompletion:forPartialWordRange:movement:isFinal:))]
+        fn insert_completion(&self, _: &NSString, _: NSRange, _: isize, _: bool) {}
+        #[unsafe(method(insertCandidateString:replacementRange:fromTextCheckingResult:))]
+        fn insert_candidate_string(&self, _: Option<&AnyObject>, _: NSRange, _: bool) {}
+        #[unsafe(method(insertCandidateTextCheckingResult:))]
+        fn insert_candidate_result(&self, _: Option<&AnyObject>) {}
+        #[unsafe(method(updateCandidates))]
+        fn update_candidates(&self) {}
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
             self.chord(event) || unsafe { msg_send![super(self), performKeyEquivalent: event] }
@@ -444,6 +491,59 @@ define_class!(
     unsafe impl NSTextFieldDelegate for TextDelegate {}
     unsafe impl NSTextViewDelegate for TextDelegate {}
     impl TextDelegate {
+        #[unsafe(method(textView:candidatesForSelectedRange:))]
+        fn candidates_for_range(&self, _: &NSTextView, _: NSRange) -> *mut NSArray {
+            if self.ivars().kind == TextKind::Canvas {
+                // An empty list suppresses AppKit's query to NSSpellChecker.
+                Retained::autorelease_return(NSArray::new())
+            } else {
+                std::ptr::null_mut()
+            }
+        }
+        #[unsafe(method(textView:candidates:forSelectedRange:))]
+        fn candidates(
+            &self,
+            _: &NSTextView,
+            candidates: &NSArray,
+            _: NSRange,
+        ) -> *const NSArray {
+            if self.ivars().kind == TextKind::Canvas {
+                Retained::autorelease_return(NSArray::new()).cast_const()
+            } else {
+                candidates
+            }
+        }
+        #[unsafe(method(textView:completions:forPartialWordRange:indexOfSelectedItem:))]
+        fn completions(
+            &self,
+            _: &NSTextView,
+            words: &NSArray<NSString>,
+            _: NSRange,
+            _: *mut isize,
+        ) -> *const NSArray<NSString> {
+            if self.ivars().kind == TextKind::Canvas {
+                Retained::autorelease_return(NSArray::new()).cast_const()
+            } else {
+                words
+            }
+        }
+        #[unsafe(method(textView:shouldSelectCandidateAtIndex:))]
+        fn should_select_candidate(&self, _: &NSTextView, _: usize) -> bool {
+            self.ivars().kind != TextKind::Canvas
+        }
+        #[unsafe(method(textView:willCheckTextInRange:options:types:))]
+        fn will_check_text(
+            &self,
+            _: &NSTextView,
+            _: NSRange,
+            options: Option<&NSDictionary>,
+            types: *mut u64,
+        ) -> *const NSDictionary {
+            if self.ivars().kind == TextKind::Canvas && !types.is_null() {
+                unsafe { *types = 0 };
+            }
+            options.map_or(std::ptr::null(), std::ptr::from_ref)
+        }
         /// The stepper beside a form number field: a step up or down, as
         /// Up and Down in the field (the host owns the value and its step).
         /// It rests in the middle of its range, so it never stops.
@@ -754,10 +854,34 @@ impl NativeTextSlot {
             v.setRichText(false);
             v.setImportsGraphics(false);
             v.setAllowsUndo(true);
-            v.setContinuousSpellCheckingEnabled(true);
+            v.setContinuousSpellCheckingEnabled(false);
+            v.setGrammarCheckingEnabled(false);
+            v.setAutomaticDataDetectionEnabled(false);
+            v.setAutomaticLinkDetectionEnabled(false);
             v.setAutomaticSpellingCorrectionEnabled(false);
             v.setAutomaticQuoteSubstitutionEnabled(false);
             v.setAutomaticDashSubstitutionEnabled(false);
+            v.setAutomaticTextCompletionEnabled(false);
+            v.setAutomaticTextReplacementEnabled(false);
+            v.setSmartInsertDeleteEnabled(false);
+            // The app queries NSSpellChecker directly for underlines and menu guesses.
+            unsafe {
+                if msg_send![&*v, respondsToSelector: objc2::sel!(setInlinePredictionType:)] {
+                    let _: () = msg_send![&*v, setInlinePredictionType: INPUT_TRAIT_NO];
+                }
+                if msg_send![&*v, respondsToSelector: objc2::sel!(setTextCompletionType:)] {
+                    let _: () = msg_send![&*v, setTextCompletionType: INPUT_TRAIT_NO];
+                }
+                if msg_send![&*v, respondsToSelector: objc2::sel!(setAutocorrectionType:)] {
+                    let _: () = msg_send![&*v, setAutocorrectionType: INPUT_TRAIT_NO];
+                }
+                if msg_send![&*v, respondsToSelector: objc2::sel!(setMathExpressionCompletionType:)] {
+                    let _: () = msg_send![&*v, setMathExpressionCompletionType: INPUT_TRAIT_NO];
+                }
+                if msg_send![&*v, respondsToSelector: objc2::sel!(setWritingToolsBehavior:)] {
+                    let _: () = msg_send![&*v, setWritingToolsBehavior: -1isize];
+                }
+            }
             v.setDrawsBackground(false);
             v.setFont(Some(&NSFont::systemFontOfSize(13.)));
             v.setTextContainerInset(NSSize::new(0., 0.));
@@ -885,6 +1009,7 @@ impl NativeTextSlot {
             selection_pending: Cell::new(None),
             armed: Cell::new(false),
             original: RefCell::new(initial.into()),
+            last_font: RefCell::new(None),
             undo: (kind == TextKind::Composer).then(|| NSUndoManager::new(mtm)),
             events: RefCell::new(Vec::new()),
             wake: RefCell::new(None),
@@ -966,6 +1091,7 @@ impl NativeTextSlot {
         }
     }
     pub fn set_font_size(&self, points: f64) {
+        self.state.last_font.take();
         let font = NSFont::systemFontOfSize(points);
         match &self.state.editor {
             Editor::Field(v) => v.setFont(Some(&font)),
@@ -1179,12 +1305,20 @@ impl NativeTextSlot {
     /// Canvas: the edited text's family and on-screen size, so input method
     /// candidates open beside the glyphs.
     pub fn set_font(&self, family: &str, points: f64) {
+        let Editor::Multiline(v) = &self.state.editor else {
+            return;
+        };
         let points = points.clamp(1., 2000.);
+        let bits = points.to_bits();
+        if self.state.last_font.borrow().as_ref().is_some_and(
+            |(last_family, last_bits)| last_family == family && *last_bits == bits,
+        ) {
+            return;
+        }
         let font = NSFont::fontWithName_size(&NSString::from_str(family), points)
             .unwrap_or_else(|| NSFont::systemFontOfSize(points));
-        if let Editor::Multiline(v) = &self.state.editor {
-            v.setFont(Some(&font));
-        }
+        *self.state.last_font.borrow_mut() = Some((family.to_owned(), bits));
+        v.setFont(Some(&font));
     }
     /// Canvas: misspelled UTF-16 ranges, from the system spell checker with
     /// this editor's document tag (so Ignore and Learn apply).
@@ -1603,4 +1737,167 @@ fn configure_editor(editor: &NSText, spell: bool) {
 fn selection_range(start: usize, end: usize, length: usize) -> NSRange {
     let (location, length) = selection::selection_range(start, end, length);
     NSRange::new(location, length)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2::rc::autoreleasepool;
+
+    const APPKIT_TEST: &str = "PM_CANVAS_TEXT_APPKIT_TEST";
+
+    #[test]
+    fn canvas_text_has_no_appkit_completions() {
+        // libtest runs tests on worker threads. The child runs AppKit on its
+        // main thread before starting the test harness.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(APPKIT_TEST, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "AppKit test exited with {}:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[ctor::ctor(unsafe)]
+    fn run_appkit_test_on_main_thread() {
+        if std::env::var_os(APPKIT_TEST).is_some() {
+            let result = std::panic::catch_unwind(|| autoreleasepool(|_| check_canvas_text()));
+            std::process::exit(i32::from(result.is_err()));
+        }
+    }
+
+    fn check_canvas_text() {
+        let mtm = MainThreadMarker::new().expect("AppKit test requires the main thread");
+        NSApplication::sharedApplication(mtm)
+            .setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
+        let host = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+        let initial = "This is tually";
+        let canvas = NativeTextSlot::new_inner(&host, TextKind::Canvas, "Canvas", initial, true);
+        let composer = NativeTextSlot::new_inner(&host, TextKind::Composer, "Composer", "", true);
+        let Editor::Multiline(view) = &canvas.state.editor else {
+            panic!("canvas uses a text view");
+        };
+        let range = NSRange::new(8, 6);
+        let selection = NSRange::new(11, 0);
+        view.setSelectedRange(selection);
+        let suggestion = NSString::from_str("actually");
+        let suggestions = NSArray::from_slice(&[&*suggestion]);
+
+        let result: Retained<AnyObject> = unsafe {
+            msg_send![class!(NSTextCheckingResult), spellCheckingResultWithRange: range]
+        };
+        let checking_results = NSArray::from_slice(&[&*result]);
+
+        assert!(!view.isContinuousSpellCheckingEnabled());
+        assert!(!view.isGrammarCheckingEnabled());
+        assert!(!view.isAutomaticDataDetectionEnabled());
+        assert!(!view.isAutomaticLinkDetectionEnabled());
+        assert!(!view.isAutomaticSpellingCorrectionEnabled());
+        assert!(!view.isAutomaticTextCompletionEnabled());
+        unsafe {
+            let trait_value: isize = msg_send![&**view, inlinePredictionType];
+            assert_eq!(trait_value, 1);
+            let trait_value: isize = msg_send![&**view, textCompletionType];
+            assert_eq!(trait_value, 1);
+            let trait_value: isize = msg_send![&**view, autocorrectionType];
+            assert_eq!(trait_value, 1);
+            let trait_value: isize = msg_send![&**view, mathExpressionCompletionType];
+            assert_eq!(trait_value, 1);
+            let completion_range: NSRange = msg_send![&**view, rangeForUserCompletion];
+            assert_eq!(completion_range, NSRange::new(NSNotFound as usize, 0));
+            let completions: Option<Retained<NSArray<NSString>>> = msg_send![
+                &**view, completionsForPartialWordRange: range,
+                indexOfSelectedItem: std::ptr::null_mut::<isize>()
+            ];
+            assert!(completions.is_none());
+
+            let _: () = msg_send![&**view, complete: Option::<&AnyObject>::None];
+            let _: () = msg_send![&**view, updateCandidates];
+            for final_choice in [false, true] {
+                let _: () = msg_send![
+                    &**view, insertCompletion: &*suggestion, forPartialWordRange: range,
+                    movement: 0isize, isFinal: final_choice
+                ];
+            }
+            let _: () = msg_send![
+                &**view, insertCandidateString: &*suggestion, replacementRange: range,
+                fromTextCheckingResult: true
+            ];
+            let _: () = msg_send![&**view, insertCandidateTextCheckingResult: &*result];
+        }
+        assert_eq!(canvas.value(), initial);
+        assert_eq!(canvas.selection(), (11, 11));
+        assert!(canvas.misspelled().contains(&(8, 14)));
+
+        for slot in [&canvas, &composer] {
+            let Editor::Multiline(view) = &slot.state.editor else {
+                panic!("the slot uses a text view");
+            };
+            let is_canvas = slot.state.kind == TextKind::Canvas;
+            let delegate = &*slot._delegate;
+            let options = NSDictionary::<NSString, NSString>::new();
+            let mut types = 1u64 << 1; // NSTextCheckingTypeSpelling
+            unsafe {
+                let candidates: Option<Retained<NSArray>> =
+                    msg_send![delegate, textView: &**view, candidatesForSelectedRange: range];
+                assert_eq!(candidates.as_deref().map(NSArray::count), is_canvas.then_some(0));
+                let candidates: Retained<NSArray> = msg_send![
+                    delegate, textView: &**view, candidates: &*checking_results,
+                    forSelectedRange: range
+                ];
+                assert_eq!(candidates.count(), usize::from(!is_canvas));
+                let completions: Retained<NSArray<NSString>> = msg_send![
+                    delegate, textView: &**view, completions: &*suggestions,
+                    forPartialWordRange: range, indexOfSelectedItem: std::ptr::null_mut::<isize>()
+                ];
+                assert_eq!(completions.count(), usize::from(!is_canvas));
+                let may_select: bool =
+                    msg_send![delegate, textView: &**view, shouldSelectCandidateAtIndex: 0usize];
+                assert_eq!(may_select, !is_canvas);
+                let returned: Retained<NSDictionary<NSString, NSString>> = msg_send![
+                    delegate, textView: &**view, willCheckTextInRange: range, options: &*options,
+                    types: &mut types as *mut u64
+                ];
+                assert!(std::ptr::eq(&*returned, &*options));
+                assert_eq!(types, if is_canvas { 0 } else { 1 << 1 });
+            }
+        }
+
+        canvas.set_font("Helvetica", 24.);
+        // AppKit can change attributes while composing between paints.
+        let alternate = NSFont::systemFontOfSize(18.);
+        view.setFont(Some(&alternate));
+        for _ in 0..3 {
+            canvas.set_font("Helvetica", 24.);
+        }
+        assert_eq!(view.font().unwrap().pointSize(), 18.);
+        assert_eq!(canvas.value(), initial);
+        assert_eq!(canvas.selection(), (11, 11));
+        canvas.set_font_size(20.);
+        canvas.set_font("Helvetica", 24.);
+        assert_eq!(view.font().unwrap().pointSize(), 24.);
+
+        // The normal NSTextInputClient entry points still take marked text.
+        unsafe {
+            let marked = NSString::from_str("日本");
+            let _: () = msg_send![
+                &**view, setMarkedText: &*marked, selectedRange: NSRange::new(2, 0),
+                replacementRange: NSRange::new(NSNotFound as usize, 0)
+            ];
+            let has_marked_text: bool = msg_send![&**view, hasMarkedText];
+            assert!(has_marked_text);
+            let committed = NSString::from_str("語");
+            let _: () = msg_send![
+                &**view, insertText: &*committed,
+                replacementRange: NSRange::new(NSNotFound as usize, 0)
+            ];
+            let has_marked_text: bool = msg_send![&**view, hasMarkedText];
+            assert!(!has_marked_text);
+            assert!(canvas.value().contains('語'));
+        }
+    }
 }

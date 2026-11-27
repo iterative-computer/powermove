@@ -13,6 +13,14 @@ use crate::canvas::{CanvasPath, CanvasTransform, TransformOp};
 use crate::js;
 use crate::shape::{CANVAS_MITER_LIMIT, MAX_RASTER_SIZE};
 
+/// Fill rule of a filled vector path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FillRule {
+    #[default]
+    NonZero,
+    EvenOdd,
+}
+
 /// Most repeater copies drawn per path.
 pub const MAX_COPIES: f64 = 256.0;
 
@@ -70,6 +78,10 @@ pub struct PathValues {
     pub repeat_y: f64,
     /// Degrees per copy.
     pub repeat_rotation: f64,
+    /// Optional compound fill group id (`p.fillGroup`, e.g. `"0"`, `"1"`).
+    pub fill_group: Option<String>,
+    /// Optional per-path fill rule (`p.fillRule`: `"evenodd"` or `"nonzero"`).
+    pub fill_rule: Option<FillRule>,
     pub vertices: Vec<Vertex>,
 }
 
@@ -94,6 +106,8 @@ impl Default for PathValues {
             repeat_x: 30.0,
             repeat_y: 0.0,
             repeat_rotation: 0.0,
+            fill_group: None,
+            fill_rule: None,
             vertices: Vec::new(),
         }
     }
@@ -355,6 +369,10 @@ pub struct PathDraw {
     pub transform: Affine,
     /// Fill alpha when the copy is filled.
     pub fill: Option<f64>,
+    /// Optional compound fill group (`p.fillGroup`).
+    pub fill_group: Option<String>,
+    /// Optional per-path fill rule (`p.fillRule`).
+    pub fill_rule: Option<FillRule>,
     pub stroke: Option<PathStroke>,
 }
 
@@ -401,10 +419,20 @@ pub struct PathLayer {
     pub traced: Vec<BezPath>,
     pub draws: Vec<PathDraw>,
     pub bounds: PathBounds,
+    /// When true (`d.compound`), contours sharing a `fillGroup` are combined
+    /// into a single fill operation so inner cutouts retain their winding /
+    /// fill-rule holes instead of painting solid on top of one another.
+    pub compound: bool,
+    /// Layer-level default fill rule (`d.fillRule`).
+    pub fill_rule: FillRule,
 }
 
 impl PathLayer {
     pub fn new(paths: &[PathNode]) -> Self {
+        Self::new_with_options(paths, false, FillRule::NonZero)
+    }
+
+    pub fn new_with_options(paths: &[PathNode], compound: bool, fill_rule: FillRule) -> Self {
         let matrices: Vec<Affine> = (0..paths.len()).map(|i| group_matrix(paths, i)).collect();
         let (mut x0, mut y0, mut x1, mut y1) = (
             f64::INFINITY,
@@ -444,6 +472,8 @@ impl PathLayer {
                     ops,
                     transform: CanvasTransform::of(&ops).affine(),
                     fill: v.fills().then(|| v.fill_alpha()),
+                    fill_group: v.fill_group.clone(),
+                    fill_rule: v.fill_rule,
                     stroke: (v.stroke_width > 0.0).then(|| PathStroke {
                         style: Stroke::new(if width.is_finite() { width } else { 1.0 })
                             .with_join(Join::Miter)
@@ -469,6 +499,8 @@ impl PathLayer {
             traced,
             draws,
             bounds,
+            compound,
+            fill_rule,
         }
     }
 

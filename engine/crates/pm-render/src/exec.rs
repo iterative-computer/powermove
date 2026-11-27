@@ -143,7 +143,9 @@ impl UniformPool {
     /// Places `data` in this frame's uniforms: a chunk and the range's
     /// start. It reaches the GPU at the next [`UniformPool::flush`].
     pub(crate) fn put(&mut self, device: &wgpu::Device, data: &[u8]) -> (wgpu::Buffer, u64) {
-        self.put_with(device, data.len() as u64, |bytes| bytes.copy_from_slice(data))
+        self.put_with(device, data.len() as u64, |bytes| {
+            bytes.copy_from_slice(data)
+        })
     }
 
     /// [`Self::put`] of `size` bytes that `write` fills in place (every
@@ -255,6 +257,7 @@ pub(crate) struct Exec<'a> {
     /// lives as long as its target is in `taken` (a motion-blur sample gives
     /// its targets back early and drops its entries).
     pub comps: Vec<RenderedComp>,
+    pub groups: Option<&'a mut crate::frame_prefix::GroupCache>,
 }
 
 /// Minimum padded effect area and retained vector bytes for a prefix trim.
@@ -306,6 +309,19 @@ pub(crate) fn comp_twins(plan: &CompPlan) -> Vec<(usize, usize)> {
         }
     }
     twins
+}
+
+fn place_group_region(r: &mut Resolved, region: Option<Region>) {
+    if let Some(g) = region {
+        r.matrix = [
+            f64::from(g.width),
+            0.0,
+            0.0,
+            f64::from(g.height),
+            f64::from(g.x),
+            f64::from(g.y),
+        ];
+    }
 }
 
 fn plan_address(plan: &CompPlan) -> usize {
@@ -531,6 +547,21 @@ impl Exec<'_> {
                         // rendering it again would draw (never a group pass:
                         // `comp_twins` lists nested compositions only).
                         let accumulate = matches!(source, Source::Accumulate(_));
+                        let cache_group = group && !accumulate && self.groups.is_some();
+                        if cache_group
+                            && let Some((target, revision)) =
+                                self.groups.as_deref_mut().and_then(|cache| {
+                                    cache.get(child, child_region, |key| {
+                                        self.shaders.can_reuse_pixels(key, &self.effects.watchdog)
+                                    })
+                                })
+                        {
+                            r.view = Some(target.view.clone());
+                            self.prepare_level2(encoder, r, &target.texture, Some(revision));
+                            r.from_fbo = true;
+                            place_group_region(r, child_region);
+                            return;
+                        }
                         let address = plan_address(child);
                         if !accumulate
                             && !self.depth_id
@@ -613,15 +644,22 @@ impl Exec<'_> {
                             r.depth = Some(ids.view.clone());
                             self.taken.push(ids);
                         }
-                        if let (true, Some(g)) = (group, region) {
-                            r.matrix = [
-                                f64::from(g.width),
-                                0.0,
-                                0.0,
-                                f64::from(g.height),
-                                f64::from(g.x),
-                                f64::from(g.y),
-                            ];
+                        place_group_region(r, child_region);
+                        if cache_group
+                            && reported
+                                == (
+                                    self.failures.len(),
+                                    self.unsupported.len(),
+                                    self.fallback_pending.len(),
+                                    self.effects.fallback.pending.len(),
+                                )
+                            && self.groups.as_deref_mut().is_some_and(|cache| {
+                                cache.keep(child, child_region, &target, revision, |key| {
+                                    self.shaders.can_reuse_pixels(key, &self.effects.watchdog)
+                                })
+                            })
+                        {
+                            return;
                         }
                         // A group pass is read only by the pass drawing this
                         // draw (never shared as a twin, `comp_twins`): that
@@ -1021,7 +1059,9 @@ impl Exec<'_> {
         target: &Target,
     ) -> Vec<Resolved> {
         if crate::composite::has_nodes(plan) {
-            return self.render_comp_nodes(encoder, plan, region, target);
+            return self
+                .render_comp_nodes(encoder, plan, region, target, None)
+                .0;
         }
         self.render_comp_with(encoder, plan, region, target, PassBlend::Over)
     }

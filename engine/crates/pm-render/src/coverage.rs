@@ -313,12 +313,21 @@ fn edges_iter(path: impl IntoIterator<Item = PathEl>, r: PixelRect, out: &mut Ve
         ts.sort_by(f64::total_cmp);
         for pair in ts.windows(2) {
             let (p, q) = (a.lerp(b, pair[0]), a.lerp(b, pair[1]));
-            let n = ((q - p).x.abs().max((q - p).y.abs()) / PIECE)
+            // Sub-segments have already been split at x0/x1 and clipped to
+            // y0..y1. Clamp before computing piece count so grazing 3D edges
+            // with off-screen vertices at ±1e9 never spin for millions of
+            // redundant clamped steps along the left or right boundary.
+            let p_clamped = Point::new(p.x.clamp(x0, x1), p.y.clamp(y0, y1));
+            let q_clamped = Point::new(q.x.clamp(x0, x1), q.y.clamp(y0, y1));
+            let n = ((q_clamped.x - p_clamped.x)
+                .abs()
+                .max((q_clamped.y - p_clamped.y).abs())
+                / PIECE)
                 .ceil()
                 .max(1.0);
-            let mut prev = fixed(p);
+            let mut prev = fixed(p_clamped);
             for i in 1..=n as usize {
-                let next = fixed(p.lerp(q, i as f64 / n));
+                let next = fixed(p_clamped.lerp(q_clamped, i as f64 / n));
                 if next[1] != prev[1] {
                     out.push([prev[0], prev[1], next[0], next[1]]);
                 }
@@ -880,5 +889,23 @@ mod tests {
                 .iter()
                 .all(|e| (e[3] - e[1]).abs() <= 64 * 16384)
         );
+    }
+
+    #[test]
+    fn grazing_offscreen_edge_subdivision_stays_bounded() {
+        // Simulates a 3D plane clipped at NEAR = 1e-6 projecting vertices to ±1e9.
+        let mut p = BezPath::new();
+        p.move_to((-1e9, 0.0));
+        p.line_to((1e9, 100.0));
+        p.line_to((1e9, 200.0));
+        p.line_to((-1e9, 200.0));
+        p.close_path();
+        let b = PixelRect::new(0, 0, 128, 128);
+        let batch = Batch::new(&[Item {
+            path: &p,
+            bounds: b,
+            at: [0, 0],
+        }]);
+        assert!(batch.edges.len() < 128, "got {} edges", batch.edges.len());
     }
 }

@@ -2103,7 +2103,7 @@ impl EngineHook for EngineJobs {
         let fps = project["fps"].as_f64().unwrap_or(30.);
         // Electron's snapshot width is a maximum: small compositions retain
         // their authored pixel grid instead of being enlarged for an agent.
-        let scale = (f64::from(request.width.clamp(160, 1280)) / w).min(1.0);
+        let scale = (f64::from(request.width.clamp(160, 8192)) / w).min(1.0);
         let width = (w * scale).round().max(2.0) as u32;
         let height = (h * scale).round().max(2.0) as u32;
         std::fs::create_dir_all(&self.cache)?;

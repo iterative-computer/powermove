@@ -51,7 +51,7 @@
 //!   generation it forms a [`TxId`]. A retry returns the stored [`Ack`]
 //!   without running again; [`Call::QueryTx`] answers a lost acknowledgement.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use pm_model::patch::{Patch, PathPart};
@@ -193,6 +193,13 @@ pub enum Call {
         comp_id: String,
         document: u64,
     },
+    /// Clears stale persisted `"missing": true` flags on effects and transitions
+    /// whose provider is now registered (matching Electron's hydrate pass).
+    ReconcileMissingDefinitions {
+        effects: BTreeSet<String>,
+        builtin_effects: BTreeSet<String>,
+        transitions: BTreeSet<String>,
+    },
     /// Lost acknowledgement: the stored ack of `txid`, if any.
     QueryTx {
         txid: TxId,
@@ -280,6 +287,13 @@ pub enum HistoryCall {
     /// a conflict returns a confirmation fact without changing the document.
     UndoWriter {
         writer: Writer,
+        keep_mine: bool,
+        label: String,
+    },
+    /// A run that reconnected can have several writers. Probe the entire
+    /// run in history order and commit all allowed inverses in one edit.
+    UndoWriters {
+        writers: Vec<Writer>,
         keep_mine: bool,
         label: String,
     },
@@ -986,11 +1000,12 @@ impl Project {
             Call::Selection(_)
                 | Call::Workspace(_)
                 | Call::Memory(_)
+                | Call::ReconcileMissingDefinitions { .. }
                 | Call::History(HistoryCall::Mark)
         );
         let before_revision = self.revision();
-        let before_mark = self.store.history_mark();
-        let before_cursor = self.store.history().applied();
+        let before_history =
+            tracks_mutation.then(|| (self.store.history_mark(), self.store.history().applied()));
         let handled = match call {
             Call::Extension(call) => {
                 let reply = self.extension(caller, call);
@@ -1100,6 +1115,31 @@ impl Project {
                 let ack = self.open_composition(caller, txid, comp_id, document);
                 Handled::reply(ack)
             }
+            Call::ReconcileMissingDefinitions {
+                effects,
+                builtin_effects,
+                transitions,
+            } => {
+                let reply = if self.entry.is_some() {
+                    Reply::Applied {
+                        revision: self.revision(),
+                        changed: false,
+                    }
+                } else {
+                    match self.store.reconcile_missing_definitions(
+                        &effects,
+                        &builtin_effects,
+                        &transitions,
+                    ) {
+                        Ok(changed) => Reply::Applied {
+                            revision: self.revision(),
+                            changed,
+                        },
+                        Err(error) => Reply::Throw(error.into()),
+                    }
+                };
+                Handled::reply(self.ack(txid, None, None, reply))
+            }
             Call::DirectWrite { ops } => Handled::reply(self.direct_write(caller, txid, ops)),
             Call::RealmFailed => self.realm_failed(caller, txid),
             Call::ExternalDone {
@@ -1109,7 +1149,7 @@ impl Project {
             } => self.external_done(txid, ticket, ok, message),
             Call::QueryTx { .. } => unreachable!("answered above"),
         };
-        if tracks_mutation
+        if let Some((before_mark, before_cursor)) = before_history
             && (before_revision != self.revision()
                 || before_mark != self.store.history_mark()
                 || before_cursor != self.store.history().applied())
@@ -1345,16 +1385,14 @@ impl Project {
     }
 
     fn select(&mut self, call: SelectionCall) -> Reply {
-        let ids = match &call {
-            SelectionCall::Layers { ids, .. } => ids.clone(),
-            SelectionCall::ToggleLayer(id) => vec![id.clone()],
-            _ => vec![],
+        let missing = match &call {
+            SelectionCall::Layers { ids, .. } => {
+                ids.iter().any(|id| !self.store.has_open_layer(id))
+            }
+            SelectionCall::ToggleLayer(id) => !self.store.has_open_layer(id),
+            _ => false,
         };
-        let present = match self.store.root() {
-            Some(root) if !ids.is_empty() => crate::model::layer_ids(root, None),
-            _ => HashSet::new(),
-        };
-        if ids.iter().any(|id| !present.contains(id)) {
+        if missing {
             return Reply::Throw(KernelError::Guard(
                 "Select existing layer IDs; no selection was changed".into(),
             ));
@@ -1809,7 +1847,12 @@ impl Project {
                 writer: target,
                 keep_mine,
                 label,
-            } => self.undo_writer(caller, target, keep_mine, &label),
+            } => self.undo_writers(caller, &[target], keep_mine, &label, None),
+            HistoryCall::UndoWriters {
+                writers,
+                keep_mine,
+                label,
+            } => self.undo_writers(caller, &writers, keep_mine, &label, None),
             HistoryCall::SquashSegments {
                 mark,
                 label,
@@ -1924,12 +1967,13 @@ impl Project {
         Handled::reply(self.ack(txid, None, None, reply))
     }
 
-    fn undo_writer(
+    fn undo_writers(
         &mut self,
         caller: Caller,
-        target: Writer,
+        targets: &[Writer],
         keep_mine: bool,
         label: &str,
+        only_entry: Option<u64>,
     ) -> Reply {
         if self.entry.is_some() {
             return Reply::Throw(KernelError::Guard(
@@ -1953,7 +1997,12 @@ impl Project {
                         .map_err(|e| e.to_string())?
                         .0;
                 }
-                if self.record_writers.get(&record.id) != Some(&target) {
+                if !self
+                    .record_writers
+                    .get(&record.id)
+                    .is_some_and(|writer| targets.contains(writer))
+                    || only_entry.is_some_and(|id| id != record.id)
+                {
                     continue;
                 }
                 let forward = record.forward.to_vec();
@@ -2027,7 +2076,11 @@ impl Project {
             true,
         ) {
             Ok((changed, _)) => {
-                self.record_writers.retain(|_, owner| *owner != target);
+                if let Some(id) = only_entry {
+                    self.record_writers.remove(&id);
+                } else {
+                    self.record_writers.retain(|_, owner| !targets.contains(owner));
+                }
                 Reply::Applied {
                     revision: self.revision(),
                     changed,

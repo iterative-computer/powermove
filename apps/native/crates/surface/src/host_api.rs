@@ -2,10 +2,11 @@
 //! command admission, durable settings and publications; this module owns no document.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 
 pub const HOST_API_VERSION: u32 = 1;
+const MAX_COMPLETED_ACKS: usize = 4096;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Identity {
@@ -110,13 +111,14 @@ pub trait KernelQueue {
     fn retire(&mut self, identity: &Identity) -> Result<(), String>;
 }
 /// Worker-only route: bounded, nonblocking, generation checked, ack journal retained.
-/// Lost acks are inspected by request ID; they are never blindly replayed as edits.
+/// Recent acks can be inspected by request ID. IDs increase within the generation,
+/// so a request cannot be replayed after its ack leaves the journal.
 pub struct HostRouter<Q> {
     identity: Identity,
     queue: Q,
     pending: BTreeMap<u64, (u64, Option<u64>, Receiver<HostAck>)>,
     acks: BTreeMap<u64, HostAck>,
-    seen: BTreeSet<u64>,
+    last_request_id: u64,
     retired: bool,
     fenced: bool,
 }
@@ -134,7 +136,7 @@ impl<Q: KernelQueue> HostRouter<Q> {
             queue,
             pending: BTreeMap::new(),
             acks: BTreeMap::new(),
-            seen: BTreeSet::new(),
+            last_request_id: 0,
             retired: false,
             fenced: false,
         })
@@ -149,17 +151,16 @@ impl<Q: KernelQueue> HostRouter<Q> {
         {
             return Err("stale host generation/version/project".into());
         }
-        if request.request_id == 0
+        if request.request_id <= self.last_request_id
             || request.request_id > 9_007_199_254_740_991
             || request.expected_revision > 9_007_199_254_740_991
             || request
                 .expected_state_revision
                 .is_some_and(|v| v > 9_007_199_254_740_991)
-            || self.seen.contains(&request.request_id)
         {
             return Err("invalid or previously submitted request ID; inspect ack".into());
         }
-        if self.pending.len() >= 256 || self.seen.len() >= 4096 {
+        if self.pending.len() >= 256 {
             return Err("host queue capacity; retire generation".into());
         }
         validate_operation(&request.operation)?;
@@ -168,7 +169,7 @@ impl<Q: KernelQueue> HostRouter<Q> {
         let revision = request.expected_revision;
         let state_revision = request.expected_state_revision;
         self.queue.enqueue(request, tx)?;
-        self.seen.insert(id);
+        self.last_request_id = id;
         self.pending.insert(id, (revision, state_revision, rx));
         Ok(())
     }
@@ -207,6 +208,9 @@ impl<Q: KernelQueue> HostRouter<Q> {
         }
         self.pending.remove(&id);
         self.acks.insert(id, ack.clone());
+        if self.acks.len() > MAX_COMPLETED_ACKS {
+            self.acks.pop_first();
+        }
         Ok(Some(ack))
     }
     pub fn retire(&mut self) -> Result<(), String> {
@@ -317,6 +321,40 @@ mod tests {
         assert!(route.enqueue(request()).is_err());
         assert_eq!(route.queue.requests.len(), 1);
     }
+    #[test]
+    fn completed_binding_requests_do_not_exhaust_a_live_realm() {
+        let mut route = route();
+        for id in 1..=4097 {
+            let mut req = request();
+            req.request_id = id;
+            req.operation = if id % 2 == 1 {
+                HostOperation::RegisterBinding {
+                    handle: "opacity".into(),
+                    channels: vec!["opacity".into()],
+                }
+            } else {
+                HostOperation::DisposeBinding {
+                    handle: "opacity".into(),
+                }
+            };
+            route.enqueue(req).unwrap();
+            let mut result = ack();
+            result.request_id = id;
+            let (_, reply) = route.queue.requests.pop().unwrap();
+            reply.try_send(result.clone()).unwrap();
+            assert_eq!(route.poll(id).unwrap(), Some(result.clone()));
+            assert_eq!(route.poll(id).unwrap(), Some(result));
+        }
+
+        assert_eq!(route.acks.len(), 4096);
+        assert!(route.poll(1).is_err());
+        assert!(
+            route.enqueue(request()).is_err(),
+            "old request must never replay"
+        );
+        assert!(route.queue.requests.is_empty());
+    }
+
     #[test]
     fn stale_generation_and_wrong_ack_never_publish() {
         let mut route = route();

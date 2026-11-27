@@ -13,21 +13,6 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
                   text
                     text "Appearance"
                 div
-        div group label="Workspace"
-          div
-            text heading
-              text "Workspace"
-          div group label="Workspace"
-            div form-group group label="Workspace"
-              div group settings.row.workspace label="After Effects Workspace"
-                div
-                  text
-                    text "After Effects Workspace"
-                  text
-                    text "Bring your saved panels and tools into Powermove with your agent."
-                div
-                  button push-button label="Bring My Workspace…"
-                    text "Bring My Workspace…"
         div group label="Playback"
           div
             text heading
@@ -58,7 +43,7 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
                     text "Reopen Last Project on Launch"
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["Bring My Workspace…"]"
+Focus: []"
 `;
 
 exports[`loading: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -74,21 +59,6 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
                   text
                     text "Appearance"
                 div
-        div group label="Workspace"
-          div
-            text heading
-              text "Workspace"
-          div group label="Workspace"
-            div form-group group label="Workspace"
-              div group settings.row.workspace label="After Effects Workspace"
-                div
-                  text
-                    text "After Effects Workspace"
-                  text
-                    text "Bring your saved panels and tools into Powermove with your agent."
-                div
-                  button push-button label="Bring My Workspace…"
-                    text "Bring My Workspace…"
         div group label="Playback"
           div
             text heading
@@ -119,7 +89,7 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
                     text "Reopen Last Project on Launch"
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["Bring My Workspace…"]"
+Focus: []"
 `;
 
 exports[`selected: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -197,21 +167,6 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
                   text
                     text "Appearance"
                 div
-        div group label="Workspace"
-          div
-            text heading
-              text "Workspace"
-          div group label="Workspace"
-            div form-group group label="Workspace"
-              div group settings.row.workspace label="After Effects Workspace"
-                div
-                  text
-                    text "After Effects Workspace"
-                  text
-                    text "Bring your saved panels and tools into Powermove with your agent."
-                div
-                  button push-button label="Bring My Workspace…"
-                    text "Bring My Workspace…"
         div group label="Playback"
           div
             text heading
@@ -242,7 +197,7 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
                     text "Reopen Last Project on Launch"
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["Bring My Workspace…"]"
+Focus: []"
 `;
 
 exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -258,21 +213,6 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
                   text
                     text "Appearance"
                 div
-        div group label="Workspace"
-          div
-            text heading
-              text "Workspace"
-          div group label="Workspace"
-            div form-group group label="Workspace"
-              div group settings.row.workspace label="After Effects Workspace"
-                div
-                  text
-                    text "After Effects Workspace"
-                  text
-                    text "Bring your saved panels and tools into Powermove with your agent."
-                div
-                  button push-button label="Bring My Workspace…"
-                    text "Bring My Workspace…"
         div group label="Playback"
           div
             text heading
@@ -303,7 +243,7 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
                     text "Reopen Last Project on Launch"
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["Bring My Workspace…"]"
+Focus: []"
 `;
 
 exports[`disabled: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -319,21 +259,6 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
                   text
                     text "Appearance"
                 div
-        div group label="Workspace"
-          div
-            text heading
-              text "Workspace"
-          div group label="Workspace"
-            div form-group group label="Workspace"
-              div group settings.row.workspace label="After Effects Workspace"
-                div
-                  text
-                    text "After Effects Workspace"
-                  text
-                    text "Bring your saved panels and tools into Powermove with your agent."
-                div
-                  button push-button label="Bring My Workspace…"
-                    text "Bring My Workspace…"
         div group label="Playback"
           div
             text heading
@@ -364,7 +289,7 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
                     text "Reopen Last Project on Launch"
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["Bring My Workspace…"]"
+Focus: []"
 `;
 
 exports[`error: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -380,21 +305,6 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
                   text
                     text "Appearance"
                 div
-        div group label="Workspace"
-          div
-            text heading
-              text "Workspace"
-          div group label="Workspace"
-            div form-group group label="Workspace"
-              div group settings.row.workspace label="After Effects Workspace"
-                div
-                  text
-                    text "After Effects Workspace"
-                  text
-                    text "Bring your saved panels and tools into Powermove with your agent."
-                div
-                  button push-button label="Bring My Workspace…"
-                    text "Bring My Workspace…"
         div group label="Playback"
           div
             text heading
@@ -425,7 +335,7 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
                     text "Reopen Last Project on Launch"
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["Bring My Workspace…"]"
+Focus: []"
 `;
 
 exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -441,21 +351,6 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
                   text
                     text "Appearance"
                 div
-        div group label="Workspace"
-          div
-            text heading
-              text "Workspace"
-          div group label="Workspace"
-            div form-group group label="Workspace"
-              div group settings.row.workspace label="After Effects Workspace"
-                div
-                  text
-                    text "After Effects Workspace"
-                  text
-                    text "Bring your saved panels and tools into Powermove with your agent."
-                div
-                  button push-button label="Bring My Workspace…"
-                    text "Bring My Workspace…"
         div group label="Playback"
           div
             text heading
@@ -486,7 +381,7 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
                     text "Reopen Last Project on Launch"
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["Bring My Workspace…"]"
+Focus: []"
 `;
 
 exports[`no-search-results: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -514,21 +409,6 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
                   text
                     text "Appearance"
                 div
-        div group label="Workspace"
-          div
-            text heading
-              text "Workspace"
-          div group label="Workspace"
-            div form-group group label="Workspace"
-              div group settings.row.workspace label="After Effects Workspace"
-                div
-                  text
-                    text "After Effects Workspace"
-                  text
-                    text "Bring your saved panels and tools into Powermove with your agent."
-                div
-                  button push-button label="Bring My Workspace…"
-                    text "Bring My Workspace…"
         div group label="Playback"
           div
             text heading
@@ -559,7 +439,7 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
                     text "Reopen Last Project on Launch"
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["Bring My Workspace…"]"
+Focus: []"
 `;
 
 exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -575,21 +455,6 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
                   text
                     text "Appearance"
                 div
-        div group label="Workspace"
-          div
-            text heading
-              text "Workspace"
-          div group label="Workspace"
-            div form-group group label="Workspace"
-              div group settings.row.workspace label="After Effects Workspace"
-                div
-                  text
-                    text "After Effects Workspace"
-                  text
-                    text "Bring your saved panels and tools into Powermove with your agent."
-                div
-                  button push-button label="Bring My Workspace…"
-                    text "Bring My Workspace…"
         div group label="Playback"
           div
             text heading
@@ -620,7 +485,7 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
                     text "Reopen Last Project on Launch"
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["Bring My Workspace…"]"
+Focus: []"
 `;
 
 exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -636,21 +501,6 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
                   text
                     text "Appearance"
                 div
-        div group label="Workspace"
-          div
-            text heading
-              text "Workspace"
-          div group label="Workspace"
-            div form-group group label="Workspace"
-              div group settings.row.workspace label="After Effects Workspace"
-                div
-                  text
-                    text "After Effects Workspace"
-                  text
-                    text "Bring your saved panels and tools into Powermove with your agent."
-                div
-                  button push-button label="Bring My Workspace…"
-                    text "Bring My Workspace…"
         div group label="Playback"
           div
             text heading
@@ -681,7 +531,7 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
                     text "Reopen Last Project on Launch"
                 div
                   button switch switch label="Reopen Last Project on Launch" value=true disabled
-Focus: ["Bring My Workspace…"]"
+Focus: []"
 `;
 
 exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `

@@ -29,6 +29,15 @@ pub struct Scene {
 }
 /// The viewer's rendered-frame cache (RGBA16F surfaces).
 const FRAME_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+fn focus_group_key(group: Option<&str>) -> u64 {
+    let Some(group) = group else {
+        return 0;
+    };
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    group.hash(&mut hash);
+    hash.finish().max(1)
+}
 /// The most output surfaces the engine keeps, of every size together. A
 /// frame finding all of them held by frames on screen or in flight takes one
 /// past it (the pool comes back as they land); twice it held is a leak.
@@ -36,6 +45,30 @@ const POOL_BOUND: usize = 11;
 /// The most a paused composition-size surface may take: half the frame
 /// cache, so it always holds two.
 pub const PAUSED_FULL_BYTES: u64 = FRAME_CACHE_BYTES / 2;
+/// Projects large enough that a speculative plan or one GPU submission
+/// can keep the viewer waiting well past its next refresh.
+const LARGE_SCENE_LAYERS: usize = 256;
+
+pub(crate) fn large_scene(scene: &Scene) -> bool {
+    pm_eval::Comp::resolve(&scene.doc, &scene.comp)
+        .is_ok_and(|comp| comp.layers().len() >= LARGE_SCENE_LAYERS)
+}
+/// Keep enough of the grant for a still at a cut, with a startup reserve
+/// for the next video when recent frames have only drawn stills or graphics.
+fn playback_cache_parts(reads_video: bool) -> (u64, u64, u64, u64, u64, u64) {
+    if reads_video {
+        (18, 15, 15, 7, 35, 10)
+    } else {
+        (4, 24, 5, 17, 36, 14)
+    }
+}
+
+/// Most playback target memory goes to the working textures that every
+/// pass needs. Mip pyramids and bindings share the rest of the allowance.
+fn playback_pool_budget(targets: u64) -> u64 {
+    (targets - targets / 8).min(96 << 20)
+}
+
 /// One viewer frame's request. The renderer's playback path, never an export.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameSpec {
@@ -290,7 +323,7 @@ impl FrameSpec {
         SAMPLED
             .lock()
             .unwrap()
-            .push((self.exact, self.moment, self.scale, request.sampling));
+            .push((scene.doc.edition(), self.exact, self.moment, self.scale, request.sampling));
         #[cfg(test)]
         MEDIA_SAMPLED
             .lock()
@@ -526,6 +559,10 @@ struct CachedFrame {
     composition: String,
     surface: Arc<ExportedSurface>,
     failures: Arc<[LayerFailure]>,
+    /// True when `surface` holds the entire uncropped composition, so any
+    /// zoomed/panned viewer `Output` can sample its crop directly in the
+    /// display pass (`params.whole = 1`) without re-rendering.
+    whole: bool,
 }
 /// What a settled picture's renderer may keep of the cache remainder of the
 /// engine's grant (`cache`): an eighth, the worker's caches the rest.
@@ -587,8 +624,18 @@ pub struct Engine {
     /// A capture of an SDR view: the frame presented without the delivery clip.
     capture_target: Option<metal::Texture>,
     pub cache_enabled: bool,
+    /// Document edition and the equivalent edition for setup-only reads.
+    setup_edition: Option<(u64, u64)>,
+    camera_motion: bool,
+    #[cfg(feature = "kernel")]
+    studio_source: Option<Arc<crate::studio::ViewerSource>>,
+    #[cfg(feature = "kernel")]
+    studio_source_view: crate::studio::ViewCamera,
+    studio_presence: Option<((u64, u64, String), crate::frame_inputs::StudioActivity)>,
+    frame_interrupt: Option<pm_render::media::Interrupt>,
     studio_content: Option<(
-        usize,
+        bool,
+        u64,
         u64,
         String,
         crate::studio::Preview,
@@ -606,6 +653,8 @@ pub struct Engine {
     /// were last registered for (`set_document_effects`): a drag frame of
     /// the same keeps them (`drag_frame`).
     effects_for: Option<(String, String, u64)>,
+    effects_edition: Option<u64>,
+    prewarm_key: Option<(u64, u64, String, u64)>,
     /// The frame being encoded is a drag's (scrubbed, not exact): a step of
     /// an edit changes values, not which effects exist, so it does not
     /// register the document's effects again (100 ms a step on a project
@@ -616,6 +665,9 @@ pub struct Engine {
     pub(crate) studio_progress: Option<crate::studio::RefineObserver>,
     studio_preview: crate::studio::Preview,
     studio_view: crate::studio::ViewCamera,
+    focus_group: Option<String>,
+    #[cfg(feature = "kernel")]
+    studio_resources: crate::studio::StudioResourceCache,
     /// Set by the device's lost callback or an internal GPU error: the
     /// worker rebuilds the engine on a new device.
     lost: Arc<AtomicBool>,
@@ -662,6 +714,7 @@ pub struct Engine {
     budgeted_pressure: crate::memory::Pressure,
     visible_playback: bool,
     budgeted_playback: bool,
+    budgeted_video: bool,
     /// The settling renderer's part of the grant ([`split_for_settling`]).
     settle_budget: u64,
     /// PM_SCRUB_EXTRA_MIB: the borrowed scrub allowance in force (bytes).
@@ -891,6 +944,11 @@ impl Engine {
         self.compat_document = None;
         self.resources = Arc::default();
         self.studio_content = None;
+        #[cfg(feature = "kernel")]
+        {
+            self.studio_source = None;
+            self.studio_resources.clear();
+        }
         self.font_generation = None;
         self.hdr = None;
         self.missing_effects.clear();
@@ -954,6 +1012,7 @@ impl Engine {
             && pressure != crate::memory::Pressure::Critical
             && extra == 0
             && std::env::var_os("PM_PLAYBACK_RETENTION").is_none_or(|v| v != "0");
+        let reads_video = playback && self.renderer.reads_video();
         // A completed submission can return a surface for a turn before the
         // next needs it. Give that capacity back to the caches only after
         // playback has lived without it for two seconds so surface counts
@@ -977,11 +1036,13 @@ impl Engine {
             || share != self.budgeted_grant
             || pressure != self.budgeted_pressure
             || playback != self.budgeted_playback
+            || reads_video != self.budgeted_video
         {
             self.budgeted_extra = extra;
             self.budgeted_grant = share;
             self.budgeted_pressure = pressure;
             self.budgeted_playback = playback;
+            self.budgeted_video = reads_video;
             // A traced viewer logs why its caches are trimmed (diagnostics).
             if crate::trace::enabled() {
                 eprintln!(
@@ -1023,16 +1084,14 @@ impl Engine {
             // decoded frames (35 %) over stills (10 %); the parts still sum
             // to the grant.
             let shares = knob("PM_FIX_SHARES") == Some(1);
-            let (frame_part, image_part, decoder_part, vector_part, pool_part, text_part) = if playback {
-                // Playing frames need enough decoded-frame lookahead (>=2 4K
-                // frames on 16 GiB Macs), warm text/vector rasters, and pooled
-                // intermediate targets under the same grant.
-                (26, 3, 20, 16, 21, 14)
-            } else if shares {
-                (35, 10, 25, 5, 10, 10)
-            } else {
-                (15, 20, 25, 5, 10, 10)
-            };
+            let (frame_part, image_part, decoder_part, vector_part, pool_part, text_part) =
+                if playback {
+                    playback_cache_parts(reads_video)
+                } else if shares {
+                    (35, 10, 25, 5, 10, 10)
+                } else {
+                    (15, 20, 25, 5, 10, 10)
+                };
             let images = cache * image_part / 100;
             let frames =
                 knob("PM_ABL_FRAME_CACHE_MIB").map_or(cache * frame_part / 100, |m| m << 20);
@@ -1041,14 +1100,7 @@ impl Engine {
             } else {
                 0
             };
-            // One allowance for targets, pyramids and bindings: playback's
-            // pool ceiling is its targets' part, never the whole of it again.
             let targets = cache * pool_part / 100;
-            let pool_limit = if playback {
-                pm_render::target_shares(targets).0.min(96 << 20)
-            } else {
-                0
-            };
             self.renderer.set_image_cache_budget(images);
             self.renderer
                 .apply_media_lease(pm_media::decode::service::MediaLease {
@@ -1061,9 +1113,16 @@ impl Engine {
                     .map_or(cache * if playback { 2 } else { 10 } / 100, |m| m << 20)
                     + extra * 4 / 10,
             );
-            self.renderer.set_target_pool_budget(targets);
-            self.renderer
-                .set_playback_retention(pool_limit, shader_limit);
+            if playback {
+                self.renderer.set_playback_target_budget(
+                    targets,
+                    playback_pool_budget(targets),
+                    shader_limit,
+                );
+            } else {
+                self.renderer.set_target_pool_budget(targets);
+                self.renderer.set_playback_retention(0, 0);
+            }
             let text_budget = if playback {
                 (cache * text_part / 100).max(pm_render::text::gpu::CACHE_BYTES)
             } else {
@@ -1130,6 +1189,7 @@ impl Engine {
         next.studio_preview = self.studio_preview;
         next.studio_progress = self.studio_progress.clone();
         next.studio_view = self.studio_view.clone();
+        next.focus_group = self.focus_group.clone();
         if let Some(fonts) = &self.fonts {
             next.set_fonts(fonts.clone());
         }
@@ -1310,16 +1370,29 @@ impl Engine {
             offscreen: None,
             capture_target: None,
             cache_enabled: true,
+            setup_edition: None,
+            camera_motion: false,
+            #[cfg(feature = "kernel")]
+            studio_source: None,
+            #[cfg(feature = "kernel")]
+            studio_source_view: Default::default(),
+            studio_presence: None,
+            frame_interrupt: None,
             studio_content: None,
             visual_media: Default::default(),
             font_warm: Default::default(),
             effects_for: None,
+            effects_edition: None,
+            prewarm_key: None,
             drag_frame: false,
             #[cfg(test)]
             effects_registered: 0,
             studio_progress: None,
             studio_preview: crate::studio::Preview::debug_default().map_err(anyhow::Error::msg)?,
             studio_view: crate::studio::ViewCamera::Active,
+            focus_group: None,
+            #[cfg(feature = "kernel")]
+            studio_resources: crate::studio::StudioResourceCache::default(),
             lost,
             failed,
             waker,
@@ -1346,6 +1419,7 @@ impl Engine {
             budgeted_pressure: crate::memory::Pressure::Normal,
             visible_playback: false,
             budgeted_playback: false,
+            budgeted_video: false,
             settle_budget: split_for_settling(DEFAULT_GRANT).1,
             budgeted_extra: 0,
         })
@@ -1398,9 +1472,28 @@ impl Engine {
         }
     }
     /// A transient zoom surface must not leave a retained presentation cache.
+    /// Preserve reusable whole-composition surfaces in `self.cache` so
+    /// retargeting a viewer layer after zoom/pan still hits VRAM without
+    /// re-rendering the composition from scratch.
     pub fn forget_presenter(&mut self, presenter: usize) {
         let presenter = Presenter::Layer(presenter);
-        self.showing.retain(|(owner, _)| *owner != presenter);
+        let mut i = 0;
+        while i < self.showing.len() {
+            if self.showing[i].0 == presenter {
+                let (_, frame) = self.showing.remove(i);
+                if self.cache_enabled
+                    && frame.whole
+                    && !self
+                        .cache
+                        .iter()
+                        .any(|c| c.key == frame.key && c.composition == frame.composition)
+                {
+                    self.cache.push_back(frame);
+                }
+            } else {
+                i += 1;
+            }
+        }
         debug_assert!(self.showing.iter().all(|(owner, _)| *owner != presenter));
     }
     /// Input changes invalidate reusable pictures without ending the
@@ -1430,23 +1523,41 @@ impl Engine {
             crop: spec.output.crop,
             moment: spec.moment,
             scale: spec.scale.to_bits(),
-            sampling: spec.sampling(),
-            finished: spec.final_picture(scene),
+            sampling: self.frame_sampling(scene, spec),
+            finished: !self.camera_motion && spec.final_picture(scene),
             inputs: self.observed_inputs(scene),
             tone: tone_id(self.output_tone),
             fonts: self.font_generation,
             resources: self.resources.generation,
             studio_preview: self.studio_preview,
             studio_view: self.studio_view.key(),
+            focus_group: focus_group_key(self.focus_group.as_deref()),
         }
     }
-    /// Whether `scene` draws a 3D scene (path traced on this thread).
-    pub(crate) fn draws_studio(&self, scene: &Scene) -> bool {
-        match &self.disk {
-            Some(disk) => disk.draws_studio(scene),
-            None => crate::frame_inputs::draws_studio(&scene.doc, &scene.comp),
-        }
+    pub(crate) fn reuse_scene_setup(&mut self, scene: &Scene, edition: Option<u64>) {
+        self.setup_edition = edition.map(|edition| (scene.doc.edition(), edition));
     }
+    fn setup_edition(&self, scene: &Scene) -> u64 {
+        let current = scene.doc.edition();
+        self.setup_edition
+            .filter(|(edition, _)| *edition == current)
+            .map_or(current, |(_, reused)| reused)
+    }
+    fn studio_activity(&mut self, scene: &Scene) -> &crate::frame_inputs::StudioActivity {
+        let edition = self.setup_edition(scene);
+        if self.studio_presence.as_ref().is_none_or(|((known, content, comp), _)| {
+            *known != edition || *content != scene.content || *comp != scene.comp
+        }) {
+            let activity = crate::frame_inputs::StudioActivity::new(&scene.doc, &scene.comp);
+            self.studio_presence = Some(((edition, scene.content, scene.comp.clone()), activity));
+        }
+        &self.studio_presence.as_ref().unwrap().1
+    }
+
+    pub(crate) fn draws_studio(&mut self, scene: &Scene, time: Ticks) -> bool {
+        self.studio_activity(scene).may_draw(time.get())
+    }
+
     /// What a frame of `scene` reads besides its document, as observed: its
     /// media files (looked at every 2 s, as the disk render cache looks)
     /// and the override wrappers answering. A frame kept in memory is the
@@ -1546,12 +1657,56 @@ impl Engine {
         }
         observed
     }
-    /// Changes when a frame a scrub or playback render missed has decoded.
-    /// The frame about to be drawn stops waiting for a still being read
-    /// once `interrupt` moves (`pm_render::media::Interrupt`).
-    pub fn set_interrupt(&mut self, interrupt: Option<pm_render::media::Interrupt>) {
-        self.renderer.set_interrupt(interrupt);
+    /// Playing frames stay interruptible at media waits and frame checkpoints
+    /// without slicing GPU encoding into synchronous `device.poll(Wait)`
+    /// round-trips on every draw/effect transition.
+    pub(crate) fn set_playback_interrupt(
+        &mut self,
+        interrupt: Option<pm_render::media::Interrupt>,
+    ) {
+        self.renderer.set_interrupt(interrupt.clone());
+        self.frame_interrupt = interrupt;
+        self.renderer.set_slices(None);
     }
+
+    /// Viewer work yields to newer input at media waits and draw/effect
+    /// boundaries. Keep small scenes in one submission for draw reuse.
+    pub(crate) fn set_frame_interrupt(
+        &mut self,
+        scene: &Scene,
+        interrupt: Option<pm_render::media::Interrupt>,
+    ) {
+        self.renderer.set_interrupt(interrupt.clone());
+        self.frame_interrupt = interrupt.clone();
+        if let Some((generation, armed)) = interrupt
+            && large_scene(scene)
+        {
+            let gate: pm_render::slices::Gate = Arc::new(move |_| {
+                generation.load(std::sync::atomic::Ordering::Acquire) != armed
+            });
+            if let Some(slices) = self.renderer.slices_mut() {
+                slices.set_gate(gate);
+            } else {
+                let budget = Duration::from_secs_f64(crate::policy::SETTLE_SLICE_SECONDS);
+                self.renderer.set_slices(Some(pm_render::slices::Slices::new(budget, gate)));
+            }
+        } else if self.frame_interrupt.is_some() {
+            self.renderer.set_slices(None);
+        } else if let Some(slices) = self.renderer.slices_mut() {
+            // Keep calibration across frames without retaining the service token.
+            slices.set_gate(Arc::new(|_| false));
+        }
+    }
+
+    fn check_frame_interrupt(&self) -> Result<()> {
+        if self.frame_interrupt.as_ref().is_some_and(|(generation, armed)| {
+            generation.load(std::sync::atomic::Ordering::Acquire) != *armed
+        }) {
+            return Err(RenderError::Abandoned.into());
+        }
+        Ok(())
+    }
+
     pub fn media_landed(&self) -> u64 {
         self.renderer.media_landed()
     }
@@ -1623,9 +1778,6 @@ impl Engine {
     /// a clip entering the playhead does not stall the frame that meets it.
     /// The video draws planned at `time`: (layer, instance).
     pub fn prepare(&mut self, scene: &Scene, time: Ticks, spec: FrameSpec) -> Vec<(String, u64)> {
-        if self.sync_studio(scene, time).is_err() {
-            return Vec::new();
-        }
         let Ok(request) = spec.request(scene) else {
             return Vec::new();
         };
@@ -1634,17 +1786,21 @@ impl Engine {
         // view's size only while playing or dragging).
         self.renderer
             .set_preview_media(spec.preview_stills(scene), spec.preview_video());
-        // A plan that cannot be built reports through the frame itself.
-        self.renderer
-            .prepare_media(
-                &scene.doc,
-                &scene.comp,
-                time,
-                &request,
-                scene.media.as_ref(),
-            )
-            .map(|prepared| prepared.videos)
-            .unwrap_or_default()
+        let prepare = if spec.moment == Moment::Playing && large_scene(scene) {
+            pm_render::Renderer::prepare_media_ahead
+        } else {
+            pm_render::Renderer::prepare_media
+        };
+        prepare(
+            &mut self.renderer,
+            &scene.doc,
+            &scene.comp,
+            time,
+            &request,
+            scene.media.as_ref(),
+        )
+        .map(|prepared| prepared.videos)
+        .unwrap_or_default()
     }
     /// The definitions this engine draws with (the render cache's fingerprint).
     pub(crate) fn definitions(&self) -> &[pm_protocol::definitions::DefinitionSnapshot] {
@@ -1671,8 +1827,21 @@ impl Engine {
     pub fn studio_preview(&mut self, preview: crate::studio::Preview) {
         self.studio_preview = preview;
     }
+    pub(crate) fn camera_motion(&mut self, moving: bool) {
+        self.camera_motion = moving;
+    }
+    fn frame_sampling(&self, _scene: &Scene, spec: &FrameSpec) -> pm_render::sampling::Sampling {
+        if !spec.exact && (self.camera_motion || spec.moment == Moment::Scrub) {
+            pm_render::sampling::Sampling::Playback
+        } else {
+            spec.sampling()
+        }
+    }
     pub fn studio_camera(&mut self, camera: crate::studio::ViewCamera) {
         self.studio_view = camera;
+    }
+    pub fn focus_group(&mut self, group: Option<String>) {
+        self.focus_group = group;
     }
     #[cfg(feature = "kernel")]
     pub(crate) fn start_export_calibration(
@@ -1699,22 +1868,41 @@ impl Engine {
             .map_err(anyhow::Error::msg)
     }
     fn sync_studio(&mut self, scene: &Scene, time: Ticks) -> Result<()> {
+        self.renderer.set_plane_camera(crate::studio::plane_camera(
+            &self.studio_view,
+            &scene.doc,
+            &scene.comp,
+            time.get(),
+        ));
         // A new scene's fonts are asked for now, off this thread, so no
         // frame met later (while playing) waits for the registry's first
         // answer; the same scene costs a comparison. Before the effects:
         // definitions still loading must not hold it back.
-        if let Some(fonts) = &self.fonts {
-            self.font_warm.request(&scene.doc, &scene.comp, fonts);
+        let edition = self.setup_edition(scene);
+        if !self.drag_frame && let Some(fonts) = &self.fonts {
+            self.font_warm
+                .request(&scene.doc, &scene.comp, fonts, edition);
         }
+        let studio = self.draws_studio(scene, time)
+            && !pm_eval::node::is_str(pm_eval::node::member(scene.doc.root(), "render3d"), "electron");
         let key = (
-            Arc::as_ptr(&scene.doc) as usize,
+            studio,
+            // A flat scene does not keep a Studio source holding its document.
+            // A new snapshot must still be distinct if it reuses the allocation.
+            if studio { scene.doc.edition() } else { edition },
             scene.content,
             scene.comp.clone(),
-            self.studio_preview,
-            self.studio_view.key(),
-            self.fonts.as_ref().map(|f| f.generation()),
+            if studio { self.studio_preview } else { crate::studio::Preview::Fast },
+            // Selecting a named camera changes document evaluation. Free View
+            // and orthographic poses only change projection.
+            if studio && matches!(self.studio_view, crate::studio::ViewCamera::Layer { .. }) {
+                self.studio_view.key()
+            } else {
+                crate::studio::ViewCamera::Active.key()
+            },
+            self.fonts.as_ref().filter(|_| studio).map(|f| f.generation()),
             // A model or environment file saved again is read again.
-            self.observed_media(scene),
+            if studio { self.observed_media(scene) } else { 0 },
         );
         let effects_for = (
             scene
@@ -1726,9 +1914,11 @@ impl Engine {
             scene.comp.clone(),
             self.resources.generation,
         );
-        let keep_effects = self.drag_frame && self.effects_for.as_ref() == Some(&effects_for);
-        if self.studio_content.as_ref() != Some(&key) && !keep_effects {
+        let keep_effects = self.effects_for.as_ref() == Some(&effects_for)
+            && (self.drag_frame || self.effects_edition == Some(edition));
+        if !keep_effects {
             self.effects_for = None;
+            self.effects_edition = None;
             #[cfg(test)]
             {
                 self.effects_registered += 1;
@@ -1767,35 +1957,69 @@ impl Engine {
             }
             self.definition_failure = failures.first().map(|failure| failure.message.clone());
             self.effects_for = Some(effects_for);
+            self.effects_edition = Some(edition);
         }
+        self.check_frame_interrupt()?;
         if self.studio_content.as_ref() != Some(&key) {
+            let prewarm_key = (
+                edition,
+                scene.content,
+                scene.comp.clone(),
+                self.resources.generation,
+            );
+            let need_prewarm = self.prewarm_key.as_ref() != Some(&prewarm_key);
             #[cfg(feature = "kernel")]
-            crate::studio::attach_with_camera_fonts_progress(
-                &mut self.renderer,
-                scene.doc.clone(),
-                scene.media.as_ref(),
-                &crate::studio::SceneRequest {
-                    composition: scene.comp.clone(),
-                    revision: scene.doc.revision(),
-                    ticks: time.get(),
-                    width: 1,
-                    height: 1,
-                },
-                self.studio_preview,
-                self.studio_view.clone(),
-                self.fonts.as_ref(),
-                self.studio_progress.clone(),
-            )
-            .map_err(anyhow::Error::msg)?;
-            // A document's first frame compiles the frame and text pipelines
-            // it draws with, so no frame met while playing does (built ones
-            // are kept: later documents pay nothing).
-            self.renderer.prewarm(&scene.doc);
-            // Effect programs (built-in and extension GLSL) build on the
-            // renderer's worker now, not inside the first frame that draws
-            // each one while playing.
-            self.renderer.prewarm_programs(&scene.doc);
+            {
+                if studio {
+                    self.studio_source = crate::studio::ViewerSource::new(
+                        &self.renderer,
+                        scene.doc.clone(),
+                        scene.media.as_ref(),
+                        &crate::studio::SceneRequest {
+                            composition: scene.comp.clone(),
+                            revision: scene.doc.revision(),
+                            ticks: time.get(),
+                            width: 1,
+                            height: 1,
+                        },
+                        self.studio_preview,
+                        self.studio_view.clone(),
+                        self.fonts.as_ref(),
+                        self.studio_progress.clone(),
+                        self.studio_resources.clone(),
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    if let Some(source) = &self.studio_source {
+                        source.attach(&mut self.renderer);
+                    }
+                } else if self.studio_source.take().is_some() {
+                    self.renderer.set_studio_source(None, Default::default());
+                }
+                self.studio_source_view = self.studio_view.clone();
+            }
+            if need_prewarm && !self.drag_frame {
+                // Background program compilation (effects + custom GLSL shader
+                // layers) runs off the frame thread, so large scenes benefit
+                // from priming them ahead of playback without blocking the
+                // current frame. Synchronous core/text pipeline priming stays
+                // restricted to smaller scenes and standalone renders.
+                if self.frame_interrupt.is_none() || !large_scene(scene) {
+                    self.renderer.prewarm(&scene.doc);
+                }
+                self.renderer.prewarm_programs(&scene.doc);
+                self.prewarm_key = Some(prewarm_key);
+            }
             self.studio_content = Some(key);
+        }
+        #[cfg(feature = "kernel")]
+        if self.studio_source_view != self.studio_view
+            && let Some(source) = &self.studio_source
+        {
+            source
+                .set_camera(&scene.comp, self.studio_view.clone())
+                .map_err(anyhow::Error::msg)?;
+            source.attach(&mut self.renderer);
+            self.studio_source_view = self.studio_view.clone();
         }
         Ok(())
     }
@@ -1822,7 +2046,7 @@ impl Engine {
     fn hdr_view(&mut self, scene: &Scene) -> Option<crate::color::HdrView> {
         let key = (
             scene.content,
-            scene.doc.revision(),
+            self.setup_edition(scene),
             scene.comp.clone(),
             self.observed_inputs(scene),
         );
@@ -1909,6 +2133,7 @@ impl Engine {
         trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
         let read = read.into();
+        self.check_frame_interrupt()?;
         self.govern_memory();
         self.last_frame = Instant::now();
         self.idle_released = false;
@@ -1928,23 +2153,66 @@ impl Engine {
             let mut t = trace.lock().unwrap();
             t.enter_ms = (now() - t.worker_start) * 1e3;
         }
+        self.check_frame_interrupt()?;
         self.drag_frame = spec.moment == Moment::Scrub && !spec.exact;
         let synced = self.sync_studio(scene, spec.time);
         self.drag_frame = false;
         synced?;
+        self.check_frame_interrupt()?;
         self.sync_fonts();
         self.gpu.device.poll(wgpu::PollType::Poll)?;
         let FrameSpec { time, output, .. } = spec;
-        let size = spec.size_in(scene);
-        let drawn_whole = spec.whole_composition(scene).is_some();
+        let comp_size = composition_size(scene);
+        let zoom_whole_size = (!self.camera_motion
+            && !spec.exact
+            && spec.moment == Moment::Paused
+            && spec.scale >= 1.
+            && output.crop.is_some()
+            && !self.draws_studio(scene, time))
+        .then_some(comp_size)
+        .flatten()
+        .filter(|cs| {
+            u64::from(cs.width)
+                .saturating_mul(u64::from(cs.height))
+                .saturating_mul(8)
+                <= PAUSED_FULL_BYTES
+        });
+        let size = zoom_whole_size.unwrap_or_else(|| spec.size_in(scene));
+        let drawn_whole = spec.whole_composition(scene).is_some() || zoom_whole_size.is_some();
         let hdr = self.sync_hdr(scene);
-        let key = self.cache_key(scene, &spec, size);
-        // A revision, size or observed-input change retires all old cached
-        // frames. Leases held by submitted consumers still protect their
+        let key = if let Some(cs) = zoom_whole_size {
+            let mut k = self.cache_key(scene, &spec, cs);
+            k.crop = None;
+            k.finished = true;
+            k
+        } else {
+            self.cache_key(scene, &spec, size)
+        };
+        // A revision or observed-input change retires all old cached frames.
+        // Whole-composition surfaces stay cached across zoom/pan output
+        // geometry changes so zooming and panning sample them directly without
+        // re-rendering. Leases held by submitted consumers still protect their
         // storage until completion.
-        let current = |c: &CachedFrame| c.key.content != key.content || c.key.same_content(key);
+        let current = |c: &CachedFrame| {
+            c.key.content != key.content
+                || c.key.same_content(key)
+                || (c.whole && c.key.same_scene_content(key))
+        };
         // A frame is of its key and its composition.
         let of = |c: &CachedFrame| c.key == key && c.composition == scene.comp;
+        // A whole-composition surface of the same scene state and time serves
+        // any zoomed/panned viewer crop in the display pass without re-rendering.
+        let whole_match = |c: &CachedFrame| {
+            c.whole
+                && (self.studio_view == crate::studio::ViewCamera::Active
+                    || c.key.sampling == key.sampling)
+                && c.composition == scene.comp
+                && c.key.same_scene_content(key)
+                && c.key.time == key.time
+                && spec.scale >= 1.
+                && comp_size.is_some_and(|cs| c.surface.size == cs)
+                && (c.key.finished || c.key.moment == Moment::Paused)
+        };
         self.cache.retain(current);
         // A viewer's last good surface stays pinned until its replacement
         // is ready. Its old key cannot serve the new request. Offscreen
@@ -1958,7 +2226,7 @@ impl Engine {
             Presenter::Layer(layer.as_ptr() as usize)
         });
         if !spec.exact
-            && let Some(handed) = self.settled.take_if(|c| of(c))
+            && let Some(handed) = self.settled.take_if(|c| of(c) || whole_match(c))
         {
             self.showing.retain(|(of, _)| *of != viewer);
             // A main viewer and a popout of each of two projects.
@@ -1967,13 +2235,43 @@ impl Engine {
             }
             self.showing.push((viewer, handed));
         }
+        let mut whole_hit = false;
         let shown = (!spec.exact)
-            .then(|| self.showing.iter().find(|(_, c)| of(c)))
+            .then(|| {
+                self.showing
+                    .iter()
+                    .find(|(_, c)| of(c))
+                    .map(|(_, c)| (c.surface.clone(), c.failures.clone(), false))
+                    .or_else(|| {
+                        self.showing
+                            .iter()
+                            .find(|(_, c)| whole_match(c))
+                            .map(|(_, c)| (c.surface.clone(), c.failures.clone(), true))
+                    })
+            })
             .flatten()
-            .map(|(_, c)| (c.surface.clone(), c.failures.clone()));
+            .map(|(surface, failures, from_whole)| {
+                whole_hit |= from_whole;
+                (surface, failures)
+            });
         let hit = (self.cache_enabled && !spec.exact && shown.is_none())
-            .then(|| self.cache.iter().position(of))
+            .then(|| {
+                self.cache
+                    .iter()
+                    .position(of)
+                    .map(|idx| (idx, false))
+                    .or_else(|| {
+                        self.cache
+                            .iter()
+                            .position(whole_match)
+                            .map(|idx| (idx, true))
+                    })
+            })
             .flatten();
+        if let Some((_, true)) = hit {
+            whole_hit = true;
+        }
+        let hit = hit.map(|(idx, _)| idx);
         let mut stand_ins = false;
         let mut compat_late = Vec::new();
         // A frame rendered on disk: shown in an uncropped viewer instead of
@@ -1982,11 +2280,15 @@ impl Engine {
         // export draws, so a paused playhead in a rendered range shows its
         // picture at once, whatever else the GPU is doing. A capture always
         // draws its own exact frame.
-        // Never upscaled: a canvas larger than the composition renders.
         let canvas = output.crop.map_or((output.width, output.height), |c| {
             (c.canvas_width, c.canvas_height)
         });
-        let looked = hit.is_none() && shown.is_none() && !spec.exact;
+        let looked = hit.is_none()
+            && shown.is_none()
+            && !spec.exact
+            && self.setup_edition(scene) == scene.doc.edition()
+            && self.focus_group.is_none()
+            && self.studio_view == crate::studio::ViewCamera::Active;
         // A playing or paused frame waits a moment for its frame on disk
         // rather than drawing what was rendered because it can't be drawn
         // in time (a dragged one never waits).
@@ -1995,16 +2297,16 @@ impl Engine {
             Moment::Paused => crate::render_cache::PAUSED_PATIENCE,
             Moment::Scrub => std::time::Duration::ZERO,
         };
-        // A paused frame shows the frame on disk only where it would draw
-        // that very picture itself: the final picture of the whole
-        // composition at its own size (its refinement at the paused Full
-        // scale, or a drawable that is the composition's size). Where a
-        // paused frame is drawn otherwise (zoomed in, at a reduced quality,
-        // or so far out that Full is bounded to the drawable), it is drawn
-        // as ever: whether a frame is rendered on disk never changes a
-        // paused picture.
-        let as_drawn = spec.moment != Moment::Paused || spec.settles_final(scene);
-        let fits = |size: &Size| as_drawn && canvas.0 <= size.width && canvas.1 <= size.height;
+        // A paused frame shows the frame on disk when it would draw the whole
+        // composition at its own size (at Fit or zoomed/panned in Full/Auto).
+        let as_drawn = spec.moment != Moment::Paused
+            || spec.settles_final(scene)
+            || zoom_whole_size.is_some();
+        let fits = |disk_size: &Size| {
+            as_drawn
+                && ((canvas.0 <= disk_size.width && canvas.1 <= disk_size.height)
+                    || (zoom_whole_size.is_some() && comp_size == Some(*disk_size)))
+        };
         let asked = std::time::Instant::now();
         // Uploaded in the slack after the frame before: nothing to read.
         // Shown only while it still is this frame's picture.
@@ -2051,25 +2353,28 @@ impl Engine {
         }
         let from_disk = disk.is_some() || uploaded.is_some();
         // The source is the whole composition: presented as the drawable's
-        // window of the canvas, a rendered frame and a drawn one alike.
-        let whole = from_disk || drawn_whole;
+        // window of the canvas, a rendered frame, a cached whole surface, and
+        // a drawn one alike.
+        let whole = from_disk || drawn_whole || whole_hit;
         trace.lock().unwrap().disk_wait_ms = asked.elapsed().as_secs_f64() * 1e3;
         trace.lock().unwrap().disk = match (looked, from_disk) {
             (false, _) => 0,
             (true, false) => 1,
             (true, true) => 2,
         };
-        let size = disk.as_ref().map_or(size, |(size, _)| *size);
-        let size = uploaded.as_ref().map_or(size, |next| next.size);
+        let mut size = disk.as_ref().map_or(size, |(size, _)| *size);
+        size = uploaded.as_ref().map_or(size, |next| next.size);
         let (surface, failures) = if let Some(next) = uploaded {
             trace.lock().unwrap().cache_hit = true;
             (next.surface, Arc::from(Vec::new()))
         } else if let Some(shown) = shown {
             trace.lock().unwrap().cache_hit = true;
+            size = shown.0.size;
             shown
         } else if let Some(index) = hit {
             let entry = self.cache.remove(index).unwrap();
             let found = (entry.surface.clone(), entry.failures.clone());
+            size = entry.surface.size;
             self.cache.push_back(entry);
             trace.lock().unwrap().cache_hit = true;
             found
@@ -2100,21 +2405,40 @@ impl Engine {
                 // every 3D picture. A bounded static title is cheap enough
                 // to keep its native grid here at Stop too.
                 if !spec.exact
+                    && zoom_whole_size.is_none()
                     && spec.final_picture(scene)
-                    && !self.draws_studio(scene)
+                    && !self.draws_studio(scene, time)
+                    && self.studio_view == crate::studio::ViewCamera::Active
                     && self.text_grid_scale(scene, &spec.output).is_none()
                 {
                     return Err(SettledPending.into());
                 }
+                self.check_frame_interrupt()?;
                 let target = Target::wrap(surface.texture.clone());
-                let mut request = spec.request(scene)?;
+                let mut request = if let Some(cs) = zoom_whole_size {
+                    let mut req = pm_render::RenderRequest::sized(cs, Precision::Float16);
+                    req.motion_blur =
+                        pm_render::motion::MotionBlur::Kind(pm_protocol::frame::MotionBlurKind::Export);
+                    req.sampling = pm_render::sampling::Sampling::Final;
+                    req.read_ahead = false;
+                    req.output_kind = pm_render::OutputKind::Final;
+                    req.viewer = true;
+                    req
+                } else {
+                    spec.request(scene)?
+                };
+                if !spec.exact && (self.camera_motion || spec.moment == Moment::Scrub) {
+                    request.output_kind = pm_render::OutputKind::Preview;
+                }
+                request.sampling = self.frame_sampling(scene, &spec);
                 request.output_tone = self.output_tone;
+                request.focus_group = (!spec.exact).then(|| self.focus_group.clone()).flatten();
                 // An exact read never takes a stand-in, whatever the moment,
                 // and draws from original media without reused draws.
                 // PM_ABL_PREVIEW=0 turns preview-size media off (measurement only).
                 let preview = pm_media::decode::diag::knob("PM_ABL_PREVIEW") != Some(0);
                 self.renderer.set_preview_media(
-                    preview && spec.preview_stills(scene),
+                    preview && zoom_whole_size.is_none() && spec.preview_stills(scene),
                     preview && spec.preview_video(),
                 );
                 self.renderer.set_draw_reuse(!spec.exact);
@@ -2173,6 +2497,7 @@ impl Engine {
                     .map(|store| store.end_frame())
                     .unwrap_or_default();
                 let rendered = rendered?;
+                self.check_frame_interrupt()?;
                 self.renderer.trim_submitted_frame_caches();
                 if let Some(error) = self.failed.lock().unwrap().take() {
                     bail!("The GPU refused this frame: {error}");
@@ -2190,11 +2515,13 @@ impl Engine {
                     && !stand_ins
                     && self.reads_observed(scene, &reads)
                 {
+                    let is_whole = drawn_whole || output.crop.is_none();
                     self.cache.push_back(CachedFrame {
                         key,
                         composition: scene.comp.clone(),
                         surface: surface.clone(),
                         failures: failures.clone(),
+                        whole: is_whole,
                     });
                 }
                 (surface, failures)
@@ -2208,11 +2535,13 @@ impl Engine {
             && !stand_ins
             && failures.is_empty()
             && self.cache_enabled
+            && !whole_hit
             && self
                 .cache
                 .iter()
                 .any(|c| of(c) && Arc::ptr_eq(&c.surface, &surface))
         {
+            let is_whole = drawn_whole || output.crop.is_none();
             self.showing.retain(|(id, _)| *id != viewer);
             if self.showing.len() >= 4 {
                 self.showing.remove(0);
@@ -2224,6 +2553,7 @@ impl Engine {
                     composition: scene.comp.clone(),
                     surface: surface.clone(),
                     failures: failures.clone(),
+                    whole: is_whole,
                 },
             ));
         }
@@ -2656,6 +2986,7 @@ impl Engine {
         }
         let mut request = spec.request(scene)?;
         request.output_tone = self.output_tone;
+        request.focus_group = (!spec.exact).then(|| self.focus_group.clone()).flatten();
         let surface = self.cache_surface(size)?;
         let job = crate::settle::Job {
             key,
@@ -2694,11 +3025,14 @@ impl Engine {
                 if let Some(error) = self.failed.lock().unwrap().take() {
                     Settled::Failed(anyhow!("The GPU refused this frame: {error}"))
                 } else if exact && current && self.reads_observed(&done.scene, &done.reads) {
+                    let is_whole = done.key.crop.is_none()
+                        || composition_size(&done.scene) == Some(done.surface.size);
                     self.settled = Some(CachedFrame {
                         key: done.key,
                         composition: done.scene.comp.clone(),
                         surface: done.surface,
                         failures: failures.into(),
+                        whole: is_whole,
                     });
                     Settled::Kept
                 } else {
@@ -2797,7 +3131,7 @@ impl Engine {
     /// The raster override answers a frame at `time` would need and that
     /// are not answered yet, from its plan alone (playback's look-ahead).
     pub fn compat_needs(&mut self, scene: &Scene, time: Ticks, spec: FrameSpec) -> Vec<CompatNeed> {
-        if self.compat_document.is_none() || self.sync_studio(scene, time).is_err() {
+        if self.compat_document.is_none() {
             return Vec::new();
         }
         let Ok(request) = spec.request(scene) else {
@@ -2814,19 +3148,18 @@ impl Engine {
             .unwrap_or_default()
     }
 }
-/// Delays every completion handler (tests: Metal's completion queue running
-/// late under load).
-#[cfg(test)]
-/// Every viewer request's (exact, moment, scale, resampler), for tests.
+/// Viewer requests tagged with their document edition for test isolation.
 #[cfg(test)]
 pub(crate) static SAMPLED: std::sync::Mutex<
-    Vec<(bool, Moment, f64, pm_render::sampling::Sampling)>,
+    Vec<(u64, bool, Moment, f64, pm_render::sampling::Sampling)>,
 > = std::sync::Mutex::new(Vec::new());
 /// Every viewer request's (exact, moment, media files), for tests.
 #[cfg(test)]
 pub(crate) static MEDIA_SAMPLED: std::sync::Mutex<
     Vec<(bool, Moment, Arc<pm_export::render::MediaPaths>)>,
 > = std::sync::Mutex::new(Vec::new());
+/// Delays every completion handler (tests: Metal's completion queue running
+/// late under load).
 #[cfg(test)]
 pub(crate) static LATE_COMPLETION_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -3071,6 +3404,63 @@ mod lifetime_tests {
         assert!(engine.settle_now(&scene, spec, || false).unwrap());
         assert!(engine.settled.is_some());
     }
+    #[test]
+    fn a_heavy_frame_can_give_way_after_planning() {
+        use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
+
+        let mut project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        let layers = project.as_object_mut().unwrap().get_mut("layers").unwrap();
+        let layers = layers.as_array_mut().unwrap();
+        let template = layers[0].clone();
+        *layers = (0..256).map(|i| {
+            let mut layer = template.clone();
+            layer.as_object_mut().unwrap().insert(
+                "id", pm_model::Value::String(format!("layer-{i}").into()),
+            );
+            layer
+        }).collect();
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(project)), 1,
+            )),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("draw-boundary-cancel").unwrap()).unwrap();
+        let spec = FrameSpec {
+            exact: false,
+            moment: Moment::Scrub,
+            ..FrameSpec::exact(Ticks::ZERO, Output {
+                width: 64, height: 64, display: 0, headroom: 1., crop: None,
+            })
+        };
+        let generation = Arc::new(AtomicU64::new(0));
+        engine.set_frame_interrupt(&scene, Some((generation.clone(), 0)));
+        let inject_input = generation.clone();
+        engine.renderer.slices_mut().expect("large frames draw in slices").set_gate(
+            Arc::new(move |_| {
+                inject_input.store(1, Ordering::Release);
+                true
+            }),
+        );
+        let draw = |engine: &mut Engine| {
+            engine.frame(
+                &scene, spec, None, &Default::default(), false,
+                Arc::new(Mutex::new(Trace::default())),
+            )
+        };
+        assert!(matches!(
+            draw(&mut engine).err().and_then(|e| e.downcast::<RenderError>().ok()),
+            Some(RenderError::Abandoned)
+        ));
+        assert_eq!(generation.load(Ordering::Acquire), 1);
+        engine.set_frame_interrupt(&scene, Some((generation, 1)));
+        let frame = draw(&mut engine).unwrap().unwrap();
+        frame.commit();
+        frame.complete().unwrap();
+    }
+
     /// A drag's frames (a new revision each step) keep the effects the
     /// document registered (re-registering them cost 100 ms a step on a
     /// project with many contributed effects); the frame after release, a
@@ -3992,6 +4382,7 @@ mod playback_pool_tests {
                 composition: scene.comp.clone(),
                 surface: surface.clone(),
                 failures: Arc::default(),
+                whole: true,
             });
         };
         // Paused pictures cached, and the settled picture shown and the
@@ -4126,6 +4517,7 @@ mod playback_pool_tests {
                     composition: scene.comp.clone(),
                     surface: surface.clone(),
                     failures: Arc::default(),
+                    whole: true,
                 });
             }
             // Alternate exact cached pictures and uncached stand-ins, with
@@ -5659,6 +6051,184 @@ mod frame_cache_tests {
             "the saved file is drawn: {flat} pixels, {whole} before"
         );
     }
+
+    /// Zooming and panning a paused Full-resolution viewer reuses the cached
+    /// whole-composition surface directly in `viewer.metal` with zero
+    /// `pm_render` re-renders, even across `forget_presenter` (`retarget`).
+    #[test]
+    fn zooming_and_panning_a_paused_full_frame_reuses_whole_composition_without_rerendering() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene = scene(&stripes(dir.path()));
+        let mut engine = Engine::new(Gpu::new("zoom-pan-whole-hit").unwrap()).unwrap();
+        let fit = Output {
+            width: 64,
+            height: 36,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let fit_spec = FrameSpec {
+            moment: Moment::Paused,
+            scale: FrameSpec::paused_full_scale(&scene, &fit),
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, fit)
+        };
+        assert!(fit_spec.scale > 1., "Fit should settle at comp_size");
+        // Settle the Fit whole-composition frame once.
+        let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+        let sub = engine
+            .frame_settled(&scene, fit_spec, None, &Default::default(), true, trace)
+            .unwrap()
+            .unwrap();
+        sub.commit();
+        sub.complete().unwrap();
+
+        // Simulate a sequence of zoomed & panned crops (including >100% zoom)
+        // and a presenter retarget (`forget_presenter`). Every single frame
+        // must hit the cached whole-composition surface with zero pm_render.
+        let crops = [
+            (64, 36, 0, 0, 128, 72),
+            (64, 36, 32, 18, 128, 72),
+            (64, 36, 64, 36, 128, 72),
+            (64, 36, 100, 50, 256, 144),
+            (64, 36, 180, 90, 512, 288),
+            (64, 36, 16, 8, 192, 108),
+        ];
+        for (i, (w, h, x, y, cw, ch)) in crops.into_iter().enumerate() {
+            if i == 2 {
+                // Simulate layer swap on retarget: whole surface must stay cached.
+                engine.forget_presenter(0);
+            }
+            let out = Output {
+                width: w,
+                height: h,
+                display: 0,
+                headroom: 1.,
+                crop: Some(crate::policy::Crop {
+                    x,
+                    y,
+                    canvas_width: cw,
+                    canvas_height: ch,
+                }),
+            };
+            let spec = FrameSpec {
+                moment: Moment::Paused,
+                scale: 1.,
+                exact: false,
+                ..FrameSpec::exact(Ticks::ZERO, out)
+            };
+            let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+            let sub = engine
+                .frame(&scene, spec, None, &Default::default(), true, trace.clone())
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            let t = trace.lock().unwrap();
+            assert!(t.cache_hit, "step {i}: zoom/pan must hit cached whole surface");
+            assert_eq!(
+                t.render_start, 0.,
+                "step {i}: zoom/pan must not invoke pm_render"
+            );
+            assert_eq!(sub.pixels().len(), (w * h) as usize);
+        }
+    }
+
+    /// Starting directly zoomed in renders the whole composition once so
+    /// subsequent pans and zooms hit VRAM cache with zero re-renders, while a
+    /// document edit invalidates the cached whole surface and re-renders.
+    #[test]
+    fn starting_zoomed_in_renders_once_then_pans_from_cache_and_invalidates_on_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene1 = scene(&stripes(dir.path()));
+        let mut engine = Engine::new(Gpu::new("zoom-pan-cold-start").unwrap()).unwrap();
+        let make_spec = |x, y, cw, ch| FrameSpec {
+            moment: Moment::Paused,
+            scale: 1.,
+            exact: false,
+            ..FrameSpec::exact(
+                Ticks::ZERO,
+                Output {
+                    width: 64,
+                    height: 36,
+                    display: 0,
+                    headroom: 1.,
+                    crop: Some(crate::policy::Crop {
+                        x,
+                        y,
+                        canvas_width: cw,
+                        canvas_height: ch,
+                    }),
+                },
+            )
+        };
+        // First zoomed frame renders the whole composition once.
+        let t0 = Arc::new(std::sync::Mutex::new(Trace::default()));
+        let sub0 = engine
+            .frame(
+                &scene1,
+                make_spec(20, 10, 256, 144),
+                None,
+                &Default::default(),
+                true,
+                t0.clone(),
+            )
+            .unwrap()
+            .unwrap();
+        sub0.commit();
+        sub0.complete().unwrap();
+        assert!(!t0.lock().unwrap().cache_hit);
+        assert!(t0.lock().unwrap().render_start > 0.);
+
+        // Panning and re-zooming immediately hit cache with zero pm_render.
+        for (x, y, cw, ch) in [(40, 20, 256, 144), (80, 40, 384, 216), (0, 0, 128, 72)] {
+            let t = Arc::new(std::sync::Mutex::new(Trace::default()));
+            let sub = engine
+                .frame(
+                    &scene1,
+                    make_spec(x, y, cw, ch),
+                    None,
+                    &Default::default(),
+                    true,
+                    t.clone(),
+                )
+                .unwrap()
+                .unwrap();
+            sub.commit();
+            sub.complete().unwrap();
+            let t = t.lock().unwrap();
+            assert!(t.cache_hit, "pan/zoom ({x},{y},{cw},{ch}) must hit cache");
+            assert_eq!(t.render_start, 0.);
+        }
+
+        // Document revision bump invalidates the cached whole surface.
+        let scene2 = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                scene1.doc.root().map(pm_model::Node::to_value),
+                scene1.doc.revision() + 1,
+            )),
+            ..scene1.clone()
+        };
+        let t_edit = Arc::new(std::sync::Mutex::new(Trace::default()));
+        let sub_edit = engine
+            .frame(
+                &scene2,
+                make_spec(40, 20, 256, 144),
+                None,
+                &Default::default(),
+                true,
+                t_edit.clone(),
+            )
+            .unwrap()
+            .unwrap();
+        sub_edit.commit();
+        sub_edit.complete().unwrap();
+        assert!(
+            !t_edit.lock().unwrap().cache_hit,
+            "revision bump must invalidate whole surface"
+        );
+        assert!(t_edit.lock().unwrap().render_start > 0.);
+    }
 }
 #[cfg(test)]
 mod definitions_pending_tests {
@@ -5771,4 +6341,539 @@ fn keep_paused_decoders() -> bool {
     }
     let app = objc2_app_kit::NSRunningApplication::currentApplication();
     app.isActive() && !app.isHidden()
+}
+
+#[cfg(all(test, feature = "kernel"))]
+mod layer_drag_profile {
+    use super::*;
+    use std::sync::Mutex;
+
+    mod fixture {
+        include!("../../kernel/src/drag_fixture.rs");
+    }
+
+    #[test]
+    fn one_active_title_in_a_639_layer_composition() {
+        crate::font_warm::tests::with_test_fonts(|fonts| {
+            if std::env::var_os("PM_PROFILE_DRAG_BASELINE").is_some() {
+                eprintln!("Before setup reuse");
+                profile_drag(fonts.sibling(), false);
+                eprintln!("After setup reuse");
+            }
+            profile_drag(fonts, true);
+        });
+    }
+
+    #[test]
+    fn inactive_studio_layers_do_not_attach_or_draw_even_at_final_quality() {
+        use pm_scene3d::{schema::Role, service::new_layer};
+        use serde_json::json;
+
+        let mut comp = json!({"id":"test","w":64,"h":64,"fps":30,"dur":4,"layers":[]});
+        let mut object = new_layer(
+            &comp, "sphere", "Sphere", Role::Object,
+            json!({"object":{"source":{"primitive":"sphere"}}}), json!({}), true, None, 0.,
+        ).unwrap();
+        object["from"] = json!(1);
+        object["dur"] = json!(1);
+        let mut disabled = object.clone();
+        disabled["id"] = json!("disabled");
+        disabled["from"] = json!(0);
+        disabled["dur"] = json!(4);
+        disabled["on"] = json!(false);
+        comp["layers"] = json!([object, disabled]);
+        let project = json!({"id":"inactive-studio","compId":"test","comps":{"test":comp},"assets":{}});
+        let scene = Scene {
+            doc: pm_kernel::DocumentStore::new_untitled(
+                pm_model::json::parse(&project.to_string()).unwrap(),
+            ).snapshot().document,
+            comp: "test".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("inactive-studio").unwrap()).unwrap();
+        engine.studio_preview(crate::studio::Preview::Final);
+        let draw_inactive = |engine: &mut Engine, t: Ticks| {
+            assert!(!engine.draws_studio(&scene, t));
+            let spec = FrameSpec::exact(t, Output {
+                width: 64, height: 64, display: 0, headroom: 1., crop: None,
+            });
+            let frame = engine.frame(
+                &scene, spec, None, &Default::default(), false,
+                Arc::new(Mutex::new(Trace::default())),
+            ).unwrap().unwrap();
+            frame.commit();
+            frame.complete().unwrap();
+            assert!(engine.studio_source.is_none());
+            assert_eq!(engine.renderer.studio_counters(), Default::default());
+        };
+        draw_inactive(&mut engine, Ticks::ZERO);
+        engine.studio_preview(crate::studio::Preview::Fast);
+        engine.sync_studio(&scene, Ticks::from_whole_seconds(1)).unwrap();
+        assert!(engine.studio_source.is_some());
+        let registrations = engine.effects_registered;
+        draw_inactive(&mut engine, Ticks::from_whole_seconds(3));
+        assert_eq!(engine.effects_registered, registrations);
+    }
+
+    #[test]
+    fn studio_camera_motion_keeps_the_document_source() {
+        use crate::studio::SceneSource;
+        use pm_scene3d::{schema::Role, service::new_layer};
+        use serde_json::json;
+
+        let mut comp = json!({"id":"test","w":64,"h":64,"fps":30,"dur":1,"layers":[]});
+        let object = new_layer(
+            &comp, "sphere", "Sphere", Role::Object,
+            json!({"object":{"source":{"primitive":"sphere"}}}), json!({}), true, None, 0.,
+        ).unwrap();
+        comp["layers"] = json!([object]);
+        let project = json!({"id":"studio-camera-cache","compId":"test","comps":{"test":comp},"assets":{}});
+        let scene = Scene {
+            doc: pm_kernel::DocumentStore::new_untitled(
+                pm_model::json::parse(&project.to_string()).unwrap(),
+            ).snapshot().document,
+            comp: "test".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("studio-camera-cache").unwrap()).unwrap();
+        engine.studio_preview(crate::studio::Preview::Fast);
+        engine.sync_studio(&scene, Ticks::ZERO).unwrap();
+        let source = engine.studio_source.clone().unwrap();
+        let effects_registered = engine.effects_registered;
+        let request = crate::studio::SceneRequest {
+            composition: scene.comp.clone(), revision: scene.doc.revision(),
+            ticks: 0, width: 64, height: 64,
+        };
+
+        for x in [1., 2.] {
+            engine.studio_camera(Some(crate::studio::FreeView {
+                eye: [x, 2., 5.], target: [0.; 3], zoom: 1., ortho: false, roll: 0.,
+            }).into());
+            engine.sync_studio(&scene, Ticks::ZERO).unwrap();
+            assert!(Arc::ptr_eq(engine.studio_source.as_ref().unwrap(), &source));
+            assert_eq!(engine.effects_registered, effects_registered);
+            let input = source.scene(&request).unwrap();
+            assert_eq!(input.scene.camera.position.x, x as f32);
+            assert!(!input.instances.is_empty());
+        }
+    }
+
+    #[test]
+    fn fly_camera_over_316_active_plane_layers() {
+        crate::font_warm::tests::with_test_fonts(fly_profile);
+    }
+
+    fn fly_profile(fonts: pm_render::text::host::RenderFonts) {
+        use serde_json::json;
+
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let published = kernel.published(fixture::PROJECT).unwrap();
+        let comp = published.snapshot.render_comp();
+        let mut root: serde_json::Value =
+            serde_json::from_str(&pm_model::json::to_canonical_string(
+                &published.snapshot.document.root().unwrap().to_value(),
+            ))
+            .unwrap();
+        let composition = if root["layers"].is_array() {
+            &mut root
+        } else {
+            &mut root["comps"][&comp]
+        };
+        let layers = composition["layers"].as_array_mut().unwrap();
+        assert_eq!(layers.len(), 639);
+        for (i, l) in layers
+            .iter_mut()
+            .filter(|l| l["group"] == "group0")
+            .enumerate()
+        {
+            l["p"]["position.x"]["v"] = json!(75 + (i % 17) * 105);
+            l["p"]["position.y"]["v"] = json!(55 + (i / 17) * 53);
+            l["compat"] = json!(2);
+            if l["type"] == "shader" {
+                l["d"]["code"] = json!("void main() { fragColor = vec4(1.); }");
+                l["d"]["w"] = json!(120);
+                l["d"]["h"] = json!(32);
+            }
+        }
+        layers.insert(0, json!({
+            "id":"fly-camera", "type":"extension", "threeD":true, "on":true,
+            "from":0, "dur":103, "p":{"position.z":{"v":7.}},
+            "d":{"definition":"powermove.3d.camera","data":{"camera":{"projection":"perspective","p":{}}}}
+        }));
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::json::parse(&root.to_string()).unwrap()),
+                1,
+            )),
+            comp,
+            media: Default::default(),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("316-plane-fly-camera").unwrap()).unwrap();
+        engine.set_fonts(fonts);
+        let spec = FrameSpec {
+            exact: false,
+            ..FrameSpec::exact(
+                Ticks::new(pm_protocol::common::TICKS_PER_SECOND * 19 / 10).unwrap(),
+                Output {
+                    width: 1920,
+                    height: 1080,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            )
+        };
+        let draw = |engine: &mut Engine, spec, read: bool| {
+            let trace = Arc::new(Mutex::new(Trace::default()));
+            let start = Instant::now();
+            let sub = engine
+                .frame(&scene, spec, None, &Default::default(), read, trace.clone())
+                .unwrap()
+                .expect("a render submission");
+            assert!(sub.failures.is_empty(), "{:?}", sub.failures);
+            let encode = start.elapsed().as_secs_f64() * 1000.;
+            sub.commit();
+            sub.complete().unwrap();
+            let wall = start.elapsed().as_secs_f64() * 1000.;
+            let trace = trace.lock().unwrap();
+            let render = (trace.render_submitted - trace.render_start) * 1000.;
+            ([encode, render, wall], read.then(|| sub.pixels()))
+        };
+        for (name, scale) in [("Quarter", 0.25), ("Full", 1.)] {
+            let spec = FrameSpec { scale, ..spec };
+            let move_camera = |engine: &mut Engine, i| {
+                let x = f64::from(i) * 0.015;
+                engine.studio_camera(
+                    Some(crate::studio::FreeView {
+                        eye: [x, 0.2, 7.],
+                        target: [x * 0.6, 0., 0.],
+                        zoom: 1.,
+                        ortho: false,
+                        roll: 0.,
+                    })
+                    .into(),
+                );
+            };
+            engine.camera_motion(true);
+            move_camera(&mut engine, 0);
+            draw(&mut engine, spec, false);
+            let samples: Vec<_> = (1..=20)
+                .map(|i| {
+                    move_camera(&mut engine, i);
+                    draw(&mut engine, spec, false).0
+                })
+                .collect();
+            eprintln!("{name} Fly at 1.9 s");
+            fixture::report(
+                ["CPU encode", "pm-render", "through GPU completion"],
+                &samples,
+            );
+
+            engine.camera_motion(false);
+            let settled = FrameSpec {
+                settled: true,
+                ..spec
+            };
+            let (elapsed, pixels) = draw(&mut engine, settled, true);
+            let pixels = pixels.unwrap();
+            assert!(pixels.iter().filter(|p| p[0] > 0.1).count() > 100);
+            let mut digest = blake3::Hasher::new();
+            for pixel in &pixels {
+                for c in pixel {
+                    digest.update(&c.to_bits().to_le_bytes());
+                }
+            }
+            eprintln!(
+                "{name} settled {:.3} ms, pixel digest {}",
+                elapsed[2],
+                digest.finalize()
+            );
+            let exact = draw(
+                &mut engine,
+                FrameSpec {
+                    exact: true,
+                    ..settled
+                },
+                true,
+            )
+            .1
+            .unwrap();
+            assert!(
+                pixels == exact,
+                "{name} settled pixels differ from the exact frame"
+            );
+
+            engine.studio_camera(crate::studio::ViewCamera::Active);
+            let samples: Vec<_> = (0..20)
+                .map(|i| {
+                    let time = Ticks::new(
+                        spec.time.get() + i * pm_protocol::common::TICKS_PER_SECOND / 30,
+                    )
+                    .unwrap();
+                    draw(
+                        &mut engine,
+                        FrameSpec {
+                            time,
+                            moment: Moment::Scrub,
+                            ..spec
+                        },
+                        false,
+                    )
+                    .0
+                })
+                .collect();
+            eprintln!("{name} scrub with the authored camera");
+            fixture::report(
+                ["CPU encode", "pm-render", "through GPU completion"],
+                &samples,
+            );
+        }
+    }
+
+    fn profile_drag(fonts: pm_render::text::host::RenderFonts, reuse_setup: bool) {
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let mut engine = Engine::new(Gpu::new("639-layer-drag").unwrap()).unwrap();
+        engine.set_fonts(fonts);
+        let scene = |p: &pm_kernel::Published| Scene {
+            doc: p.snapshot.document.clone(),
+            comp: p.snapshot.render_comp(),
+            media: Default::default(),
+            content: p.snapshot.doc_id,
+        };
+        let spec = FrameSpec {
+            exact: false,
+            moment: Moment::Scrub,
+            ..FrameSpec::exact(
+                Ticks::new((fixture::TIME * pm_protocol::common::TICKS_PER_SECOND as f64) as i64)
+                    .unwrap(),
+                Output {
+                    width: 1555,
+                    height: 875,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            )
+        };
+        let ms = |d: Duration| d.as_secs_f64() * 1000.;
+        let frame = |engine: &mut Engine, scene: &Scene, spec| {
+            let trace = Arc::new(Mutex::new(Trace::default()));
+            let start = Instant::now();
+            let submission = engine
+                .frame(scene, spec, None, &Default::default(), false, trace.clone())
+                .unwrap()
+                .expect("a render submission");
+            let encode = ms(start.elapsed());
+            assert!(submission.failures.is_empty(), "{:?}", submission.failures);
+            submission.commit();
+            submission.complete().unwrap();
+            let trace = trace.lock().unwrap();
+            (
+                encode,
+                (trace.render_submitted - trace.render_start) * 1000.,
+            )
+        };
+        let initial = kernel.published(fixture::PROJECT).unwrap();
+        let edition = initial.snapshot.document.edition();
+        frame(
+            &mut engine,
+            &scene(&initial),
+            FrameSpec {
+                moment: Moment::Paused,
+                ..spec
+            },
+        );
+        let studio_content = engine.studio_content.clone();
+        let tone_key = engine.hdr.as_ref().unwrap().0.clone();
+        let effects_registered = engine.effects_registered;
+        let mut samples = Vec::new();
+        fixture::drag(&kernel, |p| {
+            let start = Instant::now();
+            assert!(p.only_transform_values_since(initial.snapshot.doc_id, initial.revision()));
+            let scene = scene(&p);
+            engine.reuse_scene_setup(&scene, reuse_setup.then_some(edition));
+            engine.drag_frame = true;
+            engine.sync_studio(&scene, spec.time).unwrap();
+            engine.drag_frame = false;
+            let sync = ms(start.elapsed());
+
+            let hdr_start = Instant::now();
+            engine.sync_hdr(&scene);
+            let hdr = ms(hdr_start.elapsed());
+            let (encode, render) = frame(&mut engine, &scene, spec);
+
+            if reuse_setup {
+                assert_eq!(engine.studio_content, studio_content);
+                assert_eq!(engine.hdr.as_ref().unwrap().0, tone_key);
+                assert_eq!(engine.effects_registered, effects_registered);
+            }
+            samples.push([
+                ms(p.actor_work),
+                ms(p.publication_work),
+                sync,
+                hdr,
+                encode,
+                render,
+                ms(start.elapsed()),
+            ]);
+        });
+        fixture::report(
+            [
+                "kernel actor",
+                "kernel publish",
+                "sync_studio",
+                "HDR",
+                "engine encode after sync",
+                "pm-render",
+                "through GPU completion",
+            ],
+            &samples,
+        );
+        if reuse_setup {
+            fixture::assert_budget(&samples, [0, 1, 2, 3, 4, 5]);
+            let released = scene(&kernel.published(fixture::PROJECT).unwrap());
+            engine.reuse_scene_setup(&released, None);
+            engine.sync_studio(&released, spec.time).unwrap();
+            assert_eq!(engine.effects_registered, effects_registered + 1);
+            assert_ne!(engine.studio_content, studio_content);
+        }
+    }
+
+    #[test]
+    fn camera_motion_uses_playback_sampling_even_when_paused_full() {
+        let doc = Arc::new(pm_model::Document::new(
+            Some(
+                pm_model::json::parse(
+                    r##"{"id":"p","compId":"c","w":1920,"h":1080,"fps":30,"dur":4,"bg":"#000000","assets":{},"comps":{},"layers":[]}"##,
+                )
+                .unwrap(),
+            ),
+            1,
+        ));
+        let scene = Scene {
+            doc,
+            comp: "c".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let mut engine = Engine::new(Gpu::new("camera-motion-sampling").unwrap()).unwrap();
+        engine.studio_camera(
+            Some(crate::studio::FreeView {
+                eye: [0., 0., 6.],
+                target: [0., 0., 0.],
+                zoom: 1.,
+                ortho: false,
+                roll: 0.,
+            })
+            .into(),
+        );
+        let spec = FrameSpec {
+            exact: false,
+            settled: true,
+            scale: 1.,
+            ..FrameSpec::exact(
+                Ticks::ZERO,
+                Output {
+                    width: 1920,
+                    height: 1080,
+                    display: 0,
+                    headroom: 1.,
+                    crop: None,
+                },
+            )
+        };
+        assert!(spec.final_picture(&scene));
+        engine.camera_motion(true);
+        assert_eq!(
+            engine.frame_sampling(&scene, &spec),
+            pm_render::sampling::Sampling::Playback
+        );
+        engine.camera_motion(false);
+        assert_eq!(
+            engine.frame_sampling(&scene, &spec),
+            pm_render::sampling::Sampling::Final
+        );
+    }
+}
+
+#[cfg(test)]
+mod playback_prepare_tests {
+    use super::*;
+
+    #[test]
+    fn playback_reserves_a_still_share_and_redistributes_idle_video_capacity() {
+        let (frame, image, decoder, vector, pool, text) = playback_cache_parts(true);
+        assert_eq!(frame + image + decoder + vector + pool + text, 100);
+        assert!(200_000_000 * image / 100 >= 24_908_912);
+        let (f, i, d, v, p, t) = playback_cache_parts(false);
+        assert_eq!(f + i + d + v + p + t, 100);
+        assert!(i > image && v > vector && p > pool && f + d < frame + decoder);
+        assert!(f > 0 && d > 0);
+    }
+
+    #[test]
+    fn playback_can_keep_working_targets_and_stills_together() {
+        let cache = (224 << 20) - 2 * 1920 * 1080 * 8;
+        let (_, image, _, _, pool, _) = playback_cache_parts(false);
+        let allowance = cache * pool / 100;
+        assert!(playback_pool_budget(allowance) >= 60 << 20);
+        assert!(playback_pool_budget(allowance) <= allowance);
+        assert!(cache * image / 100 >= 25_000_000);
+
+        let (_, video_image, _, _, video_pool, _) = playback_cache_parts(true);
+        assert!(cache * video_image / 100 >= 25_000_000);
+        assert!(playback_pool_budget(cache * video_pool / 100) >= 60_000_000);
+    }
+
+    #[test]
+    fn large_playing_scene_prepares_an_upcoming_video() {
+        let mut engine = Engine::new(Gpu::new("large playback preparation").unwrap()).unwrap();
+        let mut layers = vec![serde_json::json!({"type":"shape","on":true,"from":0,"dur":4}); 500];
+        layers.push(serde_json::json!({
+            "type":"video","id":"upcoming","on":true,"from":1,"dur":2,"d":{"asset":"clip"}
+        }));
+        let project = serde_json::json!({
+            "id":"root","w":64,"h":64,"fps":30,"dur":4,"layers":layers,
+            "assets":{"clip":{"type":"video","w":64,"h":64}},
+        });
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::json::parse(&project.to_string()).unwrap()),
+                1,
+            )),
+            comp: "root".into(),
+            media: Arc::new(pm_export::render::MediaPaths {
+                paths: [(
+                    "clip".into(),
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../../../engine/fixtures/h264-aac.mp4"),
+                )]
+                .into(),
+                ..Default::default()
+            }),
+            content: 1,
+        };
+        assert!(large_scene(&scene));
+        let output = Output {
+            width: 64,
+            height: 64,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        };
+        let spec = FrameSpec {
+            moment: Moment::Playing,
+            exact: false,
+            ..FrameSpec::exact(Ticks::ZERO, output)
+        };
+        assert!(engine.prepare(&scene, Ticks::ZERO, spec).is_empty());
+        let prepared = engine.prepare(&scene, Ticks::from_whole_seconds(1), spec);
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].0, "upcoming");
+    }
 }

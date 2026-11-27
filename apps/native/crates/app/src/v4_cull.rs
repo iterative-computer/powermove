@@ -146,6 +146,7 @@ impl SurfaceView {
                 .map(|(id, _)| *id);
             let extents = self.cull.extents.borrow().clone();
             let agent_panel = self.publication.panel == "agent";
+            let inspector_panel = self.publication.panel == "inspector" && !self.cull_large();
             let scrollers: Vec<(Id, ScrollHandle)> = self
                 .prepared
                 .nodes
@@ -154,13 +155,16 @@ impl SurfaceView {
                 // decide which rows exist. Starting its rows at zero here
                 // would ignore the leading spacer after a publication.
                 .filter(|n| {
-                    // The Agent model already bounds the transcript window.
-                    // Lay it out in full so bottom follow uses real row positions
-                    // even when a streaming update invalidates the old measurements.
+                    // The Agent model already bounds the transcript window, and
+                    // Properties' normal inspector pages stay well under LARGE:
+                    // lay them out in full so dynamic sections/effects never
+                    // leave stale culled stand-in gaps on layer switches or
+                    // body scroll replays.
                     n.scroll_y
                         && !n.hidden
                         && n.virtual_window.is_none()
                         && !(agent_panel && n.semantic.as_deref() == Some("agent-conversation"))
+                        && !(inspector_panel && n.semantic.as_deref() == Some("inspector:content"))
                 })
                 .filter_map(|n| self.scrolls.get(&n.id).map(|h| (n.id, h.clone())))
                 .collect();

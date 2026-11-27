@@ -111,6 +111,7 @@ pub mod blur {
         pub padding1: u32,
         pub padding2: u32,
         pub dots: Vec4f,
+        // DotMatrix: normalized accent RGB. DotAurora: three packed RGB24 stops and fade.
         pub dot_accent: Vec4f,
     }
     uniform!(group(1), binding(0), BLUR_LOCALS: BlurUniforms);
@@ -136,14 +137,119 @@ pub mod blur {
         }
     }
 
+    pub fn dot_hash(p: Vec2f) -> f32 {
+        fract(sin(dot(p, vec2f(12.9898, 78.233))) * 43758.5453)
+    }
+
+    pub fn dot_noise(p: Vec2f) -> f32 {
+        let i = floor(p);
+        let f = p - i;
+        let u = f * f * (vec2f(3.0, 3.0) - f * 2.0);
+        let a = dot_hash(i);
+        let b = dot_hash(i + vec2f(1.0, 0.0));
+        let c = dot_hash(i + vec2f(0.0, 1.0));
+        let d = dot_hash(i + vec2f(1.0, 1.0));
+        mix(mix(a, b, u.x), mix(c, d, u.x), u.y)
+    }
+
+    pub fn dot_fbm(p: Vec2f) -> f32 {
+        let mut q = p;
+        let mut v = 0.0;
+        let mut amp = 0.5;
+        for i in 0..3 {
+            v = v + amp * dot_noise(q);
+            q = q * 2.03 + vec2f(11.7 + 0.0 * (i as f32), 11.7);
+            amp = amp * 0.5;
+        }
+        v
+    }
+
+    pub fn unpack_aurora_color(packed: f32) -> Vec3f {
+        let rgb = packed as u32;
+        vec3f(
+            ((rgb >> 16u32) & 255u32) as f32,
+            ((rgb >> 8u32) & 255u32) as f32,
+            (rgb & 255u32) as f32,
+        ) / 255.0
+    }
+
     pub fn blur_composite_color(position: Vec2f, coverage: f32) -> Vec4f {
+        let params = get!(BLUR_LOCALS).dots;
+        // GPU-rendered dot-matrix aurora (params.x < 0.0).
+        // Zero CPU quads, zero texture samples.
+        if params.w > 0.0 && params.x < 0.0 {
+            let scale = params.w;
+            let age = params.y;
+            let opening = params.z;
+            let palette = get!(BLUR_LOCALS).dot_accent;
+            let size = max(get!(BLUR_LOCALS).bounds.size / scale, vec2f(1.0, 1.0));
+            let local = (position - get!(BLUR_LOCALS).bounds.origin) / scale;
+            let cell = floor((local - vec2f(1.0, 1.0)) / 3.0 + vec2f(0.5, 0.5));
+            let center = cell * 3.0 + vec2f(1.0, 1.0);
+            if center.x < 1.0 || center.y < 1.0 || center.x > size.x || center.y > size.y {
+                return transparent();
+            }
+            if center.y > 3.0 + (size.y - 3.0) * opening || dot_hash(center) > opening {
+                return transparent();
+            }
+            let dot_cov = clamp(0.75 - length(local - center) + 0.5 / scale, 0.0, 1.0);
+            if dot_cov <= 0.0 {
+                return transparent();
+            }
+            let xn = center.x / size.x * 2.2;
+            let up = 1.0 - center.y / size.y;
+            let mut swirl = 0.0;
+            let mut rise = 0.0;
+            for j in 0..4 {
+                let f = j as f32;
+                let hem = 0.04
+                    + 0.25 * f
+                    + 0.09 * sin(xn * (1.6 + 0.7 * f) + age * (0.45 + 0.2 * f) + f * 2.1)
+                    + 0.09 * (dot_fbm(vec2f(xn * 1.4 + age * 0.12, f * 3.7)) - 0.5);
+                let above = up - hem;
+                let curtain = select(
+                    0.3 * exp(-above * 3.0) + 0.7 * exp(-above * 40.0),
+                    exp(max(above * 65.0, -40.0)),
+                    above < 0.0,
+                );
+                let r = clamp(
+                    (dot_fbm(vec2f(
+                        xn * 20.0 + age * 0.2 + f * 5.0,
+                        f * 7.0 + up * 0.025 - age * 0.02,
+                    )) - 0.22)
+                        / 0.5,
+                    0.0,
+                    1.0,
+                );
+                let v = 2.2
+                    * curtain
+                    * (0.08 + 0.92 * r * r * (3.0 - 2.0 * r))
+                    * (0.8 + 0.2 * sin(xn * 11.0 - age * 2.2 + f * 1.3))
+                    * (1.0 - 0.1 * f);
+                if v > swirl {
+                    swirl = v;
+                    rise = clamp(above * 4.0, 0.0, 1.0);
+                }
+            }
+            let s = clamp(swirl, 0.0, 1.0);
+            let s2 = s * s;
+            let dot_alpha = min(0.02 + 0.1 * s + 0.88 * s2 * s2, 1.0);
+            let gold = unpack_aurora_color(palette.x);
+            let accent = unpack_aurora_color(palette.y);
+            let rose = unpack_aurora_color(palette.z);
+            let t1 = clamp(rise / 0.35, 0.0, 1.0);
+            let t2 = clamp((rise - 0.45) / 0.55, 0.0, 1.0) * 0.45;
+            let warm = gold * (1.0 - t1) + accent * t1;
+            let color = warm * (1.0 - t2) + rose * t2;
+            let a = dot_alpha * dot_cov * palette.w * coverage * get!(BLUR_LOCALS).opacity;
+            return vec4f(color.x * a, color.y * a, color.z * a, a);
+        }
         let mut blurred = texture_sample_level(
             BLUR_TEXTURE,
             BLUR_SAMPLER,
             position / get!(BLUR_LOCALS).target_size,
             0.0,
         );
-        let params = get!(BLUR_LOCALS).dots;
         if params.w > 0.0 {
             let scale = params.w;
             let local = (position - get!(BLUR_LOCALS).bounds.origin) / scale;
@@ -155,6 +261,11 @@ pub mod blur {
                     continue;
                 }
                 let gp = idx * pitch;
+                // Reject pixels outside the dot disk before the 3x3 texture fetch loop.
+                let disk = clamp(1.35 - length(local - gp) + 0.5 / scale, 0.0, 1.0);
+                if disk <= 0.0 {
+                    continue;
+                }
                 let stagger = fract(sin(dot(gp, vec2f(12.9898, 78.233))) * 43758.5453);
                 let vis = clamp((params.x - k as f32 - stagger * 0.85) / 0.15, 0.0, 1.0);
                 if vis <= 0.0 {
@@ -171,9 +282,7 @@ pub mod blur {
                     }
                 }
                 let cov = clamp(sample.w, 0.0, 1.0);
-                let a = clamp(1.35 - length(local - gp) + 0.5 / scale, 0.0, 1.0)
-                    * vis
-                    * smoothstep(0.04, 0.35, cov);
+                let a = disk * vis * smoothstep(0.04, 0.35, cov);
                 if a > best.w {
                     let base = sample.xyz() / max(cov, 0.001);
                     let heat = 0.18 + 0.1 * cov;

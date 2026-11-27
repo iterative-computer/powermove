@@ -12,9 +12,11 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicIsize, Ordering},
     },
 };
+
+const EXCLUSIVE_OPERATION: isize = -1;
 
 pub struct Host {
     pub kernel: KernelHandle,
@@ -23,22 +25,53 @@ pub struct Host {
     presence: Mutex<
         std::collections::HashMap<String, std::collections::VecDeque<crate::presence::Presence>>,
     >,
-    operations: Arc<AtomicBool>,
+    /// 0 = idle, > 0 = active shared read/panel operations, -1 = exclusive session transition.
+    operations: Arc<AtomicIsize>,
     /// The project whose open waits on a person's recovery choice.
     deciding: Mutex<Option<String>>,
     pending_opens: Mutex<crate::recovery::PendingOpens>,
     pub closing: AtomicBool,
     paused: Mutex<std::collections::HashSet<String>>,
     held: Mutex<std::collections::HashSet<String>>,
-    recent_turn: Mutex<std::collections::HashMap<String, (pm_kernel::Writer, String)>>,
+    recent_turn: Mutex<std::collections::HashMap<String, ProjectTurns>>,
     pause_changed: std::sync::Condvar,
     extension_state: Mutex<std::collections::BTreeMap<u64, ProjectExtensions>>,
+}
+/// A built-in run can reconnect during final verification. Each connection
+/// that changes the document contributes its own history writer.
+#[derive(Clone, Default)]
+pub struct RecentTurn {
+    pub writers: Vec<(pm_kernel::Writer, String)>,
+}
+#[derive(Default)]
+struct ProjectTurns {
+    document: u64,
+    builtin_run: Option<String>,
+    builtin: RecentTurn,
+    external: RecentTurn,
+    show_builtin: bool,
+    builtin_working: bool,
 }
 #[derive(Clone, Default)]
 pub struct ProjectExtensions {
     pub root: Option<PathBuf>,
     pub excluded: std::collections::BTreeSet<String>,
     pub report: Value,
+}
+
+impl ProjectTurns {
+    fn bind_document(&mut self, document: u64) {
+        if self.document != document {
+            *self = Self { document, ..Self::default() };
+        }
+    }
+
+    fn begin_builtin(&mut self, run: &str) {
+        self.builtin_run = Some(run.into());
+        self.builtin = RecentTurn::default();
+        self.builtin_working = true;
+        self.show_builtin = true;
+    }
 }
 
 /// Slot 0 is a windowless host's (the headless MCP server): its only project.
@@ -96,11 +129,19 @@ impl Windows {
         })
     }
 }
-/// An owned, nonblocking fence for app session transitions. Never held by a UI gesture.
-pub struct Operation(Arc<AtomicBool>);
+/// An owned, nonblocking fence for app session transitions (exclusive) or
+/// concurrent non-transition tool calls (shared). Never held by a UI gesture.
+pub struct Operation {
+    counter: Arc<AtomicIsize>,
+    exclusive: bool,
+}
 impl Drop for Operation {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        if self.exclusive {
+            self.counter.store(0, Ordering::Release);
+        } else {
+            self.counter.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 impl Host {
@@ -112,7 +153,7 @@ impl Host {
             profile,
             windows: Mutex::new(windows),
             presence: Mutex::default(),
-            operations: Arc::new(AtomicBool::new(false)),
+            operations: Arc::new(AtomicIsize::new(0)),
             deciding: Mutex::new(None),
             pending_opens: Mutex::default(),
             closing: AtomicBool::new(false),
@@ -123,14 +164,76 @@ impl Host {
             extension_state: Mutex::default(),
         })
     }
-    pub fn record_turn(&self, project: &str, writer: pm_kernel::Writer, label: &str) {
-        self.recent_turn
-            .lock()
-            .unwrap()
-            .insert(project.into(), (writer, label.into()));
+    pub fn begin_builtin_turn(&self, project: &str, run: &str) {
+        let mut recent = self.recent_turn.lock().unwrap();
+        let Some(view) = self.kernel.published(project) else {
+            return;
+        };
+        let turns = recent.entry(project.into()).or_default();
+        turns.bind_document(view.snapshot.doc_id);
+        if turns.builtin_run.as_deref() != Some(run) {
+            turns.begin_builtin(run);
+        }
     }
-    pub fn latest_turn(&self, project: &str) -> Option<(pm_kernel::Writer, String)> {
-        self.recent_turn.lock().unwrap().get(project).cloned()
+
+    pub fn finish_builtin_turn(&self, project: &str, document: u64) {
+        if let Some(turns) = self.recent_turn.lock().unwrap().get_mut(project)
+            && turns.document == document
+        {
+            turns.builtin_working = false;
+        }
+    }
+
+    pub fn record_turn(
+        &self,
+        project: &str,
+        document: u64,
+        owner: Option<&str>,
+        writer: pm_kernel::Writer,
+        label: &str,
+    ) {
+        let mut recent = self.recent_turn.lock().unwrap();
+        if self.kernel.published(project).is_none_or(|view| view.snapshot.doc_id != document) {
+            return;
+        }
+        let turns = recent.entry(project.into()).or_default();
+        turns.bind_document(document);
+        if let Some(run) = owner {
+            if turns.builtin_run.is_none() {
+                // An app-wide run can open its project after it starts.
+                turns.begin_builtin(run);
+            }
+            if turns.builtin_run.as_deref() == Some(run) {
+                if let Some((_, title)) = turns.builtin.writers.iter_mut().find(|(w, _)| *w == writer) {
+                    *title = label.into();
+                } else {
+                    turns.builtin.writers.push((writer, label.into()));
+                }
+            }
+        } else {
+            turns.external.writers = vec![(writer, label.into())];
+            if !turns.builtin_working {
+                turns.show_builtin = false;
+            }
+        }
+    }
+
+    pub fn latest_turn(&self, project: &str, document: u64) -> Option<RecentTurn> {
+        let recent = self.recent_turn.lock().unwrap();
+        let turns = recent.get(project).filter(|turns| turns.document == document)?;
+        let turn = if turns.show_builtin { &turns.builtin } else { &turns.external };
+        (!turn.writers.is_empty()).then(|| turn.clone())
+    }
+
+    /// Retire only the writer we actually processed. A newer session may have
+    /// published a different turn while the kernel was undoing this one.
+    pub fn forget_turn_writer(&self, project: &str, document: u64, writer: pm_kernel::Writer) {
+        if let Some(turns) = self.recent_turn.lock().unwrap().get_mut(project)
+            && turns.document == document
+        {
+            turns.builtin.writers.retain(|(owner, _)| *owner != writer);
+            turns.external.writers.retain(|(owner, _)| *owner != writer);
+        }
     }
     /// Pause gates the next tool admission on the MCP worker, never a
     /// transaction in progress or the UI thread.
@@ -296,13 +399,46 @@ impl Host {
     }
     pub fn try_operation(&self) -> Option<Operation> {
         self.operations
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(0, EXCLUSIVE_OPERATION, Ordering::AcqRel, Ordering::Acquire)
             .ok()
-            .map(|_| Operation(self.operations.clone()))
+            .map(|_| Operation {
+                counter: self.operations.clone(),
+                exclusive: true,
+            })
     }
-    /// Whether a session transition holds the fence now.
+    /// Shared fence for non-transition MCP tools (reads, panel inspection,
+    /// captures, extension publishes). Unlimited shared callers can run
+    /// concurrently, while exclusive session transitions (open/close/import)
+    /// still fence them out cleanly.
+    pub fn try_shared_operation(&self) -> Option<Operation> {
+        let mut current = self.operations.load(Ordering::Acquire);
+        loop {
+            if current < 0 {
+                return None;
+            }
+            match self.operations.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(Operation {
+                        counter: self.operations.clone(),
+                        exclusive: false,
+                    });
+                }
+                Err(next) => current = next,
+            }
+        }
+    }
+    /// Whether any session transition or active fenced operation holds the fence now.
     pub fn operation_in_progress(&self) -> bool {
-        self.operations.load(Ordering::Acquire)
+        self.operations.load(Ordering::Acquire) != 0
+    }
+    /// Whether an open is currently paused waiting on a human recovery choice.
+    pub fn is_awaiting_recovery(&self) -> bool {
+        self.deciding.lock().unwrap().is_some()
     }
     /// While `project`'s open waits on a recovery choice in the window, tools
     /// say so instead of reporting a bare operation in progress.

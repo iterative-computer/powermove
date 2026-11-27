@@ -1410,3 +1410,81 @@ fn separate_dimensions_preserves_a_closed_strip() {
     assert!(!c.model.layer_expanded("p"));
     assert_eq!(c.model.rows().len(), 1);
 }
+
+#[test]
+fn open_layer_opens_precomp_and_focuses_nested_groups_like_compositions() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = r##"{
+        "id": "p", "name": "Main", "compId": "main", "w": 640, "h": 360, "fps": 30, "dur": 10,
+        "layers": [
+            {"id":"pre","name":"Precomp","type":"precomp","from":0,"dur":5,"on":true,"d":{"comp":"sub","w":640,"h":360},"p":{}},
+            {"id":"g1","name":"Outer","type":"group","from":0,"dur":5,"on":true,"collapsed":true,"d":{},"p":{}},
+            {"id":"g2","name":"Inner","type":"group","group":"g1","from":0,"dur":5,"on":true,"collapsed":true,"d":{},"p":{}},
+            {"id":"child","name":"Leaf","type":"solid","group":"g2","from":0,"dur":5,"on":true,"d":{"w":100,"h":100,"color":"#ff0000"},"p":{}},
+            {"id":"outside","name":"Outside","type":"solid","from":0,"dur":5,"on":true,"d":{"w":100,"h":100,"color":"#00ff00"},"p":{}}
+        ],
+        "assets": {},
+        "comps": {
+            "sub": {"id":"sub","name":"Sub Comp","w":640,"h":360,"fps":30,"dur":5,"layers":[]}
+        }
+    }"##;
+    actor
+        .handle()
+        .open("P", OpenSource::Untitled(parse(project).unwrap()))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut c = TimelineClient::new(actor.handle(), "P", Caller::native()).unwrap();
+    c.sync().unwrap();
+
+    // 1. openLayer on a precomp emits OpenComposition("sub").
+    let effects = dispatch(&mut c, json!({"type":"openLayer","id":id("pre")})).unwrap();
+    assert_eq!(effects, vec![HostEffect::OpenComposition("sub".into())]);
+
+    // 2. openLayer on outer group g1 focuses g1 and scopes rows to its children at depth 0.
+    let effects = dispatch(&mut c, json!({"type":"openLayer","id":id("g1")})).unwrap();
+    assert!(effects.is_empty());
+    assert_eq!(c.model.active_focused_group(), Some("g1"));
+    let rows = v4::project_window(&c.model, 0, 20).unwrap();
+    let row_layers: Vec<&str> = rows["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["layer"].as_str().unwrap())
+        .collect();
+    assert_eq!(row_layers, vec!["g2"]);
+    assert_eq!(rows["window"]["rows"][0]["depth"], 0);
+
+    // 3. openLayer on inner group g2 deepens focus; chain is [g1, g2] and rows show child at depth 0.
+    dispatch(&mut c, json!({"type":"openLayer","id":id("g2")})).unwrap();
+    let chain: Vec<&str> = c
+        .model
+        .focused_group_chain()
+        .into_iter()
+        .map(|l| l.id.as_str())
+        .collect();
+    assert_eq!(chain, vec!["g1", "g2"]);
+    let rows = v4::project_window(&c.model, 0, 20).unwrap();
+    let row_layers: Vec<&str> = rows["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["layer"].as_str().unwrap())
+        .collect();
+    assert_eq!(row_layers, vec!["child"]);
+    assert_eq!(rows["window"]["rows"][0]["depth"], 0);
+
+    // 4. Closing group tab g2 returns to g1; clicking root comp tab exits group focus.
+    dispatch(&mut c, json!({"type":"tab","id":"group:g2","close":true})).unwrap();
+    assert_eq!(c.model.active_focused_group(), Some("g1"));
+    dispatch(&mut c, json!({"type":"tab","id":"main","close":false})).unwrap();
+    assert_eq!(c.model.active_focused_group(), None);
+    let rows = v4::project_window(&c.model, 0, 20).unwrap();
+    let row_layers: Vec<&str> = rows["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["layer"].as_str().unwrap())
+        .collect();
+    assert_eq!(row_layers, vec!["pre", "g1", "outside"]);
+}

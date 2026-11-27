@@ -1,11 +1,12 @@
 //! Platform-independent search/navigation state for the two pooled child windows.
 use crate::layout::Rect;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ComposerPicker {
     Model,
     Access,
+    Threads,
     /// The composer's "+": attachments, Select Part of the Screen and the
     /// Approvals choice.
     Add,
@@ -16,6 +17,7 @@ impl ComposerPicker {
         match name? {
             "model" => Some(Self::Model),
             "access" => Some(Self::Access),
+            "threads" => Some(Self::Threads),
             "add" => Some(Self::Add),
             _ => None,
         }
@@ -23,6 +25,7 @@ impl ComposerPicker {
     pub fn width(self) -> f32 {
         match self {
             Self::Model => 260.,
+            Self::Threads => 288.,
             Self::Access | Self::Add => 360.,
         }
     }
@@ -88,10 +91,68 @@ pub fn model_picker_frame(owner: Rect, anchor: Rect, size: (f32, f32)) -> Rect {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The Threads popover opens below its header trigger, right-aligned to the
+/// trigger's trailing edge and clamped inside the owner's content rect.
+pub fn threads_picker_frame(owner: Rect, anchor: Rect, size: (f32, f32), gap: f32) -> Rect {
+    let owner = composer_picker_interior(owner);
+    let w = size.0.min(owner.w);
+    let room_below = (anchor.y - gap - owner.y).max(0.);
+    let room_above = (owner.y + owner.h - (anchor.y + anchor.h + gap)).max(0.);
+    let open_below = room_below >= size.1 || room_below >= room_above;
+    let max_h = if open_below {
+        room_below.max(owner.h.min(64.))
+    } else {
+        room_above.max(owner.h.min(64.))
+    };
+    let h = size.1.min(max_h).min(owner.h);
+    let y = if open_below {
+        (anchor.y - gap - h).clamp(owner.y, owner.y + owner.h - h)
+    } else {
+        (anchor.y + anchor.h + gap).clamp(owner.y, owner.y + owner.h - h)
+    };
+    let x = (anchor.x + anchor.w - w).clamp(owner.x, owner.x + owner.w - w);
+    Rect { x, y, w, h }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PickerRow {
     Choice(usize),
     Provider(usize),
+    Category(usize),
+}
+
+/// The parent row's position and the active position inside its flyout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Submenu {
+    pub parent: usize,
+    keyed: Option<usize>,
+    hover: Option<usize>,
+}
+
+impl Submenu {
+    pub fn lit(self) -> Option<usize> {
+        self.hover.or(self.keyed)
+    }
+}
+
+/// Screen points (y increases upward). Align the flyout's first row with
+/// the parent row, touching the parent card at either edge.
+pub(crate) fn submenu_frame(screen: Rect, menu: Rect, row_top: f32, size: (f32, f32)) -> Rect {
+    let (w, h) = (size.0.min(screen.w), size.1.min(screen.h));
+    let right = menu.x + menu.w;
+    let left = menu.x - w;
+    let screen_right = screen.x + screen.w;
+    let x = if right + w <= screen_right || screen_right - right >= menu.x - screen.x {
+        right
+    } else {
+        left
+    };
+    Rect {
+        x: x.clamp(screen.x, screen_right - w),
+        y: (row_top - h).clamp(screen.y, screen.y + screen.h - h),
+        w,
+        h,
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -118,6 +179,20 @@ pub struct Choice {
     /// Layer and effect rows require a name search unless recently run.
     pub search_only: bool,
     pub aliases: Vec<String>,
+    /// Optional 0xRRGGBB color swatch dot drawn before the label (e.g. 3D material).
+    pub swatch: Option<u32>,
+    /// Optional tree indentation level (in steps) for hierarchical pickers.
+    pub indent: u8,
+    /// Optional accent indicator dot on the trailing edge (e.g. modified/keyed part).
+    pub modified: bool,
+    /// Optional command emitted when this row becomes hovered/lit (and cleared on leave/dismiss).
+    pub hover_command: Option<String>,
+    /// Symbol for this category or single choice in a grouped menu.
+    pub menu_icon: Option<&'static str>,
+    /// Optional destructive trailing action command shown as a trashcan on hover.
+    pub delete_command: Option<String>,
+    /// Draw a subtle hairline separator directly after this row when more rows follow.
+    pub separator_after: bool,
 }
 impl Choice {
     pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
@@ -172,12 +247,55 @@ impl Choice {
         self.checked = Some(on);
         self
     }
+    fn provider_header(&self) -> Option<&str> {
+        self.provider.as_deref().filter(|_| self.stays)
+    }
+    pub(crate) fn is_provider_model(&self) -> bool {
+        // Agent menu commands are reply indices. Model rows carry a check state,
+        // while a nested provider switch has none.
+        self.provider_header().is_none()
+            && !self.informational
+            && !self.command.starts_with("provider:")
+            && (!self.command.starts_with("agentPick:") || self.checked.is_some())
+    }
     pub fn stays(mut self, on: bool) -> Self {
         self.stays = on;
         self
     }
     pub fn in_font(mut self, family: impl Into<String>) -> Self {
         self.font = Some(family.into());
+        self
+    }
+    pub fn with_swatch(mut self, rgb: u32) -> Self {
+        self.swatch = Some(rgb);
+        self
+    }
+    pub fn with_indent(mut self, indent: u8) -> Self {
+        self.indent = indent;
+        self
+    }
+    pub fn with_modified(mut self, modified: bool) -> Self {
+        self.modified = modified;
+        self
+    }
+    pub fn with_hover(mut self, command: impl Into<String>) -> Self {
+        self.hover_command = Some(command.into());
+        self
+    }
+    pub fn with_aliases(mut self, aliases: Vec<String>) -> Self {
+        self.aliases = aliases;
+        self
+    }
+    pub fn with_icon(mut self, name: &'static str) -> Self {
+        self.menu_icon = Some(name);
+        self
+    }
+    pub fn with_delete(mut self, command: impl Into<String>) -> Self {
+        self.delete_command = Some(command.into());
+        self
+    }
+    pub fn separator_after(mut self) -> Self {
+        self.separator_after = true;
         self
     }
 }
@@ -199,6 +317,11 @@ pub struct Picker {
     /// only listed rows.
     pub page: Option<usize>,
     pub provider_choices: BTreeMap<String, bool>,
+    /// Collapsed sections for the current query, whose matches otherwise start open.
+    pub collapsed_search_providers: HashSet<String>,
+    /// Group repeated categories into flyouts when browsing.
+    pub grouped: bool,
+    pub submenu: Option<Submenu>,
 }
 /// Match quality of `query` against `text` (lower is better), `None` if absent.
 /// Label prefix, then a word start, then any substring, then an in-order
@@ -267,11 +390,8 @@ impl Picker {
     }
 
     pub fn replace_choices(&mut self, choices: Vec<Choice>) {
-        let previous = self.current_provider().map(str::to_owned);
         self.choices = choices;
-        if self.current_provider() != previous.as_deref() {
-            self.expand_current_provider();
-        }
+        self.expand_current_provider();
     }
 
     fn current_provider(&self) -> Option<&str> {
@@ -286,18 +406,18 @@ impl Picker {
 
     fn expand_current_provider(&mut self) {
         if let Some(provider) = self.current_provider().map(str::to_owned) {
-            self.provider_choices.insert(provider, true);
+            self.provider_choices.entry(provider).or_insert(true);
         }
     }
 
     pub fn has_provider_headers(&self) -> bool {
-        let mut providers = self
-            .choices
-            .iter()
-            .filter_map(|choice| choice.provider.as_ref());
-        providers
-            .next()
-            .is_some_and(|first| providers.any(|provider| provider != first))
+        let mut first = None;
+        self.choices.iter().any(|choice| {
+            choice
+                .provider
+                .as_deref()
+                .is_some_and(|provider| choice.stays || *first.get_or_insert(provider) != provider)
+        })
     }
 
     pub fn rows(&self) -> Vec<PickerRow> {
@@ -307,38 +427,105 @@ impl Picker {
     /// The displayed rows and their overflow, from one ranked list.
     pub fn rows_and_unlisted(&self) -> (Vec<PickerRow>, usize) {
         let (indices, unlisted) = self.filtered_and_unlisted();
-        let headers = self.has_provider_headers();
-        let mut seen = HashSet::new();
-        let mut rows = Vec::new();
-        for index in indices {
-            if headers && let Some(provider) = &self.choices[index].provider {
-                if seen.insert(provider) {
-                    rows.push(PickerRow::Provider(index));
-                }
-                if !self.provider_expanded(index) {
-                    continue;
+        if self.grouped && self.query.is_empty() {
+            let mut counts = BTreeMap::new();
+            for &index in &indices {
+                *counts.entry(&self.choices[index].category).or_insert(0) += 1;
+            }
+            let mut seen = HashSet::new();
+            let rows = indices
+                .into_iter()
+                .filter_map(|index| {
+                    let category = &self.choices[index].category;
+                    if category.is_empty() || counts[category] == 1 {
+                        Some(PickerRow::Choice(index))
+                    } else {
+                        seen.insert(category).then_some(PickerRow::Category(index))
+                    }
+                })
+                .collect();
+            return (rows, unlisted);
+        }
+        if !self.has_provider_headers() {
+            return (
+                indices.into_iter().map(PickerRow::Choice).collect(),
+                unlisted,
+            );
+        }
+
+        let query = self.query.trim();
+        let mut order = indices.clone();
+        let mut explicit = HashMap::new();
+        for (index, choice) in self.choices.iter().enumerate() {
+            if let Some(provider) = choice.provider_header() {
+                explicit.insert(provider, index);
+                if rank(&choice.label, query).is_some() {
+                    order.push(index);
                 }
             }
-            rows.push(PickerRow::Choice(index));
+        }
+        if query.is_empty() && !explicit.is_empty() {
+            // Headers keep catalog order, including providers with no matching children.
+            order.sort_by_key(|&index| {
+                self.choices[index]
+                    .provider
+                    .as_deref()
+                    .and_then(|provider| explicit.get(provider).copied())
+                    .unwrap_or(index)
+            });
+        }
+
+        let mut children: HashMap<_, Vec<_>> = HashMap::new();
+        for index in indices {
+            if let Some(provider) = self.choices[index].provider.as_deref() {
+                children
+                    .entry(provider)
+                    .or_default()
+                    .push(PickerRow::Choice(index));
+            }
+        }
+        let mut seen = HashSet::new();
+        let mut rows = Vec::new();
+        for index in order {
+            if let Some(provider) = self.choices[index].provider.as_deref() {
+                if seen.insert(provider) {
+                    let header = explicit.get(provider).copied().unwrap_or(index);
+                    rows.push(PickerRow::Provider(header));
+                    if self.provider_expanded(header)
+                        && let Some(children) = children.remove(provider)
+                    {
+                        rows.extend(children);
+                    }
+                }
+            } else {
+                rows.push(PickerRow::Choice(index));
+            }
         }
         (rows, unlisted)
     }
 
     pub fn provider_expanded(&self, index: usize) -> bool {
-        !self.query.trim().is_empty()
-            || self.choices[index]
-                .provider
-                .as_ref()
-                .and_then(|provider| self.provider_choices.get(provider))
+        let Some(provider) = self.choices[index].provider.as_deref() else {
+            return false;
+        };
+        if self.query.trim().is_empty() {
+            self.provider_choices
+                .get(provider)
                 .copied()
                 .unwrap_or(false)
+        } else {
+            !self.collapsed_search_providers.contains(provider)
+        }
     }
 
     pub fn provider_summary(&self, index: usize) -> String {
         self.provider_summary_with_count(index, || {
             self.filtered()
                 .into_iter()
-                .filter(|&i| self.choices[i].provider == self.choices[index].provider)
+                .filter(|&i| {
+                    let choice = &self.choices[i];
+                    choice.provider == self.choices[index].provider && choice.is_provider_model()
+                })
                 .count()
         })
     }
@@ -348,23 +535,35 @@ impl Picker {
         index: usize,
         matched: impl FnOnce() -> usize,
     ) -> String {
-        let provider = &self.choices[index].provider;
-        let members = || {
+        let header = &self.choices[index];
+        let detail = if header.provider_header().is_some() {
+            &header.detail
+        } else {
+            ""
+        };
+        let models = || {
             self.choices
                 .iter()
-                .filter(|choice| &choice.provider == provider)
+                .filter(|choice| choice.provider == header.provider && choice.is_provider_model())
         };
-        if !self.provider_expanded(index)
-            && let Some(selected) = members().find(|choice| choice.checked == Some(true))
-        {
-            return selected.label.clone();
+        if !self.provider_expanded(index) {
+            if let Some(selected) = models().find(|choice| choice.checked == Some(true)) {
+                return selected.label.clone();
+            }
+            if !detail.is_empty() {
+                return detail.to_owned();
+            }
         }
         let count = if self.query.trim().is_empty() {
-            members().count()
+            models().count()
         } else {
             matched()
         };
-        count.to_string()
+        if count == 0 {
+            detail.to_owned()
+        } else {
+            count.to_string()
+        }
     }
 
     pub fn toggle_provider(
@@ -372,9 +571,6 @@ impl Picker {
         index: usize,
         expanded: Option<bool>,
     ) -> Option<(String, bool)> {
-        if !self.query.trim().is_empty() {
-            return None;
-        }
         let row = PickerRow::Provider(index);
         let place = self.rows().iter().position(|&item| item == row)?;
         let before = self.provider_expanded(index);
@@ -384,6 +580,13 @@ impl Picker {
         }
         let provider = self.choices[index].provider.clone()?;
         self.provider_choices.insert(provider.clone(), expanded);
+        if !self.query.trim().is_empty() {
+            if expanded {
+                self.collapsed_search_providers.remove(&provider);
+            } else {
+                self.collapsed_search_providers.insert(provider.clone());
+            }
+        }
         self.keyed = Some(place);
         self.hover = None;
         Some((provider, expanded))
@@ -439,6 +642,29 @@ impl Picker {
     fn matches(&self) -> Vec<usize> {
         let trimmed = self.query.trim();
         let trimmed_lower = lowercase(trimmed);
+        if self.grouped && !self.query.is_empty() {
+            let mut ranked: Vec<_> = self
+                .choices
+                .iter()
+                .enumerate()
+                .filter(|(_, choice)| !choice.informational && choice.provider_header().is_none())
+                .filter_map(|(index, choice)| {
+                    let q = trimmed_lower.as_ref();
+                    let label = rank_lowercase(&choice.label, q);
+                    let metadata = [&choice.category, &choice.detail, &choice.command]
+                        .into_iter()
+                        .chain(&choice.aliases)
+                        .any(|text| lowercase(text).contains(q));
+                    label
+                        .filter(|&rank| rank < 3)
+                        .or_else(|| metadata.then_some(3))
+                        .or_else(|| label.map(|_| 4))
+                        .map(|rank| (rank, index))
+                })
+                .collect();
+            ranked.sort_unstable();
+            return ranked.into_iter().map(|(_, index)| index).collect();
+        }
         let query_lower = if trimmed.len() == self.query.len() {
             None
         } else {
@@ -451,7 +677,7 @@ impl Picker {
             .iter()
             .enumerate()
             .filter_map(|(i, c)| {
-                if c.informational {
+                if c.informational || c.provider_header().is_some() {
                     return None;
                 }
                 if c.search_only {
@@ -519,12 +745,18 @@ impl Picker {
     }
     /// The lit row: the pointer's while it is over one, else the keyboard's.
     pub fn lit(&self) -> Option<usize> {
-        self.hover.or(self.keyed)
+        self.hover
+            .or(self.submenu.map(|menu| menu.parent))
+            .or(self.keyed)
     }
     /// A typed query lights its best match; an empty one lights nothing.
     pub fn search(&mut self, q: String) {
+        if self.grouped {
+            self.search_and_list(q);
+            return;
+        }
         self.hover = None;
-        self.query = q;
+        self.set_query(q);
         self.keyed = if self.query.trim().is_empty() {
             None
         } else if self.has_provider_headers() {
@@ -538,9 +770,10 @@ impl Picker {
     /// Changes the query and selects its best displayed result using the same rows.
     pub(crate) fn search_and_list(&mut self, query: String) -> (Vec<PickerRow>, usize) {
         self.hover = None;
-        self.query = query;
+        self.submenu = None;
+        self.set_query(query);
         let (rows, unlisted) = self.rows_and_unlisted();
-        self.keyed = if self.query.trim().is_empty() {
+        self.keyed = if self.query.is_empty() || (!self.grouped && self.query.trim().is_empty()) {
             None
         } else {
             rows.iter()
@@ -549,12 +782,68 @@ impl Picker {
         (rows, unlisted)
     }
 
+    fn set_query(&mut self, query: String) {
+        if self.query != query {
+            self.collapsed_search_providers.clear();
+        }
+        self.query = query;
+    }
+
     /// The pointer is over `row`, or has left the rows. True if the light moved.
     pub fn point(&mut self, row: Option<usize>) -> bool {
         let before = self.lit();
+        let submenu = self.submenu;
         self.hover = row;
-        before != self.lit()
+        if self.grouped
+            && let Some(place) = row
+        {
+            if self.submenu.is_none_or(|menu| menu.parent != place) {
+                self.submenu = match self.rows().get(place) {
+                    Some(PickerRow::Category(_)) => Some(Submenu {
+                        parent: place,
+                        keyed: None,
+                        hover: None,
+                    }),
+                    _ => None,
+                };
+            }
+        }
+        before != self.lit() || submenu != self.submenu
     }
+
+    pub fn submenu_choices(&self) -> Vec<usize> {
+        let Some(PickerRow::Category(index)) = self
+            .submenu
+            .and_then(|menu| self.rows().get(menu.parent).copied())
+        else {
+            return Vec::new();
+        };
+        let category = &self.choices[index].category;
+        self.filtered()
+            .into_iter()
+            .filter(|&index| &self.choices[index].category == category)
+            .collect()
+    }
+
+    pub(crate) fn point_submenu(&mut self, row: Option<usize>) -> bool {
+        let Some(menu) = &mut self.submenu else {
+            return false;
+        };
+        let before = menu.lit();
+        menu.hover = row;
+        before != menu.lit()
+    }
+
+    pub(crate) fn enter_category(&mut self, place: usize) {
+        self.keyed = Some(place);
+        self.hover = None;
+        self.submenu = Some(Submenu {
+            parent: place,
+            keyed: Some(0),
+            hover: None,
+        });
+    }
+
     /// Lights the first row whose label starts with `typed` (a menu with no
     /// search field). True if one does.
     pub fn type_ahead(&mut self, typed: &str) -> bool {
@@ -570,9 +859,48 @@ impl Picker {
         found.is_some()
     }
     pub fn navigate(&mut self, key: &str) -> Option<String> {
+        if let Some(menu) = self.submenu {
+            if matches!(key, "left" | "escape") {
+                self.keyed = Some(menu.parent);
+                self.hover = None;
+                self.submenu = None;
+                return None;
+            }
+            if let Some(lit) = menu.lit() {
+                let choices = self.submenu_choices();
+                let n = choices.len();
+                if lit >= n {
+                    return None;
+                }
+                if key == "enter" {
+                    return self.choose(choices[lit]);
+                }
+                if let Some(to) = match key {
+                    "up" => Some((lit + n - 1) % n),
+                    "down" => Some((lit + 1) % n),
+                    "home" => Some(0),
+                    "end" => Some(n - 1),
+                    _ => None,
+                } {
+                    self.submenu = Some(Submenu {
+                        keyed: Some(to),
+                        hover: None,
+                        ..menu
+                    });
+                    return None;
+                }
+            }
+        }
         let rows = self.rows();
         let n = rows.len();
         let lit = self.lit().filter(|&i| i < n);
+        if matches!(key, "right" | "enter")
+            && let Some(place) = lit
+            && matches!(rows[place], PickerRow::Category(_))
+        {
+            self.enter_category(place);
+            return None;
+        }
         let to = match key {
             "escape" => {
                 self.open = false;
@@ -596,9 +924,7 @@ impl Picker {
                 let PickerRow::Choice(index) = rows[lit?] else {
                     return None;
                 };
-                let choice = &self.choices[index];
-                self.open = choice.stays;
-                return Some(choice.command.clone());
+                return self.choose(index);
             }
             _ => None,
         };
@@ -606,8 +932,148 @@ impl Picker {
             // The keyboard takes the light; the pointer has it back when it moves.
             self.keyed = to;
             self.hover = None;
+            self.submenu = None;
         }
         None
+    }
+
+    fn choose(&mut self, index: usize) -> Option<String> {
+        let choice = &self.choices[index];
+        self.open = choice.stays;
+        self.submenu = None;
+        Some(choice.command.clone())
+    }
+}
+
+#[cfg(test)]
+mod submenu_tests {
+    use super::*;
+
+    fn menu() -> Picker {
+        Picker {
+            choices: vec![
+                Choice::new("Cube", "cube").within("Mesh"),
+                Choice::new("Point Light", "point").within("Light"),
+                Choice::new("Sphere", "sphere").within("Mesh"),
+                Choice::new("Camera", "camera").within("Camera"),
+                Choice::new("Spot Light", "spot")
+                    .within("Light")
+                    .detail("Adjustable spread")
+                    .with_aliases(vec!["projector".into()]),
+                Choice::new("Import", "import"),
+                Choice::new("Other", "other"),
+            ],
+            grouped: true,
+            open: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn groups_repeated_categories_and_leaves_single_items_direct() {
+        assert_eq!(
+            menu().rows(),
+            [
+                PickerRow::Category(0),
+                PickerRow::Category(1),
+                PickerRow::Choice(3),
+                PickerRow::Choice(5),
+                PickerRow::Choice(6),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_closes_the_flyout_and_matches_all_choice_fields() {
+        let mut menu = menu();
+        menu.point(Some(0));
+        assert!(menu.submenu.is_some());
+        for (query, first) in [("spot", 4), ("mesh", 0), ("spread", 4), ("projector", 4)] {
+            menu.search(query.into());
+            assert!(menu.submenu.is_none());
+            assert_eq!(menu.lit_row(), Some(PickerRow::Choice(first)));
+            assert!(
+                menu.rows()
+                    .iter()
+                    .all(|row| matches!(row, PickerRow::Choice(_)))
+            );
+        }
+        menu.search(" ".into());
+        assert_eq!(menu.rows().len(), menu.choices.len());
+        menu.search(String::new());
+        assert_eq!(menu.rows()[0], PickerRow::Category(0));
+        assert!(menu.lit().is_none());
+    }
+
+    #[test]
+    fn hovering_switches_categories_and_leaving_the_parent_keeps_the_flyout() {
+        let mut menu = menu();
+        menu.point(Some(0));
+        assert_eq!(menu.submenu_choices(), [0, 2]);
+        menu.point(None);
+        assert_eq!(menu.lit(), Some(0));
+        assert_eq!(menu.submenu_choices(), [0, 2]);
+        menu.point_submenu(Some(1));
+        assert_eq!(menu.submenu.and_then(Submenu::lit), Some(1));
+        menu.point(Some(1));
+        assert_eq!(menu.submenu_choices(), [1, 4]);
+        assert_eq!(menu.submenu.and_then(Submenu::lit), None);
+        menu.point(Some(2));
+        assert!(menu.submenu.is_none());
+        assert_eq!(menu.navigate("enter").as_deref(), Some("camera"));
+    }
+
+    #[test]
+    fn keyboard_enters_returns_and_chooses_from_a_flyout() {
+        let mut menu = menu();
+        menu.navigate("down");
+        menu.navigate("right");
+        assert_eq!(menu.submenu.and_then(Submenu::lit), Some(0));
+        menu.navigate("down");
+        assert_eq!(menu.submenu.and_then(Submenu::lit), Some(1));
+        menu.navigate("left");
+        assert!(menu.submenu.is_none());
+        assert_eq!(menu.lit(), Some(0));
+        menu.navigate("down");
+        menu.navigate("enter");
+        assert_eq!(menu.submenu_choices(), [1, 4]);
+        menu.navigate("down");
+        assert_eq!(menu.navigate("enter").as_deref(), Some("spot"));
+        assert!(menu.submenu.is_none());
+        assert!(!menu.open);
+    }
+
+    #[test]
+    fn escape_closes_the_flyout_then_the_parent() {
+        let mut menu = menu();
+        menu.point(Some(0));
+        menu.navigate("escape");
+        assert!(menu.submenu.is_none());
+        assert!(menu.open);
+        assert_eq!(menu.lit(), Some(0));
+        menu.navigate("escape");
+        assert!(!menu.open);
+    }
+
+    #[test]
+    fn flyout_touches_the_menu_and_flips_within_the_visible_screen() {
+        let screen = Rect {
+            x: -100.,
+            y: 0.,
+            w: 600.,
+            h: 400.,
+        };
+        let mut menu = Rect {
+            x: 0.,
+            y: 0.,
+            w: 180.,
+            h: 180.,
+        };
+        let right = submenu_frame(screen, menu, 150., (180., 90.));
+        assert_eq!((right.x, right.y), (180., 60.));
+        menu.x = 300.;
+        let left = submenu_frame(screen, menu, 60., (180., 90.));
+        assert_eq!((left.x, left.y), (120., 0.));
     }
 }
 
@@ -924,10 +1390,180 @@ mod provider_tests {
         );
     }
 
+    fn header(label: &str, provider: &str, active: bool) -> Choice {
+        Choice::new(label, "agentPick:0")
+            .within(label)
+            .for_provider(provider)
+            .stays(true)
+            .checked(active)
+    }
+
     #[test]
-    fn provider_toggle_keeps_menu_and_model_and_reopen_restores_choices() {
+    fn a_single_empty_provider_has_a_disclosure_and_status() {
+        let mut picker = Picker {
+            choices: vec![header("ChatGPT", "codex", true).detail("Finding models…")],
+            open: true,
+            ..Default::default()
+        };
+        picker.open_providers(Default::default());
+        assert!(picker.has_provider_headers());
+        assert!(picker.filtered().is_empty());
+        assert_eq!(picker.rows(), vec![PickerRow::Provider(0)]);
+        assert!(picker.provider_expanded(0));
+        assert_eq!(picker.provider_summary(0), "Finding models…");
+        assert_eq!(picker.selected(), None);
+        picker.navigate("down");
+        assert_eq!(picker.provider_key("enter"), Some(("codex".into(), false)));
+        assert_eq!(picker.provider_summary(0), "Finding models…");
+        assert_eq!(picker.navigate("enter"), None);
+        assert!(picker.open);
+        picker.search("ChatGPT".into());
+        assert_eq!(picker.rows(), vec![PickerRow::Provider(0)]);
+        picker.search("Opus".into());
+        assert!(picker.rows().is_empty());
+    }
+
+    #[test]
+    fn switch_action_has_a_section_and_does_not_count_as_a_model() {
+        for command in ["provider:claude", "agentPick:1"] {
+            let mut picker = Picker {
+                choices: vec![
+                    header("Claude", "claude", false),
+                    Choice::new("Switch to Claude", command)
+                        .within("Claude")
+                        .for_provider("claude"),
+                ],
+                open: true,
+                ..Default::default()
+            };
+            picker.open_providers(Default::default());
+            assert_eq!(picker.filtered(), vec![1]);
+            assert_eq!(picker.rows(), vec![PickerRow::Provider(0)]);
+            assert_eq!(picker.provider_summary(0), "");
+            picker.toggle_provider(0, Some(true)).unwrap();
+            assert_eq!(
+                picker.rows(),
+                vec![PickerRow::Provider(0), PickerRow::Choice(1)]
+            );
+            assert_eq!(picker.provider_summary(0), "");
+            picker.search("Switch".into());
+            assert_eq!(picker.provider_summary(0), "");
+            picker.choices[0].detail = "No models available".into();
+            assert_eq!(picker.provider_summary(0), "No models available");
+            assert_eq!(picker.navigate("enter").as_deref(), Some(command));
+            assert!(!picker.open);
+        }
+    }
+
+    #[test]
+    fn collapsed_summary_prefers_the_selected_model_then_status_then_model_count() {
+        let mut picker = Picker {
+            choices: vec![
+                header("ChatGPT", "codex", true).detail("Finding models…"),
+                Choice::new("GPT Sol", "agentPick:1")
+                    .for_provider("codex")
+                    .checked(true),
+                Choice::new("GPT Astra", "agentPick:2")
+                    .for_provider("codex")
+                    .checked(false),
+            ],
+            ..Default::default()
+        };
+        picker.open_providers([("codex".into(), false)].into());
+        assert_eq!(picker.provider_summary(0), "GPT Sol");
+        picker.choices[1].checked = Some(false);
+        assert_eq!(picker.provider_summary(0), "Finding models…");
+        picker.choices[0].detail.clear();
+        assert_eq!(picker.provider_summary(0), "2");
+        picker.search("Astra".into());
+        assert_eq!(
+            picker.rows(),
+            vec![PickerRow::Provider(0), PickerRow::Choice(2)]
+        );
+        assert_eq!(picker.provider_summary(0), "1");
+        picker.toggle_provider(0, Some(false)).unwrap();
+        assert_eq!(picker.rows(), vec![PickerRow::Provider(0)]);
+        assert_eq!(picker.provider_summary(0), "1");
+    }
+
+    #[test]
+    fn provider_disclosure_is_preserved_on_reopen_and_catalog_refresh() {
+        let mut picker = Picker {
+            choices: vec![
+                header("ChatGPT", "codex", true),
+                header("Claude", "claude", false),
+            ],
+            open: true,
+            ..Default::default()
+        };
+        picker.open_providers(Default::default());
+        assert!(picker.provider_expanded(0));
+        assert_eq!(
+            picker.toggle_provider(0, None),
+            Some(("codex".into(), false))
+        );
+        let saved = picker.provider_choices.clone();
+        picker.open_providers(saved);
+        assert!(!picker.provider_expanded(0));
+
+        picker.replace_choices(vec![
+            header("Claude", "claude", true).detail("Finding models…"),
+            header("ChatGPT", "codex", false),
+        ]);
+        assert!(picker.provider_expanded(0));
+        assert!(!picker.provider_expanded(1));
+
+        picker.replace_choices(vec![
+            header("Claude", "claude", false),
+            header("ChatGPT", "codex", true),
+            Choice::new("GPT Sol", "agentPick:2")
+                .for_provider("codex")
+                .checked(true),
+        ]);
+        assert!(!picker.provider_expanded(1));
+        assert_eq!(
+            picker.rows(),
+            vec![PickerRow::Provider(0), PickerRow::Provider(1)]
+        );
+        assert_eq!(picker.provider_summary(1), "GPT Sol");
+        assert!(picker.open);
+    }
+
+    #[test]
+    fn search_disclosure_can_be_toggled_and_survives_an_unchanged_query() {
         let mut picker = menu();
-        assert_eq!(picker.filtered(), vec![0, 1]);
+        picker.search("Opus".into());
+        assert_eq!(
+            picker.rows(),
+            vec![PickerRow::Provider(1), PickerRow::Choice(1)]
+        );
+        assert_eq!(
+            picker.toggle_provider(1, None),
+            Some(("claude".into(), false))
+        );
+        assert_eq!(picker.lit_row(), Some(PickerRow::Provider(1)));
+        assert_eq!(picker.rows(), vec![PickerRow::Provider(1)]);
+        picker.replace_choices(picker.choices.clone());
+        assert_eq!(
+            picker.search_and_list("Opus".into()).0,
+            vec![PickerRow::Provider(1)]
+        );
+        assert_eq!(
+            picker.toggle_provider(1, None),
+            Some(("claude".into(), true))
+        );
+        assert_eq!(picker.provider_key("left"), Some(("claude".into(), false)));
+        picker.search("Opu".into());
+        assert!(picker.provider_expanded(1));
+        picker.search(String::new());
+        assert!(!picker.provider_expanded(1));
+        picker.choices.pop();
+        assert_eq!(picker.rows(), vec![PickerRow::Choice(0)]);
+    }
+
+    #[test]
+    fn legacy_providers_group_without_explicit_headers() {
+        let mut picker = menu();
         assert_eq!(
             picker.rows(),
             vec![
@@ -937,44 +1573,11 @@ mod provider_tests {
             ]
         );
         assert_eq!(
-            picker.toggle_provider(0, None),
-            Some(("codex".into(), false))
-        );
-        assert!(picker.open);
-        assert_eq!(picker.choices[0].checked, Some(true));
-        assert_eq!(picker.provider_summary(0), "GPT Sol");
-        picker.replace_choices(picker.choices.clone());
-        assert!(!picker.provider_expanded(0), "refresh preserves a manual collapse");
-        assert_eq!(
             picker.toggle_provider(1, None),
             Some(("claude".into(), true))
         );
-        picker.open_providers([("codex".into(), false), ("claude".into(), true)].into());
-        assert_eq!(
-            picker.rows(),
-            vec![
-                PickerRow::Provider(0),
-                PickerRow::Choice(0),
-                PickerRow::Provider(1),
-                PickerRow::Choice(1)
-            ]
-        );
-    }
-
-    #[test]
-    fn search_expands_matching_sections_and_clearing_restores_them() {
-        let mut picker = menu();
-        picker.search("Opus".into());
-        assert_eq!(
-            picker.rows(),
-            vec![PickerRow::Provider(1), PickerRow::Choice(1)]
-        );
-        assert!(picker.provider_expanded(1));
-        assert_eq!(picker.toggle_provider(1, None), None);
-        picker.search(String::new());
-        assert!(!picker.provider_expanded(1));
-        picker.choices.pop();
-        assert_eq!(picker.rows(), vec![PickerRow::Choice(0)]);
+        assert_eq!(picker.rows().last(), Some(&PickerRow::Choice(1)));
+        assert_eq!(picker.provider_summary(1), "1");
     }
 
     #[test]
@@ -1037,5 +1640,26 @@ mod provider_tests {
         assert_eq!(short.y, 34.);
         assert_eq!(short.y, tall.y);
         assert_eq!(tall.y + tall.h, 492.);
+    }
+
+    #[test]
+    fn threads_picker_opens_below_and_right_aligned_to_its_header_trigger() {
+        let owner = Rect {
+            x: 0.,
+            y: 0.,
+            w: 400.,
+            h: 600.,
+        };
+        let anchor = Rect {
+            x: 310.,
+            y: 562.,
+            w: 80.,
+            h: 24.,
+        };
+        let frame = threads_picker_frame(owner, anchor, (288., 220.), 6.);
+        assert_eq!(frame.w, 288.);
+        assert_eq!(frame.h, 220.);
+        assert_eq!(frame.x + frame.w, 390., "right-aligned with the trigger");
+        assert_eq!(frame.y + frame.h, 556., "opens below the header trigger");
     }
 }

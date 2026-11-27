@@ -1292,6 +1292,7 @@ pub fn frame_request(
         viewer: false,
         origin: None,
         output_tone,
+        focus_group: None,
     }
 }
 

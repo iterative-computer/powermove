@@ -1,10 +1,12 @@
 //! Thin v4 control adapter. Rust retains selection, timing, history and UI state.
 //! Platform hit testing, native fields and rendering are explicit host work.
+use crate::tracks::{Area, Layout};
 use crate::{
     ClientError, GraphDisplay, HostEffect, KeyInput, LayerSwitch, ModelError, Modifiers, Plan,
     PropertyFacts, RowId, TimelineClient, TimelineMode, resolve_key,
 };
 use serde_json::{Value, json};
+use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug)]
 pub enum Error {
@@ -61,11 +63,14 @@ pub fn parse_timecode(text: &str, fps: f64) -> Option<f64> {
 /// Collision-free stable IDs, even when imported layer IDs contain punctuation.
 pub fn row_id(row: &RowId) -> String {
     match row {
-        RowId::Effect { layer_id, effect } => json!(["effect", layer_id, effect]).to_string(),
-        RowId::Path { layer_id, path } => json!(["path", layer_id, path]).to_string(),
-        RowId::Layer(id) => json!(["layer", id]).to_string(),
-        RowId::Property { layer_id, channel } => json!(["property", layer_id, channel]).to_string(),
+        RowId::Effect { layer_id, effect } => serde_json::to_string(&("effect", layer_id, effect)),
+        RowId::Path { layer_id, path } => serde_json::to_string(&("path", layer_id, path)),
+        RowId::Layer(id) => serde_json::to_string(&("layer", id)),
+        RowId::Property { layer_id, channel } => {
+            serde_json::to_string(&("property", layer_id, channel))
+        }
     }
+    .expect("row identifiers contain only strings")
 }
 pub fn parse_row(id: &str) -> Result<RowId, Error> {
     let parts: Vec<String> =
@@ -345,7 +350,9 @@ pub async fn dispatch(
                 .and_then(Value::as_f64)
                 .filter(|t| t.is_finite())
                 .ok_or(Error::InvalidIntent("time"))?;
-            Plan::seek(time.clamp(0., client.model.index.duration))
+            return Ok(vec![HostEffect::Seek(
+                time.clamp(0., client.model.index.duration),
+            )]);
         }
         "graphMenu" => {
             persist = true;
@@ -357,12 +364,110 @@ pub async fn dispatch(
                 context.time,
             )?
         }
-        "tab" if !boolean(intent, "close")? => Plan {
-            effects: vec![HostEffect::OpenComposition(
-                string(intent, "id")?.to_owned(),
-            )],
-            ..Plan::default()
-        },
+        "openLayer" => {
+            let id = layer_row(intent)?;
+            let layer = client
+                .model
+                .index
+                .layer(&id)
+                .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
+            if layer.kind == "precomp" {
+                if let Some(comp) = layer.comp.clone() {
+                    Plan {
+                        effects: vec![HostEffect::OpenComposition(comp)],
+                        ..Plan::default()
+                    }
+                } else {
+                    Plan::default()
+                }
+            } else if layer.kind == "group" {
+                client.model.set_focused_group(Some(id))?;
+                persist = true;
+                Plan {
+                    calls: vec![
+                        pm_kernel::SelectionCall::Layers {
+                            ids: Vec::new(),
+                            add: false,
+                        }
+                        .user()
+                        .into(),
+                    ],
+                    ..Plan::default()
+                }
+            } else {
+                Plan::default()
+            }
+        }
+        "tab" if !boolean(intent, "close")? => {
+            let id = string(intent, "id")?;
+            if let Some(group_id) = id.strip_prefix("group:") {
+                client.model.set_focused_group(Some(group_id.to_owned()))?;
+                persist = true;
+                Plan {
+                    calls: vec![
+                        pm_kernel::SelectionCall::Layers {
+                            ids: Vec::new(),
+                            add: false,
+                        }
+                        .user()
+                        .into(),
+                    ],
+                    ..Plan::default()
+                }
+            } else {
+                let mut calls = Vec::new();
+                if client.model.active_focused_group().is_some() {
+                    client.model.set_focused_group(None)?;
+                    persist = true;
+                    calls.push(
+                        pm_kernel::SelectionCall::Layers {
+                            ids: Vec::new(),
+                            add: false,
+                        }
+                        .user()
+                        .into(),
+                    );
+                }
+                let active = client
+                    .model
+                    .index
+                    .comp_id
+                    .as_deref()
+                    .unwrap_or("root");
+                let effects = if id != active {
+                    vec![HostEffect::OpenComposition(id.to_owned())]
+                } else {
+                    Vec::new()
+                };
+                Plan {
+                    calls,
+                    effects,
+                    ..Plan::default()
+                }
+            }
+        }
+        "tab" if boolean(intent, "close")? && string(intent, "id")?.starts_with("group:") => {
+            let id = string(intent, "id")?;
+            let group_id = id.strip_prefix("group:").unwrap();
+            let parent = client
+                .model
+                .index
+                .layer(group_id)
+                .and_then(|l| l.group.clone());
+            client.model.set_focused_group(parent)?;
+            persist = true;
+            Plan {
+                calls: vec![
+                    pm_kernel::SelectionCall::Layers {
+                        ids: Vec::new(),
+                        add: false,
+                    }
+                    .user()
+                    .into(),
+                ],
+                ..Plan::default()
+            }
+        }
         "propertyValue" => {
             let layer = string(intent, "layer")?;
             let path = string(intent, "path")?;
@@ -596,10 +701,11 @@ pub fn project_window(
         .rows
         .iter()
         .map(|row| {
-            let mut value = json!({ "id": row_id(&row.id), "depth": row.depth });
+            let mut value;
             match &row.id {
                 RowId::Path { layer_id, path } => return path_heading(model, row, layer_id, path),
                 RowId::Effect { layer_id, effect } => {
+                    value = json!({ "id": row_id(&row.id), "depth": row.depth });
                     let layer = model
                         .index
                         .layer(layer_id)
@@ -622,24 +728,26 @@ pub fn project_window(
                         .index
                         .layer(id)
                         .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
-                    value["kind"] = json!("layer");
-                    value["canOpen"] = json!(model.layer_disclosable(id));
-                    value["layer"] = json!(id);
                     let definition = layer.definition.as_deref();
-                    value["layerKind"] =
-                        json!(crate::render::display_kind(&layer.kind, definition));
-                    value["labelColor"] =
-                        json!(crate::render::Label::for_layer(&layer.kind, definition).name());
-                    value["index"] = json!(model.index.layer_ordinal(id).map(|n| n + 1));
-                    value["label"] = json!(layer.name.to_string_lossy());
-                    value["selected"] = json!(selected.contains(id));
-                    value["locked"] = json!(layer.effectively_locked);
-                    value["visible"] = json!(layer.visible);
-                    value["solo"] = json!(layer.solo);
-                    value["shy"] = json!(layer.shy);
-                    value["threeD"] = json!(layer.three_d);
-                    value["canBe3D"] = json!(layer.can_be_3d());
-                    value["expanded"] = json!(model.layer_expanded(id));
+                    value = json!({
+                        "id": row_id(&row.id), "depth": row.depth, "kind": "layer",
+                        "canOpen": model.layer_disclosable(id),
+                        "layer": id,
+                        "layerKind": crate::render::display_kind(&layer.kind, definition),
+                        "labelColor": crate::render::Label::for_layer(&layer.kind, definition).name(),
+                        "index": model.index.layer_ordinal(id).map(|n| n + 1),
+                        "label": layer.name.to_string_lossy(),
+                        "selected": selected.contains(id),
+                        "locked": layer.effectively_locked,
+                        "visible": layer.visible,
+                        "solo": layer.solo,
+                        "shy": layer.shy,
+                        "threeD": layer.three_d,
+                        "canBe3D": layer.can_be_3d(),
+                        "expanded": model.layer_expanded(id),
+                        "from": layer.from,
+                        "duration": layer.duration,
+                    });
                     if layer.effectively_locked {
                         value["lockRow"] = json!(
                             model
@@ -653,11 +761,9 @@ pub fn project_window(
                     {
                         value["containsLockedLayers"] = json!(true);
                     }
-                    // Keep authored timing exact. Never convert these to frames on read.
-                    value["from"] = json!(layer.from);
-                    value["duration"] = json!(layer.duration);
                 }
                 RowId::Property { layer_id, channel } => {
+                    value = json!({ "id": row_id(&row.id), "depth": row.depth });
                     value["kind"] = json!("property");
                     value["layer"] = json!(layer_id);
                     value["path"] = json!(channel);
@@ -705,81 +811,156 @@ fn path_heading(
         "label": layer.path_name(path),
     }))
 }
-/// Lanes in the renderer's order, so outline rows and painted rows share ordinals.
+#[derive(Debug)]
+enum TrackRow {
+    Lane {
+        area: Area,
+        lane: usize,
+        summary: String,
+        enabled: bool,
+        locked: bool,
+        can_open: bool,
+        collapsed: bool,
+    },
+    Property(usize),
+}
+
+#[derive(Debug)]
+pub(crate) struct TrackOutline {
+    index: Arc<crate::TimelineIndex>,
+    rows: Arc<Vec<crate::Row>>,
+    layout: Arc<Layout>,
+    disclosure: Option<HashMap<(Area, usize), bool>>,
+    outline: Vec<TrackRow>,
+}
+
+impl TrackOutline {
+    fn new(
+        model: &crate::TimelineModel,
+        layout: Arc<Layout>,
+        disclosure: Option<HashMap<(Area, usize), bool>>,
+    ) -> Self {
+        let mut clips_by_lane = HashMap::<_, Vec<_>>::new();
+        for item in &layout.items {
+            if let Some(clip) = model.index.layer(&item.id) {
+                clips_by_lane
+                    .entry((item.area, item.lane))
+                    .or_default()
+                    .push(clip);
+            }
+        }
+        let mut properties_by_lane = HashMap::<_, Vec<_>>::new();
+        for (i, row) in model.rows().iter().enumerate() {
+            if let RowId::Path { layer_id, .. } | RowId::Property { layer_id, .. } = &row.id
+                && let Some(item) = layout.item(layer_id)
+            {
+                properties_by_lane
+                    .entry((item.area, item.lane))
+                    .or_default()
+                    .push(i);
+            }
+        }
+        let mut outline = vec![];
+        for (area, lane) in layout.display_order() {
+            let clips = clips_by_lane.remove(&(area, lane)).unwrap_or_default();
+            let properties = properties_by_lane.remove(&(area, lane)).unwrap_or_default();
+            let collapsed = model.track_collapsed(area, lane);
+            outline.push(TrackRow::Lane {
+                area,
+                lane,
+                summary: match clips.as_slice() {
+                    [] => String::new(),
+                    [one] => one.name.to_string_lossy(),
+                    many => format!("{} clips", many.len()),
+                },
+                enabled: clips.iter().all(|l| {
+                    if area == Area::Audio {
+                        !l.audio_muted
+                    } else {
+                        l.visible
+                    }
+                }),
+                locked: !clips.is_empty() && clips.iter().all(|l| l.effectively_locked),
+                can_open: !properties.is_empty(),
+                collapsed,
+            });
+            if !collapsed {
+                outline.extend(properties.into_iter().map(TrackRow::Property));
+            }
+        }
+        Self {
+            index: model.index.clone(),
+            rows: model.rows.clone(),
+            layout,
+            disclosure,
+            outline,
+        }
+    }
+}
+
+/// Lanes share the renderer's row order. Only serialize the requested window.
 fn track_window(
     model: &crate::TimelineModel,
     first: usize,
     visible: usize,
 ) -> Result<Value, Error> {
-    use crate::tracks::Area;
     let layout = model.track_layout();
-    let mut clips_by_lane = std::collections::HashMap::<_, Vec<_>>::new();
-    for item in &layout.items {
-        if let Some(clip) = model.index.layer(&item.id) {
-            clips_by_lane.entry((item.area, item.lane)).or_default().push(clip);
-        }
-    }
-    let mut properties_by_lane = std::collections::HashMap::<_, Vec<_>>::new();
-    for row in model.rows() {
-        if let RowId::Path { layer_id, .. } | RowId::Property { layer_id, .. } = &row.id
-            && let Some(item) = layout.item(layer_id)
+    let disclosure = model
+        .reveal
+        .tracks
+        .get(model.index.comp_id.as_deref().unwrap_or_default());
+    let outline = {
+        let mut cached = model.track_outline.lock().unwrap();
+        if let Some(entry) = &*cached
+            && Arc::ptr_eq(&entry.index, &model.index)
+            && Arc::ptr_eq(&entry.rows, &model.rows)
+            && Arc::ptr_eq(&entry.layout, &layout)
+            && entry.disclosure.as_ref() == disclosure
         {
-            properties_by_lane.entry((item.area, item.lane)).or_default().push((row, layer_id));
+            entry.clone()
+        } else {
+            let outline = Arc::new(TrackOutline::new(model, layout, disclosure.cloned()));
+            *cached = Some(outline.clone());
+            outline
         }
-    }
-    let mut rows = vec![];
-    for (area, lane) in layout.display_order() {
-        let (short, audio) = match area {
-            Area::Video => ("V", false),
-            Area::Audio => ("A", true),
-            Area::Captions => ("C", false),
-        };
-        let clips = clips_by_lane.remove(&(area, lane)).unwrap_or_default();
-        let label = format!("{short}{}", lane + 1);
-        let enabled = clips
-            .iter()
-            .all(|l| if audio { !l.audio_muted } else { l.visible });
-        // What the track holds, quietly after its name (v1): the clip's
-        // name, or how many clips.
-        let summary = match clips.as_slice() {
-            [] => String::new(),
-            [one] => one.name.to_string_lossy(),
-            many => format!("{} clips", many.len()),
-        };
-        let collapsed = model.track_collapsed(area, lane);
-        let mut lane_rows = vec![];
-        let properties = properties_by_lane.remove(&(area, lane)).unwrap_or_default();
-        let can_open = !properties.is_empty();
-        for (row, layer) in properties.into_iter().filter(|_| !collapsed) {
-            match &row.id {
-                RowId::Path { path, .. } => lane_rows.push(path_heading(model, row, layer, path)?),
-                RowId::Property { channel, .. } => lane_rows.push(json!({
-                    "id": row_id(&row.id), "depth": row.depth, "kind": "property",
-                    "layer": layer, "path": channel, "selected": false,
-                    "label": model.channel_label(layer, channel),
-                    "locked": model.index.layer(layer).is_none_or(|l| l.effectively_locked),
-                    "channels": model.track_channels(layer, channel).iter()
-                        .map(|c| c.path.as_str()).collect::<Vec<_>>(),
-                })),
-                _ => unreachable!(),
-            }
-        }
-        rows.push(json!({
-            "id": json!(["track", format!("{area:?}"), lane]).to_string(),
-            "kind": "track", "depth": 0, "track": label, "label": label, "audio": audio,
-            "summary": summary,
-            "enabled": enabled, "selected": false,
-            // A lane with nothing to show gets no chevron, only the column's
-            // blank space, so every track's label stays on the same inset.
-            "canOpen": can_open, "expanded": !collapsed,
-            "locked": clips.iter().all(|l| l.effectively_locked) && !clips.is_empty(),
-        }));
-        rows.extend(lane_rows);
-    }
-    let total = rows.len();
+    };
+    let total = outline.outline.len();
     let start = first.min(total).saturating_sub(visible);
     let end = first.saturating_add(visible.saturating_mul(2)).min(total);
-    Ok(frame_facts(model, start, total, rows[start..end].to_vec()))
+    let rows = outline.outline[start..end].iter().map(|track_row| {
+        Ok(match track_row {
+            TrackRow::Lane { area, lane, summary, enabled, locked, can_open, collapsed } => {
+                let short = match area {
+                    Area::Video => "V",
+                    Area::Audio => "A",
+                    Area::Captions => "C",
+                };
+                let label = format!("{short}{}", lane + 1);
+                json!({
+                    "id": json!(["track", format!("{area:?}"), lane]).to_string(),
+                    "kind": "track", "depth": 0, "track": label, "label": label, "audio": *area == Area::Audio,
+                    "summary": summary, "enabled": enabled, "selected": false,
+                    "canOpen": can_open, "expanded": !collapsed, "locked": locked,
+                })
+            }
+            TrackRow::Property(i) => {
+                let row = &model.rows()[*i];
+                match &row.id {
+                    RowId::Path { layer_id, path } => path_heading(model, row, layer_id, path)?,
+                    RowId::Property { layer_id, channel } => json!({
+                        "id": row_id(&row.id), "depth": row.depth, "kind": "property",
+                        "layer": layer_id, "path": channel, "selected": false,
+                        "label": model.channel_label(layer_id, channel),
+                        "locked": model.index.layer(layer_id).is_none_or(|l| l.effectively_locked),
+                        "channels": model.track_channels(layer_id, channel).iter()
+                            .map(|c| c.path.as_str()).collect::<Vec<_>>(),
+                    }),
+                    _ => unreachable!(),
+                }
+            }
+        })
+    }).collect::<Result<Vec<_>, Error>>()?;
+    Ok(frame_facts(model, start, total, rows))
 }
 fn frame_facts(
     model: &crate::TimelineModel,
@@ -787,7 +968,7 @@ fn frame_facts(
     total: usize,
     rows: Vec<Value>,
 ) -> Value {
-    json!({
+    let mut frame = json!({
         "document": model.index.doc_id.to_string(), "revision": model.index.revision.to_string(),
         "hasComposition": model.index.has_composition(),
         "focused": !model.panel_blurred,
@@ -795,12 +976,14 @@ fn frame_facts(
         "view": match model.graph_display { GraphDisplay::DopeSheet => "DopeSheet", GraphDisplay::Combined => "Combined", GraphDisplay::Graph => "Graph" },
         "snapping": !model.track_snap_disabled,
         "hideShy": model.hide_shy,
-        "shyLayers": model.index.layers.iter().any(|l| l.shy),
-        "window": { "first": first, "total": total, "rows": rows },
+        "shyLayers": model.index.shy_layers,
+        "window": { "first": first, "total": total },
         "indexDigits": model.index.layers.len().max(1).to_string().len(),
         "selection": if !model.selection.keys().is_empty() { json!({"kind":"keys","count":model.selection.keys().len()}) }
             else if !model.selection.layers().is_empty() { json!({"kind":"layers","count":model.selection.layers().len()}) } else { Value::Null },
-    })
+    });
+    frame["window"]["rows"] = Value::Array(rows);
+    frame
 }
 /// A press on a property row's diamond or key arrows works on that property
 /// as a press on the row does (v1's gutterDown): the graph plots its track,

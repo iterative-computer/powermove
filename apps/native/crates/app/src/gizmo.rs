@@ -9,8 +9,15 @@ use pm_kernel::{
     Request, SelectionCall, WriteBody, commands::properties::SetProperty,
 };
 use pm_model::Value;
+use pm_panel_studio3d::viewport::Scene;
 use pm_panel_viewerchrome::{ZOOM_MAX, ZOOM_MIN};
-use std::{cell::Cell, collections::VecDeque, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    cell::Cell,
+    collections::VecDeque,
+    rc::Rc,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 #[path = "marquee.rs"]
 mod marquee;
 #[path = "effect_handles.rs"]
@@ -214,6 +221,10 @@ pub trait Host: 'static {
     fn playing(&self, cx: &App) -> bool;
     fn frame(&self, bounds: Bounds<Pixels>, cx: &App) -> Option<ViewFrame>;
     fn tool(&self, cx: &App) -> Tool;
+    /// Layer 2: forward pointer/wheel/key events to an active v4 extension tool.
+    fn custom_tool_event(&self, _event: serde_json::Value, _cx: &mut App) -> bool {
+        false
+    }
     /// A canvas press leaves field/control keyboard focus behind.
     fn focus_canvas(&self, _: &mut Window, _: &mut App) {}
     /// Publish engine-drawn lines, normalized to the composition frame.
@@ -251,6 +262,8 @@ pub trait Host: 'static {
     }
     /// Open a composition (a double-clicked precomp).
     fn open_composition(&self, _: String, _: &mut App) {}
+    /// Focus a group layer like a composition (`None` returns to the composition).
+    fn focus_group(&self, _: Option<String>, _: &mut App) {}
     /// Imported-model geometry for picking a part (snapshot-approved
     /// originals); `None` when no media host can load it.
     fn scene3d_assets(&self, _: &App) -> Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
@@ -271,6 +284,17 @@ pub trait Host: 'static {
         None
     }
 }
+/// 3D drag frame for moving a 3D child cleanly inside a 3D-rotated parent/group.
+#[derive(Clone, Copy, Debug)]
+struct Drag3d {
+    /// Inverse of the layer's `parent3d` matrix (maps world XYZ deltas into parent-local XYZ).
+    parent_inv: [f64; 16],
+    /// Perspective scale `(1.0 + world_z / focal)` at the layer's anchor.
+    depth_scale: f64,
+    /// True when the parent space has non-zero 3D tilt (X/Y rotation or Z coupling).
+    parent_tilted: bool,
+}
+
 /// One selected layer's pose at the current time, in composition pixels.
 #[derive(Clone, Debug)]
 pub struct Pose {
@@ -286,6 +310,18 @@ pub struct Pose {
     /// Positioning homography (`planeMatrix(..., true)`) mapping parent-plane XY
     /// at the layer's Z depth to composition pixels for 1:1 3D drag moves.
     plane_pos: Option<[f64; 9]>,
+    /// True when `corners` is a screen-space enclosing box for a 3D group with
+    /// non-coplanar 3D children (handles interpolate `corners` directly so the
+    /// box never detaches or disappears when rotated edge-on).
+    screen_box: bool,
+    /// Whether this layer itself has `threeD: true`.
+    own_3d: bool,
+    /// Evaluated `position.z` (0 for 2D layers).
+    position_z: f64,
+    /// Evaluated `scale.z` for 3D layers (keeps uniform 3D group scale shear-free).
+    scale_z: Option<f64>,
+    /// 3D parent-space drag transform when dragging inside a 3D hierarchy.
+    drag_3d: Option<Drag3d>,
     /// Rotation, skew and scale of the layer alone.
     linear: [f64; 4],
     /// Maps composition deltas into the layer's parent space.
@@ -421,9 +457,47 @@ impl Job {
         }
     }
 }
+#[derive(PartialEq, Eq)]
+struct StudioSceneKey {
+    document: u64,
+    revision: u64,
+    time: u64,
+    fonts: Option<u64>,
+}
+struct StudioSceneCache {
+    key: StudioSceneKey,
+    // Share an in-flight build between reads of the same frame, too.
+    frame: Arc<OnceLock<StudioFrame>>,
+}
+struct StudioFrame {
+    scene: Option<Arc<Scene>>,
+    layers: Vec<pm_kernel::LayerInfo>,
+    geometry: std::sync::Mutex<FrameGeometry>,
+}
+
+/// Selection can return to the same group while the document and time are
+/// unchanged. Reuse its projected bounds along with the scene and layer index.
+struct FrameGeometry {
+    query: QueryMirror,
+    groups: std::collections::HashMap<String, Option<Pose>>,
+}
+
+impl FrameGeometry {
+    fn new(query: QueryMirror) -> Self {
+        Self {
+            query,
+            groups: Default::default(),
+        }
+    }
+}
+
 pub struct GizmoSurface {
     zoom_input: ZoomInput,
     effect_controls: Vec<effect_handles::Control>,
+    effect_index: Option<Arc<effect_handles::EffectIndex>>,
+    effect_read: u64,
+    effect_out: bool,
+    effect_again: bool,
     effect_drag: Option<effect_handles::Drag>,
     effect_stop: Option<(usize, usize)>,
     effect_picker: Option<(usize, usize)>,
@@ -442,6 +516,7 @@ pub struct GizmoSurface {
     hover_at: Option<Point<Pixels>>,
     modifier_subscription: Option<Subscription>,
     studio: studio3d::State,
+    studio_scene_cache: Option<StudioSceneCache>,
     kernel: KernelHandle,
     project: String,
     tokens: pm_design::Tokens,
@@ -455,13 +530,19 @@ pub struct GizmoSurface {
     /// The oldest pointer event behind the queued drag steps (`Host::input`).
     step_input: Option<f64>,
     latest: u64,
+    /// Single-flight guard for background `reread` tasks so rapid ticks/clicks
+    /// never pile up concurrent reads on the GCD thread pool.
+    reread_out: bool,
+    reread_again: bool,
     #[cfg(test)]
     completed_read: u64,
     /// Press waiting on a pick; the drag starts on its answer if still held.
     picking: Option<Point<Pixels>>,
     picks: usize,
     controls: bool,
-    panning: Option<Point<Pixels>>,
+    panning: Option<(Point<Pixels>, Point<Pixels>)>,
+    pointer_button: MouseButton,
+    cancelled_press: Option<MouseButton>,
     /// Space is held over the viewer: a press pans whatever the tool, and
     /// whether it did decides if the key's release plays.
     space_hand: bool,
@@ -485,6 +566,11 @@ pub struct GizmoSurface {
     /// The Pen tool's view of the selected layer's paths.
     pen: Option<pen::PenPose>,
     pen_reading: u64,
+    pen_read_out: bool,
+    pen_read_again: bool,
+    text_reading: u64,
+    text_read_out: bool,
+    text_read_again: bool,
     /// The layer and open path new clicks extend.
     pen_active: Option<(String, String)>,
     /// A pen read that includes the Pen's own last press has landed.
@@ -535,6 +621,83 @@ pub(crate) fn project_plane(m: &[f64; 9], p: [f64; 2]) -> Option<[f64; 2]> {
     let y = (m[1] * p[0] + m[4] * p[1] + m[7]) / w;
     (x.is_finite() && y.is_finite()).then_some([x, y])
 }
+/// Legacy focal length in pixels (the outermost 3D group owns perspective).
+fn comp_focal_length(
+    root: &pm_model::Node,
+    list: &[pm_kernel::model::LayerInfo],
+    id: &str,
+    mirror: &mut QueryMirror,
+    time: f64,
+) -> f64 {
+    let comp = pm_kernel::model::comp_node(root, None).unwrap_or(root);
+    let w = comp
+        .get("w")
+        .and_then(|v| v.to_value().as_f64())
+        .unwrap_or(1920.0);
+    let mut owner = id.to_owned();
+    let mut cur = list
+        .iter()
+        .find(|l| l.id == id)
+        .and_then(|l| l.group.as_deref());
+    let mut guard = 0usize;
+    while let Some(g) = cur {
+        guard += 1;
+        if guard > 64 {
+            break;
+        }
+        let is_g3d = pm_kernel::model::find_layer(root, g)
+            .and_then(|at| pm_kernel::model::layer_at(root, &at))
+            .and_then(|n| n.get("threeD"))
+            .and_then(|v| v.to_value().as_bool())
+            == Some(true);
+        if is_g3d {
+            owner = g.to_owned();
+        }
+        cur = list
+            .iter()
+            .find(|l| l.id == g)
+            .and_then(|l| l.group.as_deref());
+    }
+    let perspective = mirror
+        .queries()
+        .evaluate(None, &owner, "perspective", time)
+        .ok()
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite())
+        .unwrap_or(50.0)
+        .max(0.001);
+    w.max(1.0) * perspective / 36.0
+}
+
+/// Active non-group descendants of `group_id` in `list`.
+fn group_descendants(list: &[pm_kernel::model::LayerInfo], group_id: &str) -> Vec<String> {
+    let parent_group: std::collections::HashMap<&str, Option<&str>> = list
+        .iter()
+        .filter(|l| l.kind == "group")
+        .map(|l| (l.id.as_str(), l.group.as_deref()))
+        .collect();
+    let mut out = Vec::new();
+    for info in list {
+        if info.kind == "group" {
+            continue;
+        }
+        let mut cur = info.group.as_deref();
+        let mut guard = 0usize;
+        while let Some(g) = cur {
+            guard += 1;
+            if guard > 64 {
+                break;
+            }
+            if g == group_id {
+                out.push(info.id.clone());
+                break;
+            }
+            cur = parent_group.get(g).copied().flatten();
+        }
+    }
+    out
+}
+
 /// Project a 2D box `[x0, y0, x1, y1]` through `plane_matrix` for 2.5D 3D
 /// layers or 2D `world_matrix` for flat layers.
 pub(crate) fn project_box(
@@ -637,7 +800,8 @@ impl Pose {
     }
     fn handle(&self, index: usize) -> [f64; 2] {
         let (u, v) = HANDLES[index];
-        if let Some(plane) = &self.plane
+        if !self.screen_box
+            && let Some(plane) = &self.plane
             && let Some(projected) = project_plane(plane, self.local(u, v))
         {
             return projected;
@@ -670,25 +834,66 @@ impl Pose {
 fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
     let root = p.snapshot.root()?;
     let list = pm_kernel::model::list_layers(root, None);
-    let roots = crate::layer_commands::transform_roots(&list, p.selection.layers());
-    let layers: std::collections::HashMap<&str, (bool, &str)> = list
-        .iter()
-        .map(|l| (l.id.as_str(), (l.effectively_locked, l.kind.as_str())))
-        .collect();
-    let mut mirror = QueryMirror::new(p);
+    let mut geometry = FrameGeometry::new(QueryMirror::new(p));
+    Some(read_poses(p, time, root, &list, &mut geometry))
+}
+fn read_poses(
+    p: &pm_kernel::Published,
+    time: f64,
+    root: &pm_model::Node,
+    list: &[pm_kernel::LayerInfo],
+    geometry: &mut FrameGeometry,
+) -> Vec<Pose> {
+    let FrameGeometry { query: mirror, groups } = geometry;
+    let selected = p.selection.layers();
+    if selected.is_empty() {
+        return vec![];
+    }
+    let roots = (selected.len() > 1).then(|| crate::layer_commands::transform_roots(list, selected));
+    let layers: std::collections::HashMap<_, _> =
+        list.iter().map(|layer| (layer.id.as_str(), layer)).collect();
+    let comp = p.snapshot.open_comp();
+    let nodes = pm_kernel::model::comp_node(root, comp.as_deref()).and_then(|comp| comp.get("layers"));
+    let layer_node = |id: &str| nodes?.at(layers.get(id)?.index);
     let mut poses = vec![];
-    for id in p.selection.layers() {
+    for id in selected {
+        let Some(row) = layers.get(id.as_str()) else { continue };
+        let (locked, kind) = (row.effectively_locked, row.kind.as_str());
+        let transform_root = roots.as_ref().is_none_or(|roots| roots.contains(id.as_str()));
+        if let Some(cached) = groups.get(id) {
+            if let Some(mut pose) = cached.clone() {
+                pose.root = transform_root;
+                poses.push(pose);
+            }
+            continue;
+        }
         let q = mirror.queries();
         // A selected layer the playhead is outside of has nothing on screen to
         // box (viewer.ts visibleSelectionLayers).
         if !q.active(None, id, time).unwrap_or(false) {
             continue;
         }
-        let (Ok(world), Ok(local), Ok(Some(bounds))) = (
+        let bounds = if matches!(kind, "text" | "captions" | "group") {
+            crate::text_host::query(p, |q| q.bounds(None, id, time))
+        } else {
+            q.bounds(None, id, time)
+        };
+        if kind == "group"
+            && (matches!(bounds, Ok(None))
+                || (matches!(bounds, Err(pm_kernel::QueryError::NeedsFonts | pm_kernel::QueryError::NeedsInk))
+                    && crate::text_host::render_fonts().is_none()))
+        {
+            // The frame key includes font availability. Do not cache a
+            // measurement failure that could recover while a registry is live.
+            groups.insert(id.clone(), None);
+        }
+        let Ok(Some(bounds)) = bounds else {
+            continue;
+        };
+        let q = mirror.queries();
+        let (Ok(world), Ok(local)) = (
             q.world_matrix(None, id, time),
             q.local_matrix(None, id, time),
-            // Text measures with the registry's fonts.
-            crate::text_host::query(p, |q| q.bounds(None, id, time)),
         ) else {
             continue;
         };
@@ -715,20 +920,15 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
             number("anchor.x").unwrap_or(0.),
             number("anchor.y").unwrap_or(0.),
         ];
-        let (locked, kind) = layers.get(id.as_str()).copied().unwrap_or((true, ""));
+        let layer = layer_node(id);
+        let data = layer.and_then(|layer| layer.get("d"));
         let parametric = kind == "shape"
-            && pm_kernel::model::find_layer(root, id)
-                .and_then(|at| pm_kernel::model::layer_at(root, &at))
-                .and_then(|layer| layer.get("d"))
+            && data
                 .and_then(|d| d.get("paths"))
                 .is_none_or(|paths| paths.to_value().as_array().is_none_or(|p| p.is_empty()));
         // Static content reads as stored; animated content is evaluated.
         let stored = |key: &str| {
-            let d = pm_kernel::model::find_layer(root, id)
-                .and_then(|at| pm_kernel::model::layer_at(root, &at))
-                .and_then(|layer| layer.get("d"))?
-                .to_value();
-            let v = d.get(key)?.clone();
+            let v = data?.get(key)?.to_value();
             let animated = v
                 .get("kf")
                 .and_then(Value::as_array)
@@ -757,68 +957,167 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
         };
         let has_skew = number("skew").is_some();
         let rotation = number("rotation").unwrap_or(0.);
+        let own_3d = layer
+            .and_then(|l| l.get("threeD"))
+            .and_then(|v| v.to_value().as_bool())
+            == Some(true);
+        let position_z = if own_3d {
+            number("position.z").unwrap_or(0.)
+        } else {
+            0.
+        };
+        let local_anchor_z = if own_3d {
+            number("anchor.z").unwrap_or(0.)
+        } else {
+            0.
+        };
+        let scale_z = if own_3d {
+            Some(number("scale.z").unwrap_or(100.))
+        } else {
+            None
+        };
         let is_3d = mirror.queries().is_3d_layer(None, id, time).unwrap_or(false);
+        let effective_bounds = bounds;
+        let mut screen_box = false;
+        let mut drag_3d = None;
         let (plane, plane_pos, corners, anchor) = if is_3d {
             let Ok(plane) = mirror.queries().plane_matrix(None, id, time, false) else {
                 continue;
             };
             let plane_pos = mirror.queries().plane_matrix(None, id, time, true).ok();
-            // For a 3D group whose children have independent Z depth or 3D tilt,
-            // expand the group's plane bounds so its perspective box encloses all
-            // active descendants as rendered.
-            let mut b = bounds;
-            if kind == "group"
-                && let Some(inv_group) = pm_eval::space3d::inverse_plane(&plane)
+            if own_3d
+                && let Ok(world_pos) = mirror.queries().world_3d(None, id, time, true)
             {
-                let mut descendants: Vec<String> = Vec::new();
-                for info in &list {
-                    if info.kind == "group" {
-                        continue;
-                    }
-                    let mut cur = info.group.as_deref();
-                    while let Some(g) = cur {
-                        if g == id {
-                            descendants.push(info.id.clone());
-                            break;
-                        }
-                        cur = list
-                            .iter()
-                            .find(|l| l.id == g)
-                            .and_then(|l| l.group.as_deref());
-                    }
-                }
-                for child_id in descendants {
-                    if !mirror.queries().active(None, &child_id, time).unwrap_or(false) {
-                        continue;
-                    }
-                    let Ok(Some(cb)) =
-                        crate::text_host::query(p, |q| q.bounds(None, &child_id, time))
-                    else {
-                        continue;
+                let parent3d = pm_eval::space3d::multiply(
+                    &world_pos,
+                    &pm_eval::space3d::translation(0.0, 0.0, -position_z),
+                );
+                if let Some(parent_inv) = pm_eval::space3d::inverse3d(&parent3d) {
+                    let parent_tilted = parent3d[2].abs() > 1e-4
+                        || parent3d[6].abs() > 1e-4
+                        || parent3d[8].abs() > 1e-4
+                        || parent3d[9].abs() > 1e-4;
+                    let focal = comp_focal_length(root, list, id, mirror, time);
+                    let world3d = mirror.queries().world_3d(None, id, time, false).ok();
+                    let wz = if let Some(w3) = &world3d {
+                        w3[2] * local_anchor[0]
+                            + w3[6] * local_anchor[1]
+                            + w3[10] * local_anchor_z
+                            + w3[14]
+                    } else {
+                        world_pos[14]
                     };
-                    if let Some((cc, _)) = project_box(mirror.queries(), &child_id, time, cb) {
-                        for corner in cc {
-                            if let Some(in_group) = project_plane(&inv_group, corner) {
-                                b.x0 = b.x0.min(in_group[0]);
-                                b.y0 = b.y0.min(in_group[1]);
-                                b.x1 = b.x1.max(in_group[0]);
-                                b.y1 = b.y1.max(in_group[1]);
+                    let depth_scale = (1.0 + wz / focal).max(0.05);
+                    drag_3d = Some(Drag3d {
+                        parent_inv,
+                        depth_scale,
+                        parent_tilted,
+                    });
+                }
+            }
+            let anchor_3d = plane_pos
+                .filter(|_| own_3d)
+                .and_then(|positioning| project_plane(&positioning, [px, py]))
+                .or_else(|| project_plane(&plane, local_anchor));
+            // For a 3D group: if any active descendant has independent 3D depth/tilt
+            // (or the group plane itself is edge-on so corners can't project on Z=0),
+            // enclose the descendants' projected 3D corners directly in screen space
+            // so the box and handles never distort, detach, or disappear.
+            if kind == "group" {
+                let planar_corners = (
+                    project_plane(&plane, [effective_bounds.x0, effective_bounds.y0]),
+                    project_plane(&plane, [effective_bounds.x1, effective_bounds.y0]),
+                    project_plane(&plane, [effective_bounds.x1, effective_bounds.y1]),
+                    project_plane(&plane, [effective_bounds.x0, effective_bounds.y1]),
+                );
+                let descendants = group_descendants(list, id);
+                let child_has_depth = descendants.iter().any(|child| {
+                    layer_node(child)
+                        .and_then(|layer| layer.get("threeD"))
+                        .and_then(|value| value.to_value().as_bool())
+                        == Some(true)
+                        && mirror.queries().active(None, child, time).unwrap_or(false)
+                        && [
+                            "position.z",
+                            "rotation.x",
+                            "rotation.y",
+                            "orientation.x",
+                            "orientation.y",
+                        ]
+                        .iter()
+                        .any(|key| {
+                            mirror
+                                .queries()
+                                .evaluate(None, child, key, time)
+                                .ok()
+                                .and_then(|v| v.as_f64())
+                                .is_some_and(|v| v.abs() > 1e-4)
+                        })
+                });
+                let mut lo = [f64::INFINITY; 2];
+                let mut hi = [f64::NEG_INFINITY; 2];
+                if child_has_depth
+                    || planar_corners.0.is_none()
+                    || planar_corners.1.is_none()
+                    || planar_corners.2.is_none()
+                    || planar_corners.3.is_none()
+                {
+                    for child in descendants {
+                        if !mirror.queries().active(None, &child, time).unwrap_or(false) {
+                            continue;
+                        }
+                        let Ok(Some(bounds)) =
+                            geometry_query(p, mirror, |q| q.bounds(None, &child, time))
+                        else {
+                            continue;
+                        };
+                        if let Ok(matrix) = mirror.queries().plane_matrix(None, &child, time, false) {
+                            for point in [
+                                [bounds.x0, bounds.y0],
+                                [bounds.x1, bounds.y0],
+                                [bounds.x1, bounds.y1],
+                                [bounds.x0, bounds.y1],
+                            ] {
+                                if let Some([x, y]) = project_plane(&matrix, point) {
+                                    lo = [lo[0].min(x), lo[1].min(y)];
+                                    hi = [hi[0].max(x), hi[1].max(y)];
+                                }
                             }
                         }
                     }
                 }
+                if lo[0].is_finite() && hi[0].is_finite() {
+                    screen_box = true;
+                    let corners = [
+                        [lo[0], lo[1]],
+                        [hi[0], lo[1]],
+                        [hi[0], hi[1]],
+                        [lo[0], hi[1]],
+                    ];
+                    let anchor = anchor_3d
+                        .unwrap_or_else(|| [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5]);
+                    (Some(plane), plane_pos, corners, anchor)
+                } else {
+                    let (Some(c0), Some(c1), Some(c2), Some(c3)) = planar_corners else {
+                        continue;
+                    };
+                    let anchor = anchor_3d
+                        .unwrap_or_else(|| lerp(lerp(c0, c1, 0.5), lerp(c3, c2, 0.5), 0.5));
+                    (Some(plane), plane_pos, [c0, c1, c2, c3], anchor)
+                }
+            } else {
+                let (Some(c0), Some(c1), Some(c2), Some(c3)) = (
+                    project_plane(&plane, [effective_bounds.x0, effective_bounds.y0]),
+                    project_plane(&plane, [effective_bounds.x1, effective_bounds.y0]),
+                    project_plane(&plane, [effective_bounds.x1, effective_bounds.y1]),
+                    project_plane(&plane, [effective_bounds.x0, effective_bounds.y1]),
+                ) else {
+                    continue;
+                };
+                let anchor = anchor_3d
+                    .unwrap_or_else(|| lerp(lerp(c0, c1, 0.5), lerp(c3, c2, 0.5), 0.5));
+                (Some(plane), plane_pos, [c0, c1, c2, c3], anchor)
             }
-            let (Some(c0), Some(c1), Some(c2), Some(c3)) = (
-                project_plane(&plane, [b.x0, b.y0]),
-                project_plane(&plane, [b.x1, b.y0]),
-                project_plane(&plane, [b.x1, b.y1]),
-                project_plane(&plane, [b.x0, b.y1]),
-            ) else {
-                continue;
-            };
-            let anchor = project_plane(&plane, local_anchor)
-                .unwrap_or_else(|| lerp(lerp(c0, c1, 0.5), lerp(c3, c2, 0.5), 0.5));
-            (Some(plane), plane_pos, [c0, c1, c2, c3], anchor)
         } else {
             let mut corners = [
                 transform(&world, [bounds.x0, bounds.y0]),
@@ -832,33 +1131,16 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
                 let mut any_3d_child = false;
                 let mut lo = [f64::INFINITY; 2];
                 let mut hi = [f64::NEG_INFINITY; 2];
-                for info in &list {
-                    if info.kind == "group" {
+                for child_id in group_descendants(list, id) {
+                    if !mirror.queries().active(None, &child_id, time).unwrap_or(false) {
                         continue;
                     }
-                    let mut in_group = false;
-                    let mut cur = info.group.as_deref();
-                    while let Some(g) = cur {
-                        if g == id {
-                            in_group = true;
-                            break;
-                        }
-                        cur = list
-                            .iter()
-                            .find(|l| l.id == g)
-                            .and_then(|l| l.group.as_deref());
-                    }
-                    if !in_group || !mirror.queries().active(None, &info.id, time).unwrap_or(false)
-                    {
-                        continue;
-                    }
-                    let Ok(Some(cb)) =
-                        crate::text_host::query(p, |q| q.bounds(None, &info.id, time))
-                    else {
+                    let cb_res = geometry_query(p, mirror, |q| q.bounds(None, &child_id, time));
+                    let Ok(Some(cb)) = cb_res else {
                         continue;
                     };
                     if let Some((cc, child_plane)) =
-                        project_box(mirror.queries(), &info.id, time, cb)
+                        project_box(mirror.queries(), &child_id, time, cb)
                     {
                         any_3d_child |= child_plane.is_some();
                         for pt in cc {
@@ -870,6 +1152,7 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
                     }
                 }
                 if any_3d_child && lo[0].is_finite() && hi[0].is_finite() {
+                    screen_box = true;
                     corners = [
                         [lo[0], lo[1]],
                         [hi[0], lo[1]],
@@ -880,17 +1163,27 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
             }
             (None, None, corners, transform(&world, local_anchor))
         };
-        poses.push(Pose {
+        let pose = Pose {
             id: id.clone(),
             locked,
-            root: roots.contains(id.as_str()),
+            root: transform_root,
             keeps_aspect: matches!(kind, "image" | "video"),
             world,
             plane,
             plane_pos,
+            screen_box,
+            own_3d,
+            position_z,
+            scale_z,
+            drag_3d,
             linear: [local[0], local[1], local[2], local[3]],
             to_parent,
-            bounds: [bounds.x0, bounds.y0, bounds.x1, bounds.y1],
+            bounds: [
+                effective_bounds.x0,
+                effective_bounds.y0,
+                effective_bounds.x1,
+                effective_bounds.y1,
+            ],
             shape,
             text_size,
             has_skew,
@@ -900,9 +1193,13 @@ fn read_at(p: &pm_kernel::Published, time: f64) -> Option<Vec<Pose>> {
             position: [px, py],
             scale: [sx, sy],
             rotation,
-        });
+        };
+        if kind == "group" {
+            groups.insert(id.clone(), Some(pose.clone()));
+        }
+        poses.push(pose);
     }
-    Some(poses)
+    poses
 }
 impl GizmoSurface {
     pub fn new(
@@ -914,6 +1211,10 @@ impl GizmoSurface {
         Self {
             zoom_input: ZoomInput::default(),
             effect_controls: vec![],
+            effect_index: None,
+            effect_read: 0,
+            effect_out: false,
+            effect_again: false,
             effect_drag: None,
             effect_stop: None,
             effect_picker: None,
@@ -926,6 +1227,7 @@ impl GizmoSurface {
             hover_at: None,
             modifier_subscription: None,
             studio: Default::default(),
+            studio_scene_cache: None,
             kernel,
             project,
             tokens,
@@ -938,6 +1240,8 @@ impl GizmoSurface {
             busy: false,
             step_input: None,
             latest: 0,
+            reread_out: false,
+            reread_again: false,
             #[cfg(test)]
             completed_read: 0,
             picking: None,
@@ -947,6 +1251,8 @@ impl GizmoSurface {
             part_assets: None,
             controls: true,
             panning: None,
+            pointer_button: MouseButton::Left,
+            cancelled_press: None,
             space_hand: false,
             space_panned: false,
             rulers: viewer_rulers::Rulers { guides_locked: pm_shell::viewer_preference("PowermoveGuidesLocked", false), ..Default::default() },
@@ -959,6 +1265,11 @@ impl GizmoSurface {
             text: None,
             pen: None,
             pen_reading: 0,
+            pen_read_out: false,
+            pen_read_again: false,
+            text_reading: 0,
+            text_read_out: false,
+            text_read_again: false,
             pen_active: None,
             pen_ready: false,
             pen_waiting: VecDeque::new(),
@@ -980,13 +1291,61 @@ impl GizmoSurface {
         cx.defer(move |cx| {
             this.update(cx, |s, cx| {
                 s.refreshing = false;
-                s.reread(cx);
+                let live_outline = s.draws_live_outline();
+                if s.prune_selection_overlays() {
+                    s.draw(cx);
+                    cx.notify();
+                }
+                if !live_outline {
+                    s.reread(cx);
+                }
                 s.text_reread(cx);
                 s.pen_reread(cx);
-                s.effects_reread(cx);
+                // Keep visible effect handles attached during a transform.
+                // With none shown, there is nothing to recompute here.
+                if !live_outline || !s.effect_controls.is_empty() {
+                    s.effects_reread(cx);
+                }
             });
         });
     }
+    /// The kernel prunes deleted IDs before publishing. Clear the old
+    /// overlays before the worker has a chance to return a replacement.
+    fn prune_selection_overlays(&mut self) -> bool {
+        if self.poses.is_empty() && self.studio.selected.is_empty() && self.studio.part.is_none() {
+            return false;
+        }
+        let published = self.kernel.published(&self.project);
+        let selected = published.as_ref().map_or(&[][..], |p| p.selection.layers());
+        let ids = (selected.len() > 1)
+            .then(|| selected.iter().map(String::as_str).collect::<std::collections::HashSet<_>>());
+        let keeps = |layer: &str| match &ids {
+            Some(ids) => ids.contains(layer),
+            None => selected.first().is_some_and(|id| layer == id),
+        };
+        let mut changed = false;
+        if !self.poses.iter().all(|pose| keeps(&pose.id)) {
+            if selected.is_empty() {
+                self.poses = Arc::default();
+            } else {
+                Arc::make_mut(&mut self.poses).retain(|pose| keeps(&pose.id));
+            }
+            changed = true;
+        }
+        let n = self.studio.selected.len();
+        self.studio.selected.retain(|id| keeps(id));
+        changed |= self.studio.selected.len() != n;
+        let part_layer = published
+            .as_ref()
+            .and_then(|p| pm_panel_studio3d::properties::active_part(&p.selection))
+            .map(|(layer, _)| layer);
+        if self.studio.part.is_some() && part_layer.is_none() {
+            self.studio.part = None;
+            changed = true;
+        }
+        changed
+    }
+
     /// Lines depend on the shown scale; repaint them from the current poses.
     pub fn redraw(&mut self, cx: &mut Context<Self>) {
         let this = cx.entity();
@@ -995,17 +1354,37 @@ impl GizmoSurface {
             cx.notify();
         }));
     }
+    fn draws_live_outline(&self) -> bool {
+        !self.studio.free_look
+            && self
+                .drag
+                .as_ref()
+                .is_some_and(|drag| drag.active && drag.draws_own_outline())
+    }
+
     /// Reread the pose off the main thread. While playing the engine owns the
-    /// frame and gizmos stay down.
+    /// frame and gizmos stay down. Single-flight: at most one read runs on the
+    /// background pool at a time; newer triggers coalesce into one follow-up.
     fn reread(&mut self, cx: &mut Context<Self>) {
         if self.host.playing(cx) {
+            self.latest += 1;
+            self.reread_again = false;
             self.poses = Default::default();
             self.host.overlay(vec![], None, cx);
             return;
         }
         self.latest += 1;
+        if self.reread_out {
+            self.reread_again = true;
+            return;
+        }
+        self.reread_out = true;
+        self.reread_again = false;
         let ticket = self.latest;
-        let assets = self.kernel.published(&self.project)
+        // Use the same publication for the scene, poses, and part selection.
+        let published = self.kernel.published(&self.project);
+        let assets = published
+            .as_ref()
             .filter(|p| pm_panel_studio3d::properties::active_part(&p.selection).is_some())
             .and_then(|p| {
                 let revision = p.snapshot.root()?.get("assets")?.rev();
@@ -1016,93 +1395,142 @@ impl GizmoSurface {
                 }
                 self.part_assets.clone()
             });
-        let (kernel, project, time) = (
-            self.kernel.clone(),
-            self.project.clone(),
-            self.host.time(cx),
-        );
-        cx.spawn(async move |this, cx| {
-            let read = cx
-                .background_executor()
-                .spawn(async move {
-                    let p = kernel.published(&project)?;
-                    // 3D layers get 3D handles; their 2D boxes would mislead.
-                    let mut scene = pm_panel_studio3d::viewport::scene(&p, time).ok();
-                    let mut poses = read_at(&p, time).unwrap_or_default();
-                    // Extruded text and shapes are 3D too: their box in the
-                    // scene, from the layer's flat box, its z and its depth.
-                    if let Some(sc) = scene.as_mut() {
-                        for pose in poses.iter().filter(|pose| is_extruded(&p, &pose.id)) {
-                            if let Some(item) = extruded_item(&p, pose, time, sc.width, sc.height) {
-                                sc.items.push(item);
-                            }
-                        }
-                    }
-                    let three_d: Vec<String> = scene
-                        .as_ref()
-                        .map(|s| s.items.iter().map(|i| i.id.clone()).collect())
-                        .unwrap_or_default();
-                    // Extruded text and shapes are drawn by the 3D renderer too:
-                    // their flat box would sit somewhere else.
-                    poses.retain(|pose| {
-                        !three_d.contains(&pose.id)
-                            && !is_studio(&p, &pose.id)
-                            && !is_extruded(&p, &pose.id)
-                    });
-                    let selected = p
-                        .selection
-                        .layers()
-                        .iter()
-                        .filter(|id| three_d.contains(id))
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let part = pm_panel_studio3d::properties::active_part(&p.selection).and_then(
-                        |(layer, key)| {
-                            pm_panel_studio3d::viewport::model_part(
-                                &p.snapshot,
-                                time,
-                                layer,
-                                Some(key),
-                                None,
-                                assets.as_deref()?,
-                            )
+        let time = self.host.time(cx);
+        let scene_read = published.as_ref().map(|p| {
+            // A document revision includes the active composition, layer
+            // content and retained asset records. Selection and viewer UI
+            // have their own publication state.
+            let key = StudioSceneKey {
+                document: p.snapshot.doc_id,
+                revision: p.snapshot.revision,
+                time: time.to_bits(),
+                fonts: crate::text_host::render_fonts().map(|fonts| fonts.generation()),
+            };
+            let cache = match self.studio_scene_cache.as_ref() {
+                Some(cache) if cache.key == key => cache,
+                _ => self.studio_scene_cache.insert(StudioSceneCache {
+                    key,
+                    frame: Arc::new(OnceLock::new()),
+                }),
+            };
+            cache.frame.clone()
+        });
+        let read = cx.background_spawn(async move {
+            let (p, frame_read) = published.zip(scene_read)?;
+            let root = p.snapshot.root()?;
+            let frame = frame_read.get_or_init(|| {
+                let layers = pm_kernel::model::list_layers(root, None);
+                let text_ids: std::collections::HashSet<&str> = layers
+                    .iter()
+                    .filter(|l| matches!(l.kind.as_str(), "text" | "captions"))
+                    .map(|l| l.id.as_str())
+                    .collect();
+                let mut local_mirror = QueryMirror::new(&p);
+                // The viewport probe returns immediately for a flat
+                // comp, before resolving or converting its layers.
+                let scene = pm_panel_studio3d::viewport::scene_with_bounds(&p, time, |id| {
+                    if text_ids.contains(id) {
+                        crate::text_host::query(&p, |q| q.bounds(None, id, time))
                             .ok()
                             .flatten()
-                        },
-                    );
-                    let ui = |k: &str| {
-                        p.ui_state
-                            .viewer
-                            .get(k)
-                            .and_then(pm_model::Value::as_str)
-                            .map(str::to_owned)
-                    };
-                    Some((
-                        poses,
-                        scene,
-                        selected,
-                        part,
-                        ui("studioTool"),
-                        ui("studioLook"),
-                        ui("studioAxes"),
-                        (ui("studioLightKind"), ui("studioLightAdd"), ui("studioLightAim")),
-                        // The viewer's 2D/3D choice is remembered per composition.
-                        {
-                            let comp = p.snapshot.render_comp();
-                            let kept = p
-                                .ui_state
-                                .viewer
-                                .get("studioLookByComp")
-                                .and_then(|m| m.get(&comp))
-                                .and_then(pm_model::Value::as_str)
-                                .map(str::to_owned);
-                            (comp, kept)
-                        },
-                    ))
+                    } else {
+                        local_mirror.queries().bounds(None, id, time).ok().flatten()
+                    }
                 })
-                .await;
+                .ok()
+                .map(Arc::new);
+                StudioFrame {
+                    scene,
+                    layers,
+                    geometry: std::sync::Mutex::new(FrameGeometry::new(local_mirror)),
+                }
+            });
+            let mut scene = frame.scene.clone();
+            let mut poses = {
+                let mut geometry = frame.geometry.lock().unwrap_or_else(|error| error.into_inner());
+                read_poses(&p, time, root, &frame.layers, &mut geometry)
+            };
+            poses.retain(|pose| {
+                // Depth boxes are selection-specific. Only copy the
+                // base scene when a selected layer adds one.
+                let extruded = is_extruded(&p, &pose.id);
+                if extruded
+                    && let Some(sc) = scene.as_mut()
+                    && let Some(item) = extruded_item(&p, pose, time, sc.width, sc.height)
+                {
+                    Arc::make_mut(sc).items.push(item);
+                }
+                // Studio objects and extrusions have 3D handles.
+                !extruded
+                    && !is_studio(&p, &pose.id)
+                    && !scene
+                        .as_ref()
+                        .is_some_and(|s| s.items.iter().any(|i| i.id == pose.id && !i.is_plane))
+            });
+            let selected = p
+                .selection
+                .layers()
+                .iter()
+                .filter(|id| {
+                    scene
+                        .as_ref()
+                        .is_some_and(|s| s.items.iter().any(|i| &i.id == *id))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let part = pm_panel_studio3d::properties::active_part(&p.selection).and_then(
+                |(layer, key)| {
+                    pm_panel_studio3d::viewport::model_part(
+                        &p.snapshot,
+                        time,
+                        layer,
+                        Some(key),
+                        None,
+                        assets.as_deref()?,
+                    )
+                    .ok()
+                    .flatten()
+                },
+            );
+            let ui = |k: &str| {
+                p.ui_state
+                    .viewer
+                    .get(k)
+                    .and_then(pm_model::Value::as_str)
+                    .map(str::to_owned)
+            };
+            Some((
+                poses,
+                scene,
+                selected,
+                part,
+                ui("studioTool"),
+                ui("studioLook"),
+                ui("studioAxes"),
+                (
+                    ui("studioLightKind"),
+                    ui("studioLightAdd"),
+                    ui("studioLightAim"),
+                ),
+                // The viewer's 2D/3D choice is remembered per composition.
+                {
+                    let comp = p.snapshot.render_comp();
+                    let kept = p
+                        .ui_state
+                        .viewer
+                        .get("studioLookByComp")
+                        .and_then(|m| m.get(&comp))
+                        .and_then(pm_model::Value::as_str)
+                        .map(str::to_owned);
+                    (comp, kept)
+                },
+            ))
+        });
+        cx.spawn(async move |this, cx| {
+            let read = read.await;
             let _ = this.update(cx, |s, cx| {
-                if s.latest == ticket {
+                s.reread_out = false;
+                if s.latest == ticket && !s.draws_live_outline() {
                     let (
                         poses,
                         scene,
@@ -1175,7 +1603,13 @@ impl GizmoSurface {
                         }
                     }
                     let changed_look = free_look != s.studio.free_look;
-                    s.studio.scene = scene.map(Arc::new);
+                    let mut scene = scene;
+                    if s.studio.camera_commit_return.is_some()
+                        && let (Some(sc), Some(end)) = (scene.as_mut(), s.studio.free)
+                    {
+                        Arc::make_mut(sc).shot = end;
+                    }
+                    s.studio.scene = scene;
                     if let Some(want) = adopt {
                         if want && s.studio.free.is_none() {
                             s.studio.free = s.studio.scene.as_ref().map(|sc| sc.shot);
@@ -1185,16 +1619,23 @@ impl GizmoSurface {
                     s.studio.selected = selected;
                     s.studio.part = part;
                     s.studio.tool = studio3d::Tool::parse(tool.as_deref());
-                    if !s.studio.busy() {
+                    if !s.studio.busy() && s.studio.camera_commit_return.is_none() {
                         s.studio.free_look = free_look;
                     }
-                    if changed_look || had != s.studio.scene.is_some() {
+                    if (changed_look && s.studio.camera_commit_return.is_none())
+                        || had != s.studio.scene.is_some()
+                    {
                         s.studio_push_view(cx);
                     }
                     s.draw(cx);
                     #[cfg(test)]
-                    { s.completed_read = ticket; }
-                    s.effects_reread(cx);
+                    {
+                        s.completed_read = ticket;
+                    }
+                }
+                if s.reread_again {
+                    s.reread_again = false;
+                    s.reread(cx);
                 }
             });
         })
@@ -1205,17 +1646,22 @@ impl GizmoSurface {
             return;
         };
         let editing = self.text_session().is_some();
-        let poses: &[Pose] = if self.controls && !editing {
-            &self.poses
-        } else {
-            &[]
-        };
-        let (mut lines, mut marks) = overlay(poses, frame, &self.tokens);
+        let poses = self.view_poses();
+        let (mut lines, mut marks) = overlay(
+            if self.controls && !editing && !self.studio_flying() {
+                &poses
+            } else {
+                &[]
+            },
+            frame,
+            &self.tokens,
+        );
         // The hover outline: the accent at 60% (viewer-chrome.md), never
         // over a gesture or on a layer the selection already outlines.
         if let Some((id, c)) = &self.hover_box
             && self.controls
             && !editing
+            && !self.studio.free_look
             && self.drag.is_none()
             && !self.poses.iter().any(|p| &p.id == id)
         {
@@ -1351,7 +1797,7 @@ impl GizmoSurface {
         if self.studio.active() {
             return;
         }
-        self.panning = Some(event.position);
+        self.panning = Some((event.position, event.position));
         self.set_cursor(CursorStyle::ClosedHand, cx);
     }
     /// The cursor promises what a press here does.
@@ -1396,7 +1842,12 @@ impl GizmoSurface {
             && !handle
             && ruler.is_none()
             && self.text_session().is_none()
-            && !self.studio.active()
+            && !self.studio.free_look
+            && self
+                .studio
+                .scene
+                .as_ref()
+                .is_none_or(|scene| scene.items.iter().all(|item| item.is_plane))
             && self.marquee.is_none()
         {
             let press = Press {
@@ -1441,7 +1892,7 @@ impl GizmoSurface {
             Some(_) => CursorStyle::Arrow,
             // Inside a layer's box or the selection's common box, a drag moves.
             None if self.transformable()
-                && (self.poses.iter().any(|p| inside(&p.corners, at))
+                && (self.view_poses().iter().any(|p| inside(&p.corners, at))
                     || self.handle_pose().is_some_and(|p| inside(&p.corners, at))) =>
             {
                 CursorStyle::Move
@@ -1510,14 +1961,30 @@ impl GizmoSurface {
         })
         .detach();
     }
+    /// Free View draws and edits the projected planes with the scene handles.
+    fn view_poses(&self) -> std::borrow::Cow<'_, [Pose]> {
+        if self.studio.free_look && self.poses.iter().any(|pose| pose.plane.is_some()) {
+            std::borrow::Cow::Owned(
+                self.poses
+                    .iter()
+                    .filter(|p| p.plane.is_none())
+                    .cloned()
+                    .collect(),
+            )
+        } else {
+            std::borrow::Cow::Borrowed(self.poses.as_slice())
+        }
+    }
+
     /// A selection holding a locked layer owns its geometry but does not move.
     fn transformable(&self) -> bool {
-        !self.poses.is_empty() && self.poses.iter().all(|p| !p.locked)
+        let poses = self.view_poses();
+        !poses.is_empty() && poses.iter().all(|p| !p.locked)
     }
     /// The box whose handles a press can take: the one layer's, or the
     /// common box of an unlocked multiple selection.
     fn handle_pose(&self) -> Option<Pose> {
-        match self.poses.as_slice() {
+        match self.view_poses().as_ref() {
             [pose] => Some(pose.clone()),
             poses => group_pose(poses),
         }
@@ -1556,7 +2023,7 @@ impl GizmoSurface {
         self.unhover(cx);
         // Space held over the viewer: the hand, whatever the tool.
         if self.space_hand {
-            self.panning = Some(event.position);
+            self.panning = Some((event.position, event.position));
             self.set_cursor(CursorStyle::ClosedHand, cx);
             return;
         }
@@ -1595,7 +2062,11 @@ impl GizmoSurface {
             hit,
             origin: event.position,
             active: false,
-            poses: self.poses.clone(),
+            poses: if self.studio.free_look {
+                Arc::new(self.view_poses().into_owned())
+            } else {
+                self.poses.clone()
+            },
             time,
             click,
             snaps: None,
@@ -1610,7 +2081,36 @@ impl GizmoSurface {
             inside: false,
         };
         let drag = match tool {
-            Tool::Other => return,
+            Tool::Other => {
+                let button = match event.button {
+                    MouseButton::Left => 0,
+                    MouseButton::Middle => 1,
+                    MouseButton::Right => 2,
+                    _ => 0,
+                };
+                let _ = self.host.custom_tool_event(
+                    serde_json::json!({
+                        "type": "down",
+                        "x": f32::from(event.position.x - self.bounds.origin.x),
+                        "y": f32::from(event.position.y - self.bounds.origin.y),
+                        "compX": at[0],
+                        "compY": at[1],
+                        "scale": frame.scale,
+                        "width": frame.size[0],
+                        "height": frame.size[1],
+                        "button": button,
+                        "clickCount": event.click_count,
+                        "modifiers": {
+                            "shift": event.modifiers.shift,
+                            "alt": event.modifiers.alt,
+                            "ctrl": event.modifiers.control,
+                            "meta": event.modifiers.platform,
+                        }
+                    }),
+                    cx,
+                );
+                return;
+            }
             Tool::Pen => {
                 self.pen_down(event, at, frame.scale, cx);
                 return;
@@ -1625,7 +2125,7 @@ impl GizmoSurface {
                 return;
             }
             Tool::Hand => {
-                self.panning = Some(event.position);
+                self.panning = Some((event.position, event.position));
                 return;
             }
             Tool::Shape => {
@@ -1642,10 +2142,9 @@ impl GizmoSurface {
                 self.zoom_view(Navigate::Zoom { factor, at }, cx);
                 return;
             }
-            Tool::Rotate => {
-                (self.poses.len() == 1 && self.transformable()).then(|| start(Hit::Rotate, None))
-            }
-            Tool::Anchor => match self.poses.as_slice() {
+            Tool::Rotate => (self.view_poses().len() == 1 && self.transformable())
+                .then(|| start(Hit::Rotate, None)),
+            Tool::Anchor => match self.view_poses().as_ref() {
                 [pose]
                     if !pose.locked
                         && (pose.anchor[0] - at[0]).hypot(pose.anchor[1] - at[1])
@@ -1663,7 +2162,7 @@ impl GizmoSurface {
                 // A layer's own box, or the common box of a multiple
                 // selection (its gaps included), owns the press
                 // (viewer.ts pointInSelection).
-                let inside_selection = self.poses.iter().any(|p| inside(&p.corners, at))
+                let inside_selection = self.view_poses().iter().any(|p| inside(&p.corners, at))
                     || self.handle_pose().is_some_and(|p| inside(&p.corners, at));
                 if let Some(hit) = self.handle_at(at, frame.scale) {
                     Some(start(hit, None))
@@ -1703,6 +2202,15 @@ impl GizmoSurface {
                 Some(DoubleClick::Select(id)) => {
                     let _ = this.update(cx, |s, cx| {
                         s.queue.push_back(Job::SelectLayers(vec![id]));
+                        s.pump(cx);
+                    });
+                }
+                Some(DoubleClick::FocusGroup { group, select }) => {
+                    let _ = this.update(cx, |s, cx| {
+                        s.host.focus_group(group, cx);
+                        s.queue.push_back(Job::SelectLayers(
+                            select.into_iter().collect(),
+                        ));
                         s.pump(cx);
                     });
                 }
@@ -1753,6 +2261,7 @@ impl GizmoSurface {
                     let p = kernel.published(&project)?;
                     let options = pm_kernel::PickOptions {
                         include_locked: true,
+                        focus_group: focused_group(&p),
                     };
                     let hit = crate::text_host::query(&p, |q| {
                         q.pick(None, press.at[0], press.at[1], press.time, &options)
@@ -1797,6 +2306,7 @@ impl GizmoSurface {
         // The 2D picker can't measure Studio 3D layers; their own picking ran
         // first, so a 2D failure over a 3D scene is empty canvas.
         let studio = self.studio.active();
+        let free = self.studio.free_look;
         self.picks += 1;
         cx.spawn(async move |this, cx| {
             let poses = cx
@@ -1804,6 +2314,15 @@ impl GizmoSurface {
                 .spawn(async move {
                     let p = kernel.published(&project)?;
                     let target = match pick_target(&p, press) {
+                        Some(Some(id))
+                            if free
+                                && QueryMirror::new(&p)
+                                    .queries()
+                                    .is_3d_layer(None, &id, press.time)
+                                    .unwrap_or(false) =>
+                        {
+                            None
+                        }
                         Some(target) => target,
                         None if studio => None,
                         None => return None,
@@ -1907,6 +2426,37 @@ impl GizmoSurface {
         if self.studio_wheel(event, line, cx) {
             return;
         }
+        if self.host.tool(cx) == Tool::Other
+            && let Some(frame) = self.host.frame(self.bounds, cx)
+        {
+            let at = self.to_comp(event.position, frame);
+            let delta = event.delta.pixel_delta(line);
+            if self.host.custom_tool_event(
+                serde_json::json!({
+                    "type": "wheel",
+                    "x": f32::from(event.position.x - self.bounds.origin.x),
+                    "y": f32::from(event.position.y - self.bounds.origin.y),
+                    "compX": at[0],
+                    "compY": at[1],
+                    "scale": frame.scale,
+                    "width": frame.size[0],
+                    "height": frame.size[1],
+                    "button": 0,
+                    "clickCount": 0,
+                    "deltaX": f32::from(delta.x),
+                    "deltaY": f32::from(delta.y),
+                    "modifiers": {
+                        "shift": event.modifiers.shift,
+                        "alt": event.modifiers.alt,
+                        "ctrl": event.modifiers.control,
+                        "meta": event.modifiers.platform,
+                    }
+                }),
+                cx,
+            ) {
+                return;
+            }
+        }
         let delta = event.delta.pixel_delta(line);
         let m = event.modifiers;
         let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
@@ -1927,7 +2477,7 @@ impl GizmoSurface {
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         if self.studio_flying() {
-            self.studio_fly_pointer(event.position);
+            self.studio_fly_pointer(event.position, cx);
             return;
         }
         if self.effects_move(event, cx) { return; }
@@ -1941,8 +2491,43 @@ impl GizmoSurface {
         if self.studio_move(event, cx) {
             return;
         }
-        if let Some(last) = self.panning {
-            self.panning = Some(event.position);
+        if self.host.tool(cx) == Tool::Other
+            && self.bounds.contains(&event.position)
+            && let Some(frame) = self.host.frame(self.bounds, cx)
+        {
+            let at = self.to_comp(event.position, frame);
+            let button = match event.pressed_button {
+                Some(MouseButton::Left) => 0,
+                Some(MouseButton::Middle) => 1,
+                Some(MouseButton::Right) => 2,
+                _ => -1,
+            };
+            if self.host.custom_tool_event(
+                serde_json::json!({
+                    "type": "move",
+                    "x": f32::from(event.position.x - self.bounds.origin.x),
+                    "y": f32::from(event.position.y - self.bounds.origin.y),
+                    "compX": at[0],
+                    "compY": at[1],
+                    "scale": frame.scale,
+                    "width": frame.size[0],
+                    "height": frame.size[1],
+                    "button": button,
+                    "clickCount": 0,
+                    "modifiers": {
+                        "shift": event.modifiers.shift,
+                        "alt": event.modifiers.alt,
+                        "ctrl": event.modifiers.control,
+                        "meta": event.modifiers.platform,
+                    }
+                }),
+                cx,
+            ) {
+                return;
+            }
+        }
+        if let Some((start, last)) = self.panning {
+            self.panning = Some((start, event.position));
             if event.position != last {
                 self.space_panned |= self.space_hand;
             }
@@ -2111,21 +2696,27 @@ impl GizmoSurface {
     fn on_up(&mut self, commit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.picking = None;
         if self.effect_drag.as_ref().is_some_and(|d| d.color_channel.is_some()) { return; }
-        if let Some(drag) = self.effect_drag.take() {
-            if drag.removed { self.effect_stop = None; self.effect_picker = None; }
-            if drag.active { self.queue.push_back(Job::Finish(commit)); self.pump(cx); }
-            self.effects_reread(cx);
+        if self.effect_drag.is_some() {
+            self.effects_release_drag(commit, cx);
             return;
         }
         if self.rulers.dragging.is_some() {
             let at = window
                 .as_ref()
                 .map_or(Point::default(), |w| w.mouse_position());
-            self.rulers_up(at);
+            if commit {
+                self.rulers_up(at);
+            } else {
+                self.rulers_cancel();
+            }
             cx.notify();
             return;
         }
-        if self.panning.take().is_some() {
+        if let Some((start, last)) = self.panning.take() {
+            if !commit {
+                self.host.navigate(Navigate::Pan(start - last), cx);
+                self.draw(cx);
+            }
             let open = if self.space_hand || self.host.tool(cx) == Tool::Hand {
                 CursorStyle::OpenHand
             } else {
@@ -2135,6 +2726,35 @@ impl GizmoSurface {
         }
         if self.studio_up(commit, cx) {
             return;
+        }
+        if self.host.tool(cx) == Tool::Other
+            && let Some(frame) = self.host.frame(self.bounds, cx)
+        {
+            let pos = window
+                .as_ref()
+                .map_or(self.bounds.origin, |w| w.mouse_position());
+            let at = self.to_comp(pos, frame);
+            let _ = self.host.custom_tool_event(
+                serde_json::json!({
+                    "type": "up",
+                    "x": f32::from(pos.x - self.bounds.origin.x),
+                    "y": f32::from(pos.y - self.bounds.origin.y),
+                    "compX": at[0],
+                    "compY": at[1],
+                    "scale": frame.scale,
+                    "width": frame.size[0],
+                    "height": frame.size[1],
+                    "button": 0,
+                    "clickCount": 0,
+                    "modifiers": {
+                        "shift": false,
+                        "alt": false,
+                        "ctrl": false,
+                        "meta": false,
+                    }
+                }),
+                cx,
+            );
         }
         if !self.guides.is_empty() {
             self.guides.clear();
@@ -2165,6 +2785,10 @@ impl GizmoSurface {
                 let ids = copies.into_iter().map(|(_, copy)| copy).collect();
                 self.queue.push_back(Job::SelectLayers(ids));
             }
+            if !commit {
+                self.poses = drag.poses;
+                self.draw(cx);
+            }
             self.queue.push_back(Job::Finish(commit));
             self.pump(cx);
         } else if let Some(press) = drag.click.filter(|_| commit) {
@@ -2178,7 +2802,15 @@ impl GizmoSurface {
     pub fn release_unheard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // A marquee or a shape or text box being drawn, or a press whose
         // pick has not answered yet, waits for the release as a drag does.
-        let held = self.drag.is_some()
+        let held = self.pointer_button == MouseButton::Left && self.pointer_drag_held();
+        if held {
+            self.on_up(true, Some(window), cx);
+        }
+        held
+    }
+
+    fn pointer_drag_held(&self) -> bool {
+        self.drag.is_some()
             || self.effect_drag.as_ref().is_some_and(|d| d.color_channel.is_none())
             || self.pen_drag.is_some()
             || matches!(
@@ -2190,11 +2822,8 @@ impl GizmoSurface {
             || self.marquee.is_some()
             || self.sketch.is_some()
             || self.text_sketch.is_some()
-            || self.picking.is_some();
-        if held {
-            self.on_up(true, Some(window), cx);
-        }
-        held
+            || self.picking.is_some()
+            || self.studio.pointer_drag_held()
     }
     /// A pointer gesture Escape would cancel (not a text session): ending
     /// one reads the controller (its tool, its frame), so the controller
@@ -2203,11 +2832,20 @@ impl GizmoSurface {
         self.pen_drag.is_some()
             || self.marquee.is_some()
             || self.studio.busy()
+            || self.studio.part_pick.is_some()
             || self.drag.is_some()
             || self.sketch.is_some()
             || self.text_sketch.is_some()
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.studio.part_pick.take().is_some() {
+            self.studio.hovered_part = None;
+            self.studio.hovered_part_seq = self.studio.hovered_part_seq.wrapping_add(1);
+            self.cursor = CursorStyle::Arrow;
+            self.draw(cx);
+            cx.notify();
+            return true;
+        }
         if self.effect_colour.is_some() {
             self.effects_finish_colour(false, cx); return true;
         }
@@ -2337,6 +2975,7 @@ impl GizmoSurface {
         }
         let (kernel, project, gesture) = (self.kernel.clone(), self.project.clone(), self.gesture);
         let (started, kind) = (std::time::Instant::now(), job.kind());
+        let camera_transact = matches!(&job, Job::Transact("Fly Camera" | "Move Camera", ..));
         crate::interaction_work::submit!(cx, async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -2434,12 +3073,33 @@ impl GizmoSurface {
                     && s.effect_drag.is_none()
                     && s.pen_drag.is_none()
                     && !s.studio.busy()
+                    && s.gesture.is_some()
                 {
-                    s.gesture = None;
+                    s.queue.push_back(Job::Finish(true));
+                }
+                let mut released_camera_commit = false;
+                if camera_transact
+                    && !s
+                        .queue
+                        .iter()
+                        .any(|j| matches!(j, Job::Transact("Fly Camera" | "Move Camera", ..)))
+                    && let Some((was_free, prev_free)) = s.studio.camera_commit_return.take()
+                {
+                    s.studio.free_look = was_free;
+                    s.studio.look_pending = Some(was_free);
+                    s.studio.free = prev_free;
+                    s.studio_push_view(cx);
+                    s.draw(cx);
+                    released_camera_commit = true;
                 }
                 s.pump(cx);
-                // Clicks the Pen holds act once its own work has landed.
-                if !s.busy && s.queue.is_empty() && !s.pen_waiting.is_empty() {
+                // Reconcile any reads deferred during the drag, even when
+                // release did not change the document or the kernel refused it.
+                // The Pen also needs a read when its own work has landed.
+                if kind == "finish"
+                    || released_camera_commit
+                    || (!s.busy && s.queue.is_empty() && !s.pen_waiting.is_empty())
+                {
                     s.refresh(cx);
                 }
             });
@@ -2471,7 +3131,7 @@ impl GizmoSurface {
     /// The latest pose read finished; an empty selection is a completed read too.
     #[cfg(test)]
     pub fn refresh_complete(&self) -> bool {
-        !self.refreshing && self.completed_read == self.latest
+        !self.refreshing && !self.effect_out && self.completed_read == self.latest
     }
     #[cfg(test)]
     pub fn idle(&self) -> bool {
@@ -2519,6 +3179,11 @@ fn group_pose(poses: &[Pose]) -> Option<Pose> {
         world: [1., 0., 0., 1., 0., 0.],
         plane: None,
         plane_pos: None,
+        screen_box: false,
+        own_3d: false,
+        position_z: 0.,
+        scale_z: None,
+        drag_3d: None,
         linear: [1., 0., 0., 1.],
         to_parent: [1., 0., 0., 1.],
         bounds: [x0, y0, x1, y1],
@@ -2844,18 +3509,34 @@ fn commands(
         let id = &pose.id;
         match drag.hit {
             Hit::Body => {
-                let d = pose
-                    .plane_pos
-                    .as_ref()
-                    .and_then(pm_eval::space3d::inverse_plane)
-                    .and_then(|inv| {
-                        let a = project_plane(&inv, origin)?;
-                        let b = project_plane(&inv, [origin[0] + delta[0], origin[1] + delta[1]])?;
-                        Some([b[0] - a[0], b[1] - a[1]])
-                    })
-                    .unwrap_or_else(|| apply(pose.to_parent, delta));
-                out.push(set(id, "position.x", pose.position[0] + d[0], t));
-                out.push(set(id, "position.y", pose.position[1] + d[1], t));
+                if pose.own_3d
+                    && let Some(d3) = pose.drag_3d
+                    && d3.parent_tilted
+                {
+                    let wx = delta[0] * d3.depth_scale;
+                    let wy = delta[1] * d3.depth_scale;
+                    let inv = &d3.parent_inv;
+                    let dx = inv[0] * wx + inv[4] * wy;
+                    let dy = inv[1] * wx + inv[5] * wy;
+                    let dz = inv[2] * wx + inv[6] * wy;
+                    out.push(set(id, "position.x", pose.position[0] + dx, t));
+                    out.push(set(id, "position.y", pose.position[1] + dy, t));
+                    out.push(set(id, "position.z", pose.position_z + dz, t));
+                } else {
+                    let d = pose
+                        .plane_pos
+                        .as_ref()
+                        .and_then(pm_eval::space3d::inverse_plane)
+                        .and_then(|inv| {
+                            let a = project_plane(&inv, origin)?;
+                            let b =
+                                project_plane(&inv, [origin[0] + delta[0], origin[1] + delta[1]])?;
+                            Some([b[0] - a[0], b[1] - a[1]])
+                        })
+                        .unwrap_or_else(|| apply(pose.to_parent, delta));
+                    out.push(set(id, "position.x", pose.position[0] + d[0], t));
+                    out.push(set(id, "position.y", pose.position[1] + d[1], t));
+                }
             }
             Hit::Rotate => {
                 out.push(set(id, "rotation", turned_to(pose, origin, at, mods), t));
@@ -2927,11 +3608,52 @@ fn resize(
     mods: Mods,
     t: f64,
 ) -> Vec<Command> {
+    let (u, v) = HANDLES[index];
+    let (active_x, active_y) = (u != 0.5, v != 0.5);
+    // A 3D group whose children have independent 3D depth/tilt scales uniformly
+    // in screen space across X, Y, and Z so rotating or scaling never causes
+    // edge-on singularities or depth shear.
+    if pose.screen_box {
+        let handle = pose.handle(index);
+        let pivot = if mods.alt {
+            pose.anchor
+        } else {
+            let opp_u = if active_x { 1. - u } else { 0.5 };
+            let opp_v = if active_y { 1. - v } else { 0.5 };
+            let top = lerp(pose.corners[0], pose.corners[1], opp_u);
+            let bottom = lerp(pose.corners[3], pose.corners[2], opp_u);
+            lerp(top, bottom, opp_v)
+        };
+        let grabbed = [
+            at[0] - (origin[0] - handle[0]),
+            at[1] - (origin[1] - handle[1]),
+        ];
+        let (dx, dy) = (handle[0] - pivot[0], handle[1] - pivot[1]);
+        let factor = if active_x && active_y {
+            ((grabbed[0] - pivot[0]) * dx + (grabbed[1] - pivot[1]) * dy)
+                / (dx * dx + dy * dy).max(1e-9)
+        } else if active_x && dx.abs() > 1e-9 {
+            (grabbed[0] - pivot[0]) / dx
+        } else if active_y && dy.abs() > 1e-9 {
+            (grabbed[1] - pivot[1]) / dy
+        } else {
+            1.
+        };
+        let scale_x = (pose.scale[0] * factor).max(MIN_SCALE);
+        let kept = scale_x / pose.scale[0].max(1e-9);
+        let scale_y = (pose.scale[1] * kept).max(MIN_SCALE);
+        let mut cmds = vec![
+            set(&pose.id, "scale.x", round(scale_x, 3), t),
+            set(&pose.id, "scale.y", round(scale_y, 3), t),
+        ];
+        if let Some(sz) = pose.scale_z {
+            cmds.push(set(&pose.id, "scale.z", round((sz * kept).max(MIN_SCALE), 3), t));
+        }
+        return cmds;
+    }
     let (Some(start), Some(now)) = (pose.to_local(origin), pose.to_local(at)) else {
         return vec![];
     };
-    let (u, v) = HANDLES[index];
-    let (active_x, active_y) = (u != 0.5, v != 0.5);
     let handle = pose.local(u, v);
     let pivot = if mods.alt {
         pose.local(0.5, 0.5)
@@ -2955,7 +3677,8 @@ fn resize(
     };
     let mut fx = factor(active_x, dx, grabbed[0], pivot[0]);
     let mut fy = factor(active_y, dy, grabbed[1], pivot[1]);
-    if mods.shift || pose.keeps_aspect {
+    let uniform_scale = mods.shift || pose.keeps_aspect;
+    if uniform_scale {
         let uniform = if active_x && active_y {
             // Project onto the corner's diagonal: continuous through shrink and growth.
             ((grabbed[0] - pivot[0]) * dx + (grabbed[1] - pivot[1]) * dy)
@@ -2982,7 +3705,7 @@ fn resize(
         pose.linear,
         [fixed[0] * (1. - kept_x), fixed[1] * (1. - kept_y)],
     );
-    vec![
+    let mut cmds = vec![
         set(&pose.id, "scale.x", round(scale_x, 3), t),
         set(&pose.id, "scale.y", round(scale_y, 3), t),
         set(
@@ -2997,7 +3720,13 @@ fn resize(
             round(pose.position[1] + correction[1], 3),
             t,
         ),
-    ]
+    ];
+    if uniform_scale
+        && let Some(sz) = pose.scale_z
+    {
+        cmds.push(set(&pose.id, "scale.z", round((sz * kept_x).max(MIN_SCALE), 3), t));
+    }
+    cmds
 }
 /// Selection bounds carry half the stroke on each side, and a shape's box grows
 /// about its own centre, so the fixed point follows its place inside that box.
@@ -3035,11 +3764,82 @@ fn resize_shape(
         ),
     ]
 }
+fn geometry_query<T>(
+    p: &pm_kernel::Published,
+    mirror: &mut QueryMirror,
+    mut read: impl FnMut(&mut pm_kernel::QueryContext) -> Result<T, pm_kernel::QueryError>,
+) -> Result<T, pm_kernel::QueryError> {
+    match read(mirror.queries()) {
+        Err(pm_kernel::QueryError::NeedsFonts | pm_kernel::QueryError::NeedsInk) => {
+            crate::text_host::query(p, read)
+        }
+        result => result,
+    }
+}
+
+fn viewer_pick(
+    p: &pm_kernel::Published,
+    press: Press,
+    options: &pm_kernel::PickOptions,
+) -> Option<pm_kernel::PickHit> {
+    geometry_query(p, &mut QueryMirror::new(p), |q| {
+        q.pick(None, press.at[0], press.at[1], press.time, options)
+    })
+    .ok()
+}
+
 /// A layer's box in the composition at `time`: its transformed bounds
-/// (perspective-projected through `planeMatrix` for 2.5D 3D layers).
+/// (perspective-projected through `planeMatrix` for 2.5D 3D layers, or
+/// screen-space union of projected descendants for 3D groups with 3D depth).
 fn outline(p: &pm_kernel::Published, id: &str, time: f64) -> Option<[[f64; 2]; 4]> {
-    let b = crate::text_host::query(p, |q| q.bounds(None, id, time)).ok()??;
+    let root = p.snapshot.root()?;
+    let loc = pm_kernel::model::find_layer(root, id)?;
+    let layer = pm_kernel::model::layer_at(root, &loc)?;
     let mut mirror = QueryMirror::new(p);
+    if !mirror.queries().active(None, id, time).unwrap_or(false) {
+        return None;
+    }
+    if layer.get("type").and_then(crate::node_string) == Some("group") {
+        let list = pm_kernel::model::list_layers(root, None);
+        let descendants = group_descendants(&list, id);
+        let mut any_3d_child = false;
+        let mut lo = [f64::INFINITY; 2];
+        let mut hi = [f64::NEG_INFINITY; 2];
+        for child_id in &descendants {
+            if !mirror.queries().active(None, child_id, time).unwrap_or(false) {
+                continue;
+            }
+            if let Ok(true) = mirror.queries().is_3d_layer(None, child_id, time)
+                && let Ok(cp) = mirror.queries().plane_matrix(None, child_id, time, false)
+                && let Ok(Some(cb)) =
+                    geometry_query(p, &mut mirror, |q| q.bounds(None, child_id, time))
+            {
+                any_3d_child = true;
+                for local_pt in [
+                    [cb.x0, cb.y0],
+                    [cb.x1, cb.y0],
+                    [cb.x1, cb.y1],
+                    [cb.x0, cb.y1],
+                ] {
+                    if let Some(pt) = project_plane(&cp, local_pt) {
+                        lo[0] = lo[0].min(pt[0]);
+                        lo[1] = lo[1].min(pt[1]);
+                        hi[0] = hi[0].max(pt[0]);
+                        hi[1] = hi[1].max(pt[1]);
+                    }
+                }
+            }
+        }
+        if any_3d_child && lo[0].is_finite() && hi[0].is_finite() {
+            return Some([
+                [lo[0], lo[1]],
+                [hi[0], lo[1]],
+                [hi[0], hi[1]],
+                [lo[0], hi[1]],
+            ]);
+        }
+    }
+    let b = geometry_query(p, &mut mirror, |q| q.bounds(None, id, time)).ok()??;
     project_box(mirror.queries(), id, time, b).map(|(corners, _)| corners)
 }
 /// What a Select-tool double-click does, in viewer.ts order (onDown's
@@ -3049,29 +3849,57 @@ enum DoubleClick {
     /// Descend one group level: the child of the deepest selected group
     /// holding the hit.
     Select(String),
+    /// Focus a group layer like a composition (or exit when `group` is `None`),
+    /// optionally selecting the clicked member inside it.
+    FocusGroup {
+        group: Option<String>,
+        select: Option<String>,
+    },
     /// Edit the text layer's text, all of it selected.
     Text(String),
     /// Open the precomp's composition.
     Open(String),
 }
+pub(crate) fn focused_group(p: &pm_kernel::Published) -> Option<String> {
+    let id = pm_panel_timeline::focused_group_from_ui(&p.ui_state)?;
+    let root = p.snapshot.root()?;
+    let comp = p.snapshot.open_comp();
+    let comp = pm_kernel::model::comp_node(root, comp.as_deref())?;
+    pm_kernel::model::layers_of(comp)
+        .any(|layer| {
+            layer.get("id").and_then(crate::node_string) == Some(id)
+                && layer.get("type").and_then(crate::node_string) == Some("group")
+        })
+        .then(|| id.to_owned())
+}
 fn double_click_action(p: &pm_kernel::Published, press: Press) -> Option<DoubleClick> {
     let root = p.snapshot.root()?;
-    let hit = crate::text_host::query(p, |q| {
-        q.pick(
-            None,
-            press.at[0],
-            press.at[1],
-            press.time,
-            &Default::default(),
-        )
-    })
-    .ok()?
-    .layer_id?;
+    let focus = focused_group(p);
+    let pick_opts = pm_kernel::PickOptions {
+        include_locked: false,
+        focus_group: focus.clone(),
+    };
+    let hit = viewer_pick(p, press, &pick_opts)?
+    .layer_id;
+    let layers = pm_kernel::model::list_layers(root, None);
+    let group_of = |id: &str| {
+        layers
+            .iter()
+            .find(|l| l.id == id)
+            .and_then(|l| l.group.clone())
+    };
+    let Some(hit) = hit else {
+        // Double-clicking empty canvas while focused on a group steps up one level.
+        let gid = focus?;
+        return Some(DoubleClick::FocusGroup {
+            group: group_of(&gid),
+            select: None,
+        });
+    };
     // Studio 3D layers answer their own double-click.
     if is_studio(p, &hit) {
         return None;
     }
-    let layers = pm_kernel::model::list_layers(root, None);
     let info = layers.iter().find(|l| l.id == hit)?;
     let selected = p.selection.layers();
     let text = info.kind == "text" && !info.effectively_locked;
@@ -3079,17 +3907,24 @@ fn double_click_action(p: &pm_kernel::Published, press: Press) -> Option<DoubleC
     if text && selected.contains(&hit) {
         return Some(DoubleClick::Text(hit));
     }
-    let group_of = |id: &str| {
-        layers
-            .iter()
-            .find(|l| l.id == id)
-            .and_then(|l| l.group.clone())
-    };
     let mut chain = vec![hit.clone()];
     while let Some(group) = group_of(chain.last().unwrap()) {
         chain.push(group);
     }
     chain.reverse();
+    let scope_start = focus
+        .as_ref()
+        .and_then(|gid| chain.iter().position(|id| id == gid).map(|i| i + 1))
+        .unwrap_or(0);
+    if scope_start + 1 < chain.len() {
+        let group = chain[scope_start].clone();
+        if layers.iter().any(|l| l.id == group && l.kind == "group") {
+            return Some(DoubleClick::FocusGroup {
+                group: Some(group),
+                select: Some(chain[scope_start + 1].clone()),
+            });
+        }
+    }
     if let Some(index) = chain.iter().rposition(|id| selected.contains(id))
         && index + 1 < chain.len()
     {
@@ -3110,16 +3945,12 @@ fn double_click_action(p: &pm_kernel::Published, press: Press) -> Option<DoubleC
 /// for their members; Command reaches the leaf (viewer.ts resolvePickTarget).
 fn pick_target(p: &pm_kernel::Published, press: Press) -> Option<Option<String>> {
     let root = p.snapshot.root()?;
-    let hit = crate::text_host::query(p, |q| {
-        q.pick(
-            None,
-            press.at[0],
-            press.at[1],
-            press.time,
-            &Default::default(),
-        )
-    })
-    .ok()?;
+    let focus = focused_group(p);
+    let pick_opts = pm_kernel::PickOptions {
+        include_locked: false,
+        focus_group: focus.clone(),
+    };
+    let hit = viewer_pick(p, press, &pick_opts)?;
     let Some(id) = hit.layer_id else {
         return Some(None);
     };
@@ -3131,25 +3962,44 @@ fn pick_target(p: &pm_kernel::Published, press: Press) -> Option<Option<String>>
     if press.deep {
         return Some(Some(id));
     }
-    let layers = pm_kernel::model::list_layers(root, None);
-    let group_of = |id: &str| {
-        layers
-            .iter()
-            .find(|l| l.id == id)
-            .and_then(|l| l.group.clone())
-    };
+    let comp = p.snapshot.open_comp();
+    let comp = pm_kernel::model::comp_node(root, comp.as_deref())?;
+    let parents: std::collections::HashMap<_, _> = pm_kernel::model::layers_of(comp)
+        .filter_map(|layer| {
+            Some((
+                layer.get("id").and_then(crate::node_string)?,
+                layer.get("group").and_then(crate::node_string)?,
+            ))
+        })
+        .collect();
+    if parents.is_empty() {
+        return Some(Some(id));
+    }
     let chain = |from: &str| {
         let mut out = vec![];
-        let mut at = group_of(from);
-        while let Some(group) = at {
-            at = group_of(&group);
+        let mut at = from;
+        while let Some(&group) = parents.get(at) {
+            if out.contains(&group) {
+                break;
+            }
             out.push(group);
+            at = group;
         }
         out
     };
-    let entered: Vec<String> = p.selection.layers().iter().flat_map(|l| chain(l)).collect();
-    let outermost = chain(&id).into_iter().rev().find(|g| !entered.contains(g));
-    Some(Some(outermost.unwrap_or(id)))
+    let hit_chain = chain(&id);
+    if let Some(gid) = &focus
+        && !hit_chain.contains(&gid.as_str())
+    {
+        return Some(None);
+    }
+    let mut entered: Vec<&str> = p.selection.layers().iter().flat_map(|l| chain(l)).collect();
+    if let Some(gid) = &focus {
+        entered.push(gid.as_str());
+        entered.extend(chain(gid));
+    }
+    let outermost = hit_chain.into_iter().rev().find(|g| !entered.contains(g));
+    Some(Some(outermost.map(str::to_owned).unwrap_or(id)))
 }
 /// Accent box, handles and anchor as engine lines. Sizes follow the display,
 /// never the composition zoom.
@@ -3340,11 +4190,15 @@ impl Render for GizmoSurface {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|s, event: &MouseDownEvent, window, cx| s.on_down(event, window, cx)),
+                cx.listener(|s, event: &MouseDownEvent, window, cx| {
+                    s.pointer_button = event.button;
+                    s.on_down(event, window, cx);
+                }),
             )
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|s, event: &MouseDownEvent, _, cx| {
+                    s.pointer_button = event.button;
                     if let Some(frame) = s.host.frame(s.bounds, cx) {
                         let at = s.to_comp(event.position, frame);
                         s.studio_down(event, at, frame, None, cx);
@@ -3398,18 +4252,67 @@ impl Render for GizmoSurface {
                                 s.rulers_paint(frame, window, cx);
                             }
                         });
+                        let pressed = this.clone();
+                        window.on_mouse_event(move |e: &MouseDownEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let _ = pressed.update(cx, |s, cx| {
+                                if s.studio_flying() {
+                                    match e.button {
+                                        MouseButton::Left => {
+                                            s.studio_fly_end(true, cx);
+                                            cx.stop_propagation();
+                                        }
+                                        MouseButton::Right => {
+                                            s.studio_fly_end(false, cx);
+                                            cx.stop_propagation();
+                                        }
+                                        _ => {}
+                                    }
+                                    return;
+                                }
+                                if matches!(e.button, MouseButton::Left | MouseButton::Middle) {
+                                    s.cancelled_press = None;
+                                } else if e.button == MouseButton::Right && !s.studio_flying()
+                                    && (s.cancelled_press.is_some() || s.pointer_drag_held())
+                                {
+                                    s.cancelled_press = Some(s.pointer_button);
+                                    s.on_up(false, None, cx);
+                                    cx.stop_propagation();
+                                }
+                            });
+                        });
                         let moved = this.clone();
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
-                                let _ = moved.update(cx, |s, cx| s.on_move(e, cx));
+                                let _ = moved.update(cx, |s, cx| {
+                                    if s.studio_flying() {
+                                        s.studio_fly_pointer(e.position, cx);
+                                        cx.stop_propagation();
+                                    } else if s.cancelled_press.is_some() && e.pressed_button.is_some() {
+                                        cx.stop_propagation();
+                                    } else {
+                                        s.on_move(e, cx);
+                                    }
+                                });
                             }
                         });
                         let released = this.clone();
-                        window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
-                            if phase == DispatchPhase::Capture {
-                                let _ =
-                                    released.update(cx, |s, cx| s.on_up(true, Some(window), cx));
+                        window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
                             }
+                            let _ = released.update(cx, |s, cx| {
+                                if e.button == MouseButton::Right && s.cancelled_press.is_some() {
+                                    cx.stop_propagation();
+                                } else if s.cancelled_press == Some(e.button) {
+                                    s.cancelled_press = None;
+                                    cx.stop_propagation();
+                                } else if s.cancelled_press.is_none() && s.pointer_button == e.button {
+                                    s.on_up(true, Some(window), cx);
+                                }
+                            });
                         });
                     },
                 )
@@ -3487,11 +4390,18 @@ fn extruded_item(
             l.get("name").and_then(pm_model::Value::as_str).map(str::to_owned)
         })
         .unwrap_or_default();
+    const IDENTITY: [f64; 16] = [
+        1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+    ];
     Some(pm_panel_studio3d::viewport::Item {
         id: pose.id.clone(),
         role: pm_scene3d::schema::Role::Object,
+        is_null: false,
+        is_plane: false,
         name,
         locked: pose.locked,
+        world: IDENTITY,
+        parent_world: IDENTITY,
         bounds: pm_scene3d::navigation::Bounds { min: lo, max: hi },
         box_corners,
         pivot: to_scene(position[0], position[1], position[2]),
@@ -3516,12 +4426,32 @@ pub(crate) fn is_extruded(p: &pm_kernel::Published, id: &str) -> bool {
 }
 pub(crate) fn is_studio(p: &pm_kernel::Published, id: &str) -> bool {
     p.snapshot.root().is_some_and(|root| {
-        pm_kernel::model::find_layer(root, id)
-            .and_then(|at| pm_kernel::model::layer_at(root, &at))
-            .and_then(|l| l.get("d"))
+        let Some(at) = pm_kernel::model::find_layer(root, id) else {
+            return false;
+        };
+        let Some(l) = pm_kernel::model::layer_at(root, &at) else {
+            return false;
+        };
+        if l.get("d")
             .and_then(|d| d.get("definition"))
             .and_then(|d| d.to_value().as_str().map(str::to_owned))
             .is_some_and(|d| d.starts_with("powermove.3d."))
+        {
+            return true;
+        }
+        if l.get("type")
+            .and_then(|v| v.to_value().as_str().map(str::to_owned))
+            .as_deref()
+            == Some("null")
+            && l.get("threeD").and_then(|v| v.to_value().as_bool()) == Some(true)
+        {
+            return l
+                .get("d")
+                .and_then(|d| d.get("studio3d"))
+                .and_then(|v| v.to_value().as_bool())
+                == Some(true);
+        }
+        false
     })
 }
 
@@ -3558,5 +4488,423 @@ mod divider_reach_tests {
         assert!(super::on_divider_reach(b, point(px(400.), px(450. - reach + 1.)), &t));
         assert!(!super::on_divider_reach(b, point(px(400.), px(250.)), &t));
         assert!(!super::on_divider_reach(b, point(px(90.), px(250.)), &t));
+    }
+}
+
+#[cfg(test)]
+mod layer_drag_profile {
+    use super::{Drag, GizmoSurface, Hit, Host, Navigate, Tool, ViewFrame, read_at, snap};
+    use gpui::{App, AppContext, Bounds, Pixels, TestAppContext, Window};
+    use pm_engine_service::OverlayLine;
+    use pm_kernel::{
+        Call, Caller, Command, LayerCommand, PropertyCommand, Reply, Request, SelectionCall,
+        WriteBody,
+        commands::{layers::LayerPatch, properties::SetProperty},
+    };
+    use std::{cell::Cell, rc::Rc, sync::Arc, time::Instant};
+
+    mod fixture {
+        include!("../../kernel/src/drag_fixture.rs");
+    }
+
+    struct Viewer {
+        time: Cell<f64>,
+        drawn: Cell<Option<Instant>>,
+        lines: Cell<usize>,
+    }
+    impl Viewer {
+        fn new(time: f64) -> Self {
+            Self {
+                time: Cell::new(time),
+                drawn: Cell::new(None),
+                lines: Cell::new(0),
+            }
+        }
+    }
+    impl Host for Viewer {
+        fn time(&self, _: &App) -> f64 {
+            self.time.get()
+        }
+        fn playing(&self, _: &App) -> bool {
+            false
+        }
+        fn frame(&self, bounds: Bounds<Pixels>, _: &App) -> Option<ViewFrame> {
+            Some(ViewFrame {
+                origin: bounds.origin,
+                size: [1920., 1080.],
+                scale: 1.,
+            })
+        }
+        fn tool(&self, _: &App) -> Tool {
+            Tool::Select
+        }
+        fn overlay(
+            &self,
+            lines: Vec<OverlayLine>,
+            _: Option<crate::gizmo_layer::Placement>,
+            _: &mut App,
+        ) {
+            self.lines.set(lines.len());
+            self.drawn.set(Some(Instant::now()));
+        }
+        fn navigate(&self, _: Navigate, _: &mut App) {}
+        fn layer_menu(&self, _: Option<String>, _: &mut Window, _: &mut App) {}
+        fn report(&self, message: String, _: &mut App) {
+            panic!("{message}")
+        }
+    }
+
+    #[gpui::test]
+    fn selection_overlays_clear_before_a_pose_read_can_finish(cx: &mut TestAppContext) {
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let select = |id: &str| SelectionCall::Layers { ids: vec![id.into()], add: false };
+        let call = |call: Call| {
+            let ack = kernel
+                .call(fixture::PROJECT, Request::new(Caller::native(), call))
+                .wait()
+                .unwrap()
+                .unwrap();
+            assert!(!matches!(ack.reply, Reply::Throw(_)), "{:?}", ack.reply);
+        };
+        let time = 11.9;
+        let viewer = Rc::new(Viewer::new(time));
+        let surface = cx.new(|_| {
+            GizmoSurface::new(
+                kernel.clone(),
+                fixture::PROJECT.into(),
+                pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                viewer.clone(),
+            )
+        });
+        for delete in [false, true] {
+            call(select("solid").into());
+            let p = kernel.published(fixture::PROJECT).unwrap();
+            let poses = read_at(&p, time).unwrap();
+            assert!(poses.iter().any(|pose| pose.id == "solid"));
+            if delete {
+                call(Call::Transact {
+                    label: Some("Delete selected layer".into()),
+                    body: WriteBody::Commands(vec![LayerCommand::Delete {
+                        layer_ids: vec!["solid".into()],
+                    }.into()]),
+                    expected_revision: None,
+                });
+                assert!(kernel.published(fixture::PROJECT).unwrap().selection.layers().is_empty());
+            } else {
+                call(select(fixture::TEXT).into());
+            }
+            surface.update(cx, |g, cx| {
+                g.poses = Arc::new(poses);
+                g.reread_out = true;
+                g.refresh(cx);
+            });
+            cx.run_until_parked();
+            surface.read_with(cx, |g, _| {
+                assert!(g.reread_out);
+                assert!(g.poses.is_empty());
+                assert_eq!(viewer.lines.get(), 0);
+            });
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn non_text_pick_and_outline_skip_the_font_mirror() {
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let p = kernel.published(fixture::PROJECT).unwrap();
+        let time = 0.5;
+        let corners = super::outline(&p, "solid", time).unwrap();
+        let at = [
+            (corners[0][0] + corners[2][0]) / 2.,
+            (corners[0][1] + corners[2][1]) / 2.,
+        ];
+        let press = super::Press { at, time, shift: false, deep: true, inside: false };
+        let before = crate::text_host::query_count();
+        assert_eq!(super::pick_target(&p, press), Some(Some("solid".into())));
+        assert_eq!(super::outline(&p, "solid", time), Some(corners));
+        assert_eq!(super::outline(&p, "solid", 102.), None);
+        assert_eq!(crate::text_host::query_count(), before);
+    }
+
+    #[gpui::test]
+    fn profile_639_layer_gizmo_snap_and_rows(cx: &mut TestAppContext) {
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let gizmos = cx.new(|_| {
+            GizmoSurface::new(
+                kernel.clone(),
+                fixture::PROJECT.into(),
+                pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                Rc::new(Viewer::new(fixture::TIME)),
+            )
+        });
+        let initial = kernel.published(fixture::PROJECT).unwrap();
+        // Start with the live outline already owned by the pointer, as it
+        // is after on_move crosses the drag threshold.
+        gizmos.update(cx, |gizmos, _| {
+            gizmos.drag = Some(Drag {
+                hit: Hit::Body,
+                origin: Default::default(),
+                active: true,
+                poses: Arc::new(Vec::new()),
+                time: fixture::TIME,
+                click: None,
+                snaps: None,
+                copies: None,
+            });
+        });
+        let mut pane_cache = crate::studio_panes::PaneScenes::default();
+        let mut rows = crate::rows::LayerRows::default();
+        let key = crate::rows::key(&initial.snapshot);
+        assert!(rows.accept(key, crate::rows::list(&initial.snapshot), Some(key)));
+        let kept = rows.rows.clone();
+        let baseline = std::env::var_os("PM_PROFILE_DRAG_BASELINE").is_some();
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        fixture::drag(&kernel, |p| {
+            let start = Instant::now();
+            assert!(!pane_cache.wants_scene(1));
+            let panes = start.elapsed();
+
+            let start = Instant::now();
+            gizmos.update(cx, |gizmos, cx| gizmos.refresh(cx));
+            cx.run_until_parked();
+            gizmos.read_with(cx, |gizmos, _| {
+                assert!(gizmos.draws_live_outline());
+                assert_eq!(gizmos.latest, 0, "a live outline needs no pose job");
+            });
+            let gizmo = start.elapsed();
+
+            let start = Instant::now();
+            rows.follow_transform_values(&p);
+            let key = crate::rows::key(&p.snapshot);
+            assert!(matches!(
+                rows.plan(key, || crate::rows::layer_count(&p.snapshot)),
+                crate::rows::Plan::Current
+            ));
+            assert!(Arc::ptr_eq(&kept, &rows.rows));
+            let rows_elapsed = start.elapsed();
+            let start = Instant::now();
+            std::hint::black_box(snap::points(&p, &[fixture::TEXT.into()], fixture::TIME));
+            let snapping = start.elapsed();
+            after.push([panes, gizmo, rows_elapsed, snapping].map(|d| d.as_secs_f64() * 1000.));
+
+            if baseline {
+                let start = Instant::now();
+                let _ = pm_panel_studio3d::viewport::scene(&p, 0.);
+                let panes = start.elapsed();
+                let start = Instant::now();
+                let _ = pm_panel_studio3d::viewport::scene_with_bounds(&p, fixture::TIME, |id| {
+                    crate::text_host::query(&p, |q| q.bounds(None, id, fixture::TIME))
+                        .ok()
+                        .flatten()
+                });
+                let scene = start.elapsed();
+                let start = Instant::now();
+                std::hint::black_box(read_at(&p, fixture::TIME));
+                let poses = start.elapsed();
+                let start = Instant::now();
+                std::hint::black_box(crate::rows::list(&p.snapshot));
+                std::hint::black_box(crate::rows::keyframe_count(&p.snapshot));
+                let rows = start.elapsed();
+                before.push([panes, scene, poses, rows].map(|d| d.as_secs_f64() * 1000.));
+            }
+        });
+        if baseline {
+            fixture::report(
+                [
+                    "old Studio panes",
+                    "old gizmo scene",
+                    "old gizmo poses",
+                    "old rows",
+                ],
+                &before,
+            );
+        }
+        fixture::report(
+            [
+                "single Studio pane",
+                "gizmo refresh",
+                "rows reuse",
+                "snap (once per drag)",
+            ],
+            &after,
+        );
+        fixture::assert_budget(&after, 0..4);
+    }
+    #[gpui::test]
+    fn profile_639_layer_selection_refresh(cx: &mut TestAppContext) {
+        const SHAPE: &str = "group1-5";
+        const GROUP: &str = "group1";
+        let journal = tempfile::tempdir().unwrap();
+        let (_actor, kernel) = fixture::open(journal.path().to_owned());
+        let time = 11.9; // The fixture's second group and its shapes are still active.
+        let viewer = Rc::new(Viewer::new(time));
+        let gizmos = cx.new(|_| {
+            GizmoSurface::new(
+                kernel.clone(),
+                fixture::PROJECT.into(),
+                pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                viewer.clone(),
+            )
+        });
+        let call = |call: Call| {
+            let ack = kernel
+                .call(fixture::PROJECT, Request::new(Caller::native(), call))
+                .wait()
+                .unwrap()
+                .unwrap();
+            assert!(!matches!(ack.reply, Reply::Throw(_)), "{:?}", ack.reply);
+        };
+        let edit = |command: Command| {
+            call(Call::TransactWithSelection {
+                selection: SelectionCall::Batch(vec![]),
+                label: Some("Selection fixture".into()),
+                body: WriteBody::Commands(vec![command]),
+                expected_revision: None,
+            });
+        };
+        let select = |id: &str| {
+            let start = Instant::now();
+            call(
+                SelectionCall::Layers {
+                    ids: vec![id.into()],
+                    add: false,
+                }
+                .into(),
+            );
+            start.elapsed().as_secs_f64() * 1000.
+        };
+        // Make the headline active at the same frame as the second group.
+        edit(
+            LayerCommand::Set {
+                layer_id: fixture::TEXT.into(),
+                patch: LayerPatch {
+                    from: Some(11.),
+                    ..Default::default()
+                },
+            }
+            .into(),
+        );
+        let refresh = |cx: &mut TestAppContext, clear_cache: bool| {
+            viewer.drawn.set(None);
+            let start = Instant::now();
+            gizmos.update(cx, |g, cx| {
+                if clear_cache {
+                    g.studio_scene_cache = None;
+                }
+                g.refresh(cx);
+            });
+            cx.run_until_parked();
+            let finished = viewer.drawn.get().expect("selection overlay was submitted");
+            let scene = gizmos.read_with(cx, |g, _| {
+                assert!(g.refresh_complete());
+                g.studio
+                    .scene
+                    .clone()
+                    .expect("3D navigation remains available")
+            });
+            ((finished - start).as_secs_f64() * 1000., scene)
+        };
+
+        let (_, base) = refresh(cx, false);
+        assert!(
+            base.items
+                .iter()
+                .any(|item| item.id == SHAPE && item.is_plane)
+        );
+        let ids = ["solid", fixture::TEXT, SHAPE, GROUP];
+        let before = std::env::var_os("PM_PROFILE_SELECTION_BASELINE").is_some();
+        let mut uncached = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        let mut cached = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        let mut phases = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        for _ in 0..(fixture::STEPS / ids.len()) {
+            for (i, id) in ids.into_iter().enumerate() {
+                let publication = select(id);
+                let (elapsed, scene) = refresh(cx, false);
+                assert!(Arc::ptr_eq(&base, &scene), "selection rebuilt the scene");
+                if matches!(id, "solid" | SHAPE) {
+                    assert!(viewer.lines.get() > 0, "{id} did not get an outline");
+                    gizmos.read_with(cx, |g, _| assert_eq!(g.poses[0].id, id));
+                }
+                cached[i].push([elapsed]);
+                if before {
+                    let p = kernel.published(fixture::PROJECT).unwrap();
+                    let start = Instant::now();
+                    std::hint::black_box(pm_kernel::model::list_layers(
+                        p.snapshot.root().unwrap(),
+                        None,
+                    ));
+                    let listing = start.elapsed();
+                    let start = Instant::now();
+                    std::hint::black_box(read_at(&p, time));
+                    let poses = start.elapsed();
+                    let controls = gizmos.update(cx, |g, cx| {
+                        let start = Instant::now();
+                        g.text_reread(cx);
+                        let text = start.elapsed();
+                        let start = Instant::now();
+                        g.pen_reread(cx);
+                        let pen = start.elapsed();
+                        let start = Instant::now();
+                        g.effects_reread(cx);
+                        [text, pen, start.elapsed()]
+                    });
+                    let [listing, poses, text, pen, effects] =
+                        [listing, poses, controls[0], controls[1], controls[2]]
+                            .map(|elapsed| elapsed.as_secs_f64() * 1000.);
+                    phases[i].push([publication, listing, poses, text, pen, effects]);
+                }
+            }
+        }
+        if before {
+            for _ in 0..(fixture::STEPS / ids.len()) {
+                for (i, id) in ids.into_iter().enumerate() {
+                    select(id);
+                    let (elapsed, _) = refresh(cx, true);
+                    uncached[i].push([elapsed]);
+                }
+            }
+        }
+        for (i, id) in ids.into_iter().enumerate() {
+            if before {
+                fixture::report([&format!("{id} uncached refresh to outline")], &uncached[i]);
+                eprintln!("{id} selection stages:");
+                fixture::report(
+                    [
+                        "kernel selection call",
+                        "list_layers",
+                        "read_at",
+                        "text",
+                        "pen",
+                        "effects",
+                    ],
+                    &phases[i],
+                );
+            }
+            fixture::report([&format!("{id} cached refresh to outline")], &cached[i]);
+            let mean = cached[i].iter().map(|[ms]| ms).sum::<f64>() / cached[i].len() as f64;
+            assert!(mean < 5., "selecting {id} averaged {mean:.3} ms");
+        }
+
+        let original = base
+            .items
+            .iter()
+            .find(|item| item.id == SHAPE)
+            .unwrap()
+            .pivot;
+        edit(PropertyCommand::Set(SetProperty::new(SHAPE, "position.x", 1030., time)).into());
+        let (_, moved) = refresh(cx, false);
+        assert!(moved.revision > base.revision);
+        let moved_item = moved.items.iter().find(|item| item.id == SHAPE).unwrap();
+        assert_eq!(moved_item.position[0], 1030.);
+        assert!(moved_item.pivot[0] > original[0]);
+
+        viewer.time.set(fixture::TIME);
+        let (_, later) = refresh(cx, false);
+        assert_eq!(moved.revision, later.revision);
+        assert_eq!(later.time, fixture::TIME);
+        assert!(!later.items.iter().any(|item| item.id == SHAPE));
     }
 }

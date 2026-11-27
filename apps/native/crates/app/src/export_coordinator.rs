@@ -1443,7 +1443,7 @@ mod agent_tests {
         assert_eq!(one.message, "Replace “Film.srt”?");
         let default = one.buttons.iter().find(|b| b.default);
         assert_eq!(
-            default.map(|b| (b.label, b.action)),
+            default.map(|b| (b.label.as_ref(), b.action)),
             Some(("Cancel", false))
         );
         let replace = one.buttons.iter().find(|b| b.action);

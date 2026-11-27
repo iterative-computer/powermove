@@ -20,7 +20,7 @@ use crate::{
     native_control::{SEGMENT_MENU_INDICATOR, SegmentedControl},
     transient::{
         Choice, ComposerPicker, Picker, PickerRow, composer_picker_frame, composer_picker_interior,
-        model_picker_frame,
+        model_picker_frame, submenu_frame, threads_picker_frame,
     },
 };
 use foreign_types::ForeignType;
@@ -571,9 +571,11 @@ pub fn app_appearance(t: &Tokens) {
         .setAppearance(NSAppearance::appearanceNamed(name).as_deref());
 }
 /// The window ground: clear over a behind-window blur while translucent,
-/// the solid `window` colour under Reduce Transparency.
-fn ground(window: &NSWindow, backdrop: &NSView, t: &Tokens) {
-    let translucent = t.translucent();
+/// the solid `window` colour under Reduce Transparency or in macOS Full Screen
+/// (so AppKit's sliding fullscreen menu/toolbar overlay never composites
+/// transparently over the panel headers underneath).
+fn apply_ground(window: &NSWindow, backdrop: &NSView, t: &Tokens, fullscreen: bool) {
+    let translucent = t.translucent() && !fullscreen;
     backdrop.setHidden(!translucent);
     window.setOpaque(!translucent);
     let colour = if translucent {
@@ -582,6 +584,73 @@ fn ground(window: &NSWindow, backdrop: &NSView, t: &Tokens) {
         native_color(t.colors.window)
     };
     window.setBackgroundColor(Some(&colour));
+}
+/// In macOS Full Screen, AppKit moves `NSToolbarView` / `NSTitlebarContainerView`
+/// into a separate `NSToolbarFullScreenWindow` that slides down with the menu bar
+/// when hovering the top edge. With `FullSizeContentView` + `Unified` toolbar on
+/// macOS 26, that overlay window stays transparent even when
+/// `titlebarAppearsTransparent` is `false`, so panel headers bleed through it.
+/// Paint an opaque `window` background directly on the fullscreen overlay window
+/// and its titlebar container while fullscreen, and clear it when exiting.
+fn style_fullscreen_toolbar(window: &NSWindow, tabs: &NSView, t: &Tokens, fullscreen: bool) {
+    window.setTitlebarAppearsTransparent(!fullscreen);
+    let sep = if fullscreen {
+        objc2_app_kit::NSTitlebarSeparatorStyle::Line
+    } else {
+        objc2_app_kit::NSTitlebarSeparatorStyle::None
+    };
+    window.setTitlebarSeparatorStyle(sep);
+    let bg = native_color(t.colors.window);
+    let cg = bg.CGColor();
+    let paint_ancestors = |view: &NSView, solid: bool| {
+        let mut cur: Option<Retained<NSView>> = unsafe { view.superview() };
+        while let Some(v) = cur {
+            let cls = v.class().name().to_string_lossy();
+            if cls.contains("NSTitlebarContainerView") || cls.contains("NSTitlebarView") {
+                v.setWantsLayer(true);
+                if let Some(layer) = v.layer() {
+                    layer.setBackgroundColor(solid.then_some(&*cg));
+                }
+            }
+            cur = unsafe { v.superview() };
+        }
+    };
+    if fullscreen {
+        if let Some(tb_win) = tabs.window()
+            && !std::ptr::eq(Retained::as_ptr(&tb_win), window as *const NSWindow)
+        {
+            tb_win.setOpaque(true);
+            tb_win.setBackgroundColor(Some(&bg));
+            if let Some(content) = tb_win.contentView() {
+                content.setWantsLayer(true);
+                if let Some(layer) = content.layer() {
+                    layer.setBackgroundColor(Some(&cg));
+                }
+            }
+        }
+        if let Some(children) = window.childWindows() {
+            for child in children.to_vec() {
+                let cls = child.class().name().to_string_lossy();
+                if cls.contains("ToolbarFullScreen") {
+                    child.setOpaque(true);
+                    child.setBackgroundColor(Some(&bg));
+                    if let Some(content) = child.contentView() {
+                        content.setWantsLayer(true);
+                        if let Some(layer) = content.layer() {
+                            layer.setBackgroundColor(Some(&cg));
+                        }
+                    }
+                }
+            }
+        }
+        paint_ancestors(tabs, true);
+    } else {
+        paint_ancestors(tabs, false);
+    }
+}
+fn ground(window: &NSWindow, backdrop: &NSView, t: &Tokens) {
+    let fullscreen = window.styleMask().contains(NSWindowStyleMask::FullScreen);
+    apply_ground(window, backdrop, t, fullscreen);
 }
 /// Behind-window blur under everything in the content view; GPUI tints it
 /// with `Tokens::ground`.
@@ -815,9 +884,14 @@ define_class!(
     impl Target {
         #[unsafe(method(coedit:))]
         fn coedit(&self, sender: &NSButton) {
-            let name=match sender.tag() {1=>"agent.undoTurn",2=>"agent.pause",3=>"agent.stop",_=>"agent.steer"};
+            let name = match sender.tag() {
+                1 => "agent.undoTurn",
+                2 => "agent.pause",
+                3 => "agent.stop",
+                _ => "agent.steer",
+            };
             crate::telemetry::command(name, pm_telemetry::Via::Toolbar);
-            self.send(Command{name:name.into(),args:vec![],token:None});
+            self.send(Command { name: name.into(), args: vec![], token: None });
         }
         #[unsafe(method(act:))]
         fn act(&self, sender: &AnyObject) {
@@ -870,6 +944,16 @@ define_class!(
                 };
                 crate::telemetry::command(&name.to_string(), via);
                 self.send(Command { name: name.to_string(), args: vec![], token: None });
+            }
+        }
+        /// Layer 1: extension-contributed toolbar buttons carry their command in `identifier`.
+        #[unsafe(method(extToolbarAct:))]
+        fn ext_toolbar_act(&self, sender: &NSButton) {
+            if let Some(id) = sender.identifier() {
+                let name = id.to_string();
+                if !name.is_empty() {
+                    self.send(Command { name, args: vec![], token: None });
+                }
             }
         }
         #[unsafe(method(showPendingMenu:))]
@@ -1687,6 +1771,18 @@ pub const ADD: [(&str, &str); 6] = [
     ("newAdjustment", "New Adjustment Layer"),
     ("newNull", "New Null Object"),
 ];
+/// Additional rows shown in the toolbar's `+` menu when 3D mode is active
+/// (Blender-style lights + the Shift+A 3D Add menu).
+pub const ADD_3D: [(&str, &str); 7] = [
+    ("", ""),
+    ("new3d:point", "Point Light"),
+    ("new3d:sun", "Sun Light"),
+    ("new3d:spot", "Spot Light"),
+    ("new3d:area", "Area Light"),
+    ("", ""),
+    ("studio.addMenu", "Add 3D Object… (⇧A)"),
+];
+const ADD_3D_TAG: isize = 3001;
 /// One open project in the toolbar's tab strip.
 #[derive(Clone, Debug, PartialEq)]
 struct Tab {
@@ -1951,7 +2047,12 @@ define_class!(
     #[thread_kind = MainThreadOnly]
     #[name = "PMShellTabStrip"]
     struct TabStrip;
-    impl TabStrip {}
+    impl TabStrip {
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn mouse_down_can_move_window(&self) -> bool {
+            true
+        }
+    }
 );
 fn strip_document(strip: &NSView) -> Retained<NSView> {
     TabScroll::find(strip)
@@ -2104,15 +2205,19 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
     button.highlight(true);
     let mut target = index;
     let mut dragging = false;
+    let mut cancelled = false;
     const SCROLL_INTERVAL: std::time::Duration = std::time::Duration::from_nanos(16_666_667);
     let mut next_scroll = None;
     let mut at = start;
     let inside = loop {
         let step = scroll
             .as_ref()
-            .filter(|_| dragging && !torn)
+            .filter(|_| dragging && !torn && !cancelled)
             .map_or(0., |view| view.drag_step_at(at));
-        let mask = NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp;
+        let mut mask = NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp;
+        if dragging {
+            mask |= NSEventMask::RightMouseDown | NSEventMask::RightMouseUp;
+        }
         let event = if step == 0. {
             next_scroll = None;
             window.nextEventMatchingMask(mask)
@@ -2128,6 +2233,27 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
             )
         };
         if let Some(event) = event {
+            if event.r#type() == NSEventType::RightMouseDown && !cancelled {
+                cancelled = true;
+                settle(index, None);
+                carry(false);
+                tab.setAlphaValue(1.);
+                if let Some(layer) = tab.layer() {
+                    layer.setZPosition(0.);
+                }
+                if let Some(scroll) = &scroll {
+                    scroll.drag_scroll(start_offset - scroll.offset());
+                }
+            }
+            if cancelled {
+                if event.r#type() == NSEventType::LeftMouseUp {
+                    break false;
+                }
+                continue;
+            }
+            if event.r#type() == NSEventType::RightMouseUp {
+                continue;
+            }
             at = event.locationInWindow();
             if event.r#type() == NSEventType::LeftMouseUp {
                 let local = button.convertPoint_fromView(at, None);
@@ -2188,6 +2314,9 @@ fn track_tab(button: &TabButton, down: &NSEvent) {
         }
     };
     button.highlight(false);
+    if cancelled {
+        return;
+    }
     if !dragging {
         if inside {
             unsafe {
@@ -2817,6 +2946,7 @@ define_class!(
         fn allowed(&self, _: &NSToolbar) -> Retained<NSArray<NSString>> {
             let mut ids = toolbar_ids().to_vec();
             ids.push(NSString::from_str("agentPresence"));
+            ids.push(NSString::from_str("extToolbar"));
             NSArray::from_retained_slice(&ids)
         }
         #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
@@ -3059,6 +3189,17 @@ impl ToolbarDelegate {
             let view = CoeditPresence::new(mtm, target, t);
             item.setView(Some(&view));
             item.setLabel(&NSString::from_str("Agent presence"));
+            item.setAutovalidates(false);
+            return Some(item);
+        }
+        if name == "extToolbar" {
+            let stack = NSStackView::new(mtm);
+            stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+            stack.setSpacing(4.0);
+            stack.setAlignment(NSLayoutAttribute::CenterY);
+            item.setView(Some(&stack));
+            item.setLabel(&NSString::from_str("Extensions"));
+            item.setAutovalidates(false);
             return Some(item);
         }
         if name == "add" {
@@ -3075,6 +3216,20 @@ impl ToolbarDelegate {
                     continue;
                 }
                 let row = named_item(mtm, label, command);
+                unsafe { row.setTarget(Some(target)) };
+                menu.addItem(&row);
+            }
+            for (command, label) in ADD_3D {
+                if command.is_empty() {
+                    let sep = NSMenuItem::separatorItem(mtm);
+                    sep.setTag(ADD_3D_TAG);
+                    sep.setHidden(true);
+                    menu.addItem(&sep);
+                    continue;
+                }
+                let row = named_item(mtm, label, command);
+                row.setTag(ADD_3D_TAG);
+                row.setHidden(true);
                 unsafe { row.setTarget(Some(target)) };
                 menu.addItem(&row);
             }
@@ -3182,6 +3337,263 @@ impl Host {
             item.setHidden(!show);
         }
     }
+
+    /// Layer 1: updates the dynamic extension toolbar strip right beside Add.
+    pub fn set_extension_toolbar(&mut self, items: &[ExtensionToolbarItem]) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let toolbar = &self._toolbar;
+        let existing_idx = toolbar
+            .items()
+            .iter()
+            .position(|i| i.itemIdentifier().to_string() == "extToolbar");
+        if items.is_empty() {
+            if let Some(idx) = existing_idx {
+                toolbar.removeItemAtIndex(idx as isize);
+            }
+            return;
+        }
+        if existing_idx.is_none() {
+            let insert_at = toolbar
+                .items()
+                .iter()
+                .position(|i| i.itemIdentifier().to_string() == "add")
+                .map(|i| i + 1)
+                .unwrap_or(toolbar.items().len());
+            toolbar.insertItemWithItemIdentifier_atIndex(
+                &NSString::from_str("extToolbar"),
+                insert_at as isize,
+            );
+        }
+        let Some(tb_item) = toolbar
+            .items()
+            .iter()
+            .find(|i| i.itemIdentifier().to_string() == "extToolbar")
+        else {
+            return;
+        };
+        let Some(stack) = tb_item.view().and_then(|v| v.downcast::<NSStackView>().ok()) else {
+            return;
+        };
+        for view in stack.arrangedSubviews().to_vec() {
+            stack.removeArrangedSubview(&view);
+            view.removeFromSuperview();
+        }
+        let target = &self._target;
+        let t = &self.tokens;
+        for entry in items {
+            let title = match &entry.badge {
+                Some(badge) if !badge.is_empty() => format!("{} ({badge})", entry.label),
+                _ => entry.label.clone(),
+            };
+            let btn = if let Some(icon) = &entry.icon
+                && let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                    &NSString::from_str(icon),
+                    Some(&NSString::from_str(&entry.label)),
+                ) {
+                let b = unsafe {
+                    NSButton::buttonWithTitle_image_target_action(
+                        &NSString::from_str(&title),
+                        &img,
+                        Some(target),
+                        Some(sel!(extToolbarAct:)),
+                        mtm,
+                    )
+                };
+                if entry.label.is_empty() {
+                    b.setImagePosition(NSCellImagePosition::ImageOnly);
+                } else {
+                    b.setImagePosition(NSCellImagePosition::ImageLeading);
+                }
+                b
+            } else {
+                unsafe {
+                    NSButton::buttonWithTitle_target_action(
+                        &NSString::from_str(&title),
+                        Some(target),
+                        Some(sel!(extToolbarAct:)),
+                        mtm,
+                    )
+                }
+            };
+            btn.setBezelStyle(NSBezelStyle::Toolbar);
+            btn.setControlSize(NSControlSize::Regular);
+            btn.setIdentifier(Some(&NSString::from_str(&entry.command)));
+            btn.setToolTip(Some(&NSString::from_str(&entry.tooltip)));
+            if entry.active {
+                btn.setContentTintColor(Some(&native_color(t.colors.accent)));
+            }
+            btn.sizeToFit();
+            stack.addArrangedSubview(&btn);
+        }
+        stack.setNeedsLayout(true);
+    }
+}
+
+/// Layer 1: a window toolbar item contributed by a v4 extension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionToolbarItem {
+    pub id: String,
+    pub label: String,
+    pub icon: Option<String>,
+    pub tooltip: String,
+    pub active: bool,
+    pub badge: Option<String>,
+    pub command: String,
+}
+
+/// Layer 1: a macOS menu bar item contributed by a v4 extension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionMenuItem {
+    pub separator: bool,
+    pub label: String,
+    pub key: Option<String>,
+    pub checked: bool,
+    pub disabled: bool,
+    pub command: Option<String>,
+    pub submenu: Vec<ExtensionMenuItem>,
+}
+
+/// Layer 1: a group of menu items targeting a top-level macOS menu name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionMenuSection {
+    pub menu_name: String,
+    pub items: Vec<ExtensionMenuItem>,
+}
+
+/// Tag used to identify extension-contributed menu bar items & custom top-level menus.
+const EXT_MENU_TAG: isize = 0x504D_4558;
+
+/// Layer 1: synchronizes v4 extension menu bar contributions into `NSApplication.mainMenu()`.
+/// Cleanly removes previous extension items on every update/unload without disturbing built-in menus.
+pub fn set_extension_menus(sections: &[ExtensionMenuSection]) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(root) = app.mainMenu() else {
+        return;
+    };
+    // 1. Remove all previously added extension top-level menus and submenu rows.
+    let top_items: Vec<_> = root.itemArray().to_vec();
+    for top in top_items {
+        if top.tag() == EXT_MENU_TAG {
+            root.removeItem(&top);
+            continue;
+        }
+        if let Some(sub) = top.submenu() {
+            let children: Vec<_> = sub.itemArray().to_vec();
+            for child in children {
+                if child.tag() == EXT_MENU_TAG {
+                    sub.removeItem(&child);
+                }
+            }
+        }
+    }
+    if sections.is_empty() {
+        return;
+    }
+    let target = MENU_TARGET.with(|t| t.borrow().clone());
+    let Some(target) = target else {
+        return;
+    };
+    fn build_item(
+        mtm: MainThreadMarker,
+        target: &Target,
+        spec: &ExtensionMenuItem,
+    ) -> Retained<NSMenuItem> {
+        if spec.separator {
+            let sep = NSMenuItem::separatorItem(mtm);
+            sep.setTag(EXT_MENU_TAG);
+            return sep;
+        }
+        let (key, flags) = spec
+            .key
+            .as_deref()
+            .map(menu::accelerator)
+            .unwrap_or_default();
+        let action = spec.command.as_ref().map(|_| sel!(actNamed:));
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(&spec.label),
+                action,
+                &NSString::from_str(&key),
+            )
+        };
+        item.setKeyEquivalentModifierMask(NSEventModifierFlags(flags as _));
+        item.setTag(EXT_MENU_TAG);
+        item.setState(if spec.checked {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
+        item.setEnabled(!spec.disabled);
+        if let Some(cmd) = &spec.command {
+            unsafe {
+                item.setRepresentedObject(Some(&NSString::from_str(cmd)));
+                item.setTarget(Some(target));
+            }
+        }
+        if !spec.submenu.is_empty() {
+            let sub = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(&spec.label));
+            sub.setAutoenablesItems(false);
+            for child in &spec.submenu {
+                sub.addItem(&build_item(mtm, target, child));
+            }
+            item.setSubmenu(Some(&sub));
+            unsafe {
+                item.setTarget(Some(&sub));
+                item.setAction(Some(sel!(submenuAction:)));
+            }
+        }
+        item
+    }
+
+    for section in sections {
+        if section.items.is_empty() {
+            continue;
+        }
+        let existing_sub = root
+            .itemArray()
+            .iter()
+            .find(|top| top.title().to_string().eq_ignore_ascii_case(&section.menu_name))
+            .and_then(|top| top.submenu());
+        let submenu = if let Some(sub) = existing_sub {
+            let sep = NSMenuItem::separatorItem(mtm);
+            sep.setTag(EXT_MENU_TAG);
+            sub.addItem(&sep);
+            sub
+        } else {
+            let sub = NSMenu::initWithTitle(
+                NSMenu::alloc(mtm),
+                &NSString::from_str(&section.menu_name),
+            );
+            sub.setAutoenablesItems(false);
+            let top = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(&section.menu_name),
+                    None,
+                    &NSString::from_str(""),
+                )
+            };
+            top.setTag(EXT_MENU_TAG);
+            top.setSubmenu(Some(&sub));
+            // Insert custom top-level menus right before Window/Help.
+            let insert_at = root
+                .itemArray()
+                .iter()
+                .position(|i| matches!(i.title().to_string().as_str(), "Window" | "Help"))
+                .unwrap_or(root.numberOfItems() as usize);
+            root.insertItem_atIndex(&top, insert_at as isize);
+            sub
+        };
+        for item in &section.items {
+            submenu.addItem(&build_item(mtm, &target, item));
+        }
+    }
 }
 /// Status for the co-editing chip, project tab and Agent tooltip.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -3197,8 +3609,13 @@ pub struct AgentStatus {
     pub additional_runs: usize,
     pub paused: bool,
     pub held: bool,
+    pub undo_document: Option<u64>,
+    pub undo_available: bool,
+    pub undo_feedback: Option<&'static str>,
 }
 impl AgentStatus {
+    pub const UNDOING: &'static str = "Undoing…";
+    pub const UNDONE: &'static str = "Undone";
     pub fn tooltip(&self) -> String {
         if self.attention {
             "Agent needs your answer".into()
@@ -3420,7 +3837,9 @@ impl Host {
             .items()
             .iter()
             .position(|i| i.itemIdentifier().to_string() == "agentPresence");
-        if status.working && existing.is_none() {
+        let feedback = status.undo_feedback;
+        let feedback_changed = feedback != self.agent_status.undo_feedback;
+        if (status.working || feedback.is_some()) && existing.is_none() {
             let index = self
                 ._toolbar
                 .items()
@@ -3430,16 +3849,20 @@ impl Host {
             self._toolbar
                 .insertItemWithItemIdentifier_atIndex(&NSString::from_str("agentPresence"), index as isize);
         }
-        if status.working && !was_working {
+        let document_changed = status.undo_document != self.agent_status.undo_document;
+        if status.working != was_working || feedback_changed || document_changed {
             self.agent_presence_generation
                 .set(self.agent_presence_generation.get() + 1);
         }
-        if (status.working || existing.is_some())
+        if (status.working || feedback.is_some() || existing.is_some())
             && let Some(launcher) = agent_launcher_button(&self._toolbar)
         {
             launcher.set_presence_visible(true);
         }
-        if !status.working && was_working {
+        if !status.working && feedback != Some(AgentStatus::UNDOING)
+            && (was_working || feedback_changed || document_changed && existing.is_some())
+        {
+            let delay = if feedback.is_some() && !status.undo_available { 2.5 } else { 6. };
             let toolbar = self._toolbar.clone();
             let generation = self.agent_presence_generation.clone();
             let version = generation.get();
@@ -3460,7 +3883,7 @@ impl Host {
                     }
                 });
             let timer = unsafe {
-                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(6., false, &step)
+                objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(delay, false, &step)
             };
             unsafe {
                 objc2_foundation::NSRunLoop::mainRunLoop()
@@ -3470,7 +3893,52 @@ impl Host {
     }
 
     /// Updates the co-editing chip, project tab and Agent tooltip.
-    pub fn set_agent_status(&mut self, status: AgentStatus) {
+    pub fn set_agent_status(&mut self, mut status: AgentStatus) {
+        if !status.working
+            && status.undo_document == self.agent_status.undo_document
+            && self.agent_status.undo_feedback.is_some()
+        {
+            status.undo_feedback = self.agent_status.undo_feedback;
+            status.undo_available = self.agent_status.undo_available;
+        }
+        self.apply_agent_status(status);
+    }
+
+    pub fn begin_agent_undo(&mut self, document: Option<u64>) -> Option<u64> {
+        if self.agent_status.working || self.agent_status.undo_feedback == Some(AgentStatus::UNDOING) {
+            return None;
+        }
+        let mut status = self.agent_status.clone();
+        status.undo_document = document;
+        status.undo_feedback = Some(AgentStatus::UNDOING);
+        self.apply_agent_status(status);
+        Some(self.agent_presence_generation.get())
+    }
+
+    pub fn agent_undo_pending(&self, document: Option<u64>, version: u64) -> bool {
+        self.agent_presence_generation.get() == version
+            && self.agent_status.undo_document == document
+            && self.agent_status.undo_feedback == Some(AgentStatus::UNDOING)
+    }
+
+    pub fn finish_agent_undo(
+        &mut self,
+        document: Option<u64>,
+        version: u64,
+        title: &'static str,
+        retry: bool,
+    ) -> bool {
+        if !self.agent_undo_pending(document, version) {
+            return false;
+        }
+        let mut status = self.agent_status.clone();
+        status.undo_feedback = Some(title);
+        status.undo_available = retry;
+        self.apply_agent_status(status);
+        true
+    }
+
+    fn apply_agent_status(&mut self, status: AgentStatus) {
         if status == self.agent_status {
             return;
         }
@@ -3513,7 +3981,8 @@ impl Host {
             || status.working != self.agent_status.working
             || status.attention != self.agent_status.attention
             || status.paused != self.agent_status.paused
-            || status.held != self.agent_status.held;
+            || status.held != self.agent_status.held
+            || status.undo_feedback != self.agent_status.undo_feedback;
         let turning = presence.is_some()
             && status.working
             && !status.attention
@@ -3867,6 +4336,8 @@ pub struct Host {
     staged_native_panels: RefCell<Option<NativePanelGeometry>>,
     /// Keeps web panels in sync with resolved appearance and accessibility.
     pub native_style: Option<Rc<dyn Fn(&Tokens)>>,
+    /// Reports whether `native_present` has pending geometry/visibility work.
+    pub native_pending: Option<Rc<dyn Fn() -> bool>>,
     /// Runs inside the composition transaction, with the window size.
     pub native_present: Option<Rc<dyn Fn(f64, f64) -> bool>>,
     /// Native views to expose in reading order after GPUI's.
@@ -4088,6 +4559,7 @@ impl Host {
             native_panel_fades: Rc::default(),
             staged_native_panels: RefCell::default(),
             native_style: None,
+            native_pending: None,
             native_present: None,
             native_accessibility: vec![],
             restored_project: None,
@@ -4346,6 +4818,7 @@ impl Host {
                             && e.r#type() == NSEventType::KeyDown
                         {
                             match chord(e).as_str() {
+                                "escape" if p.model.grouped => p.key("escape", e.isARepeat()),
                                 "escape" => p.hide(),
                                 // Keep Return in the palette even if AppKit
                                 // sends it to the editor window.
@@ -4376,8 +4849,9 @@ impl Host {
                                         | "shift+tab"
                                 ) || (key == "space" && (p.row_focus || !p.searchable))
                                     || (matches!(key.as_str(), "left" | "right")
-                                        && p.model.has_provider_headers()
-                                        && (p.row_focus || !p.searchable))
+                                        && (p.owns_submenu_arrow(&key)
+                                            || (p.model.has_provider_headers()
+                                                && (p.row_focus || !p.searchable))))
                                 {
                                     p.key(&key, e.isARepeat());
                                     return std::ptr::null_mut();
@@ -4399,6 +4873,20 @@ impl Host {
                         return event.as_ptr();
                     }
                     if host.borrow().studio_flying.get() {
+                        // Fly mode is modal for the editor window: if an AppKit
+                        // control (slider, button, text field) still holds first
+                        // responder, restore keyboard delivery to GPUI so WASD
+                        // and navigation keys always reach the viewer.
+                        let gpui = host.borrow().gpui.clone();
+                        let responder = window.firstResponder();
+                        if responder.as_deref().is_none_or(|r| {
+                            !std::ptr::eq(
+                                r as *const _ as *const NSResponder,
+                                &*gpui as *const _ as *const NSResponder,
+                            )
+                        }) {
+                            window.makeFirstResponder(Some(&gpui));
+                        }
                         return event.as_ptr();
                     }
                     let mut responder = window.firstResponder();
@@ -4697,24 +5185,34 @@ impl Host {
             host.borrow_mut().window_observers.push(observer);
         }
         // Full-screen chrome can move without a content-view resize.
-        let sender = host.borrow().sender.clone();
-        let fullscreen_changed = block2::RcBlock::new(
-            move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
-                let _ = sender.try_send(Command {
-                    name: "shellFullscreenChanged".into(),
-                    args: vec![],
-                    token: None,
-                });
-            },
-        );
-        for name in unsafe {
+        // Switch the window ground to opaque + non-transparent titlebar in
+        // fullscreen so macOS's sliding menu-bar/toolbar overlay covers the
+        // panel headers cleanly instead of bleeding through transparently.
+        for (name, fullscreen) in unsafe {
             [
-                NSWindowWillEnterFullScreenNotification,
-                NSWindowDidEnterFullScreenNotification,
-                NSWindowWillExitFullScreenNotification,
-                NSWindowDidExitFullScreenNotification,
+                (NSWindowWillEnterFullScreenNotification, true),
+                (NSWindowDidEnterFullScreenNotification, true),
+                (NSWindowWillExitFullScreenNotification, false),
+                (NSWindowDidExitFullScreenNotification, false),
             ]
         } {
+            let sender = host.borrow().sender.clone();
+            let weak_host = Rc::downgrade(&host);
+            let fullscreen_changed = block2::RcBlock::new(
+                move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+                    if let Some(host) = weak_host.upgrade()
+                        && let Ok(h) = host.try_borrow()
+                    {
+                        apply_ground(&h.window, &h.backdrop, &h.tokens, fullscreen);
+                        style_fullscreen_toolbar(&h.window, &h.tabs, &h.tokens, fullscreen);
+                    }
+                    let _ = sender.try_send(Command {
+                        name: "shellFullscreenChanged".into(),
+                        args: vec![],
+                        token: None,
+                    });
+                },
+            );
             let observer = unsafe {
                 objc2_foundation::NSNotificationCenter::defaultCenter()
                     .addObserverForName_object_queue_usingBlock(
@@ -5007,7 +5505,7 @@ impl Host {
             self.sync_project_bar()
         }
     }
-    /// Tabs mode (the default): the toolbar's tabs are the windows of this
+    /// In Tabs mode, the toolbar's tabs are the windows of this
     /// window's tab group (a lone window is one tab), then New Project.
     /// AppKit's own tab bar stays hidden; the group remains the model, so a
     /// tab is selected, closed and moved to its own window exactly as before.
@@ -5734,6 +6232,9 @@ impl Host {
         }
         self.tabs_width.setConstant(x);
         *self.tabs_shown.borrow_mut() = (marked, room, marks);
+        if self.is_fullscreen() {
+            style_fullscreen_toolbar(&self.window, &self.tabs, &self.tokens, true);
+        }
     }
     /// Home or a page shows over the project.
     fn aside(&self) -> bool {
@@ -6261,22 +6762,28 @@ impl Host {
         }
         self.viewer_transform = Some((dimensions, zoom, pan));
     }
-    /// Keep the current drawable while pointer navigation scales its cached pixels.
+    /// Keep the current drawable while pointer navigation scales/pans its cached pixels.
     pub fn defer_viewer_raster(&mut self, active: bool) {
         if active {
-            if self.viewer_raster.is_none()
-                && let (Some(Some(g)), Some((dimensions, Some(zoom), pan))) =
+            if self.viewer_raster.is_none() {
+                if let Some((_, cached, old_zoom, old_pan)) = &self.viewer_cover {
+                    self.viewer_raster = Some((*cached, *old_zoom, *old_pan));
+                } else if let (Some(Some(g)), Some((dimensions, Some(zoom), pan))) =
                     (self.last_geometry, self.viewer_transform)
-            {
-                let mut cached = g;
-                if let Some(crop) = g.crop {
-                    let size = self.layer.drawable_size();
-                    let slot = [g.frame.size.width, g.frame.size.height];
-                    let x = (slot[0] - dimensions[0] * zoom) / 2. + pan[0] + crop[0] as f64 / g.scale;
-                    let top = (slot[1] - dimensions[1] * zoom) / 2. + pan[1] + crop[1] as f64 / g.scale;
-                    cached.layer = NSRect::new(NSPoint::new(x, slot[1] - top - size.height / g.scale), NSSize::new(size.width / g.scale, size.height / g.scale));
+                {
+                    let mut cached = g;
+                    if let Some(crop) = g.crop {
+                        let size = self.layer.drawable_size();
+                        let slot = [g.frame.size.width, g.frame.size.height];
+                        let x = (slot[0] - dimensions[0] * zoom) / 2. + pan[0] + crop[0] as f64 / g.scale;
+                        let top = (slot[1] - dimensions[1] * zoom) / 2. + pan[1] + crop[1] as f64 / g.scale;
+                        cached.layer = NSRect::new(
+                            NSPoint::new(x, slot[1] - top - size.height / g.scale),
+                            NSSize::new(size.width / g.scale, size.height / g.scale),
+                        );
+                    }
+                    self.viewer_raster = Some((cached, zoom, pan));
                 }
-                self.viewer_raster = Some((cached, zoom, pan));
             }
         } else if self.viewer_raster.take().is_some() {
             self.last_geometry = None;
@@ -6284,13 +6791,35 @@ impl Host {
     }
     /// Apply cached placement in the input transaction, alongside the overlay.
     pub fn place_cached_viewer(&mut self) {
-        if self.viewer_raster.is_none() { return; }
-        if let Some(g) = self.viewer_geometry() {
-            unsafe { let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject, setFrame:g.layer]; }
+        let Some((_, Some(zoom), pan)) = self.viewer_transform else {
+            return;
+        };
+        let Some(r) = self.viewer_rect.get() else {
+            return;
+        };
+        let slot = [r.w as f64, r.h as f64];
+        if let Some((cover, cached, old_zoom, old_pan)) = &self.viewer_cover {
+            let frame = cached_zoom_frame(cached.layer, slot, zoom / old_zoom, *old_pan, pan);
+            let target = self.viewer_geometry();
+            unsafe {
+                CATransaction::begin();
+                CATransaction::setDisableActions(true);
+                let _: () = msg_send![cover.as_ptr() as *mut AnyObject, setFrame:frame];
+                if let Some(g) = target {
+                    let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject, setFrame:g.layer];
+                }
+                CATransaction::commit();
+            }
+            return;
         }
-        if let (Some((cover, cached, old_zoom, old_pan)), Some((_, Some(zoom), pan)), Some(r)) = (&self.viewer_cover, self.viewer_transform, self.viewer_rect.get()) {
-            let frame = cached_zoom_frame(cached.layer, [r.w as f64, r.h as f64], zoom / old_zoom, *old_pan, pan);
-            unsafe { let _: () = msg_send![cover.as_ptr() as *mut AnyObject, setFrame:frame]; }
+        if let Some((cached, old_zoom, old_pan)) = self.viewer_raster {
+            let frame = cached_zoom_frame(cached.layer, slot, zoom / old_zoom, old_pan, pan);
+            unsafe {
+                CATransaction::begin();
+                CATransaction::setDisableActions(true);
+                let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject, setFrame:frame];
+                CATransaction::commit();
+            }
         }
     }
     /// Render the settled size below the cached composite. Reveal only a complete frame.
@@ -6298,30 +6827,51 @@ impl Host {
         let Some((g, zoom, pan)) = self.viewer_raster.take() else {
             return false;
         };
-        if self.viewer_cover.is_some() {
-            self.last_geometry = None;
-            return false;
-        }
         // Configure the target before the worker can acquire its first drawable.
         // A default-size first frame must never qualify for the atomic reveal.
-        if let Some(target) = self.viewer_geometry() {
-            unsafe { let _: () = msg_send![layer.as_ptr() as *mut AnyObject, setFrame:target.layer]; }
-            layer.set_contents_scale(target.scale);
-            layer.set_drawable_size(core_graphics::geometry::CGSize::new(
-                target.layer.size.width * target.scale,
-                target.layer.size.height * target.scale,
-            ));
-            self.viewer_crop.set(target.crop);
-        }
+        let target = self.viewer_geometry();
         unsafe {
-            let _: () = msg_send![layer.as_ptr() as *mut AnyObject, setHidden:true];
-            let old = self.layer.as_ptr() as *mut AnyObject;
-            if let Some(root) = self.viewer.layer() {
-                let _: () =
-                    msg_send![&*root, insertSublayer:layer.as_ptr() as *mut AnyObject, below:old];
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            if let Some(target) = target {
+                let _: () = msg_send![layer.as_ptr() as *mut AnyObject, setFrame:target.layer];
+                layer.set_contents_scale(target.scale);
+                layer.set_drawable_size(core_graphics::geometry::CGSize::new(
+                    target.layer.size.width * target.scale,
+                    target.layer.size.height * target.scale,
+                ));
+                self.viewer_crop.set(target.crop);
             }
+            let _: () = msg_send![layer.as_ptr() as *mut AnyObject, setHidden:true];
+            if let Some((cover, _, _, _)) = &self.viewer_cover {
+                // Re-settled while a previous cover is still visible: keep the
+                // cover on top, replace the hidden staging layer below it, and
+                // retarget the viewer to the newest zoom/pan.
+                let old_staging = self.layer.as_ptr() as *mut AnyObject;
+                let _: () = msg_send![old_staging, removeFromSuperlayer];
+                let _: () = msg_send![old_staging, setDevice:std::ptr::null::<AnyObject>()];
+                if let Some(root) = self.viewer.layer() {
+                    let _: () = msg_send![
+                        &*root,
+                        insertSublayer:layer.as_ptr() as *mut AnyObject,
+                        below:cover.as_ptr() as *mut AnyObject
+                    ];
+                }
+            } else {
+                let old = self.layer.as_ptr() as *mut AnyObject;
+                if let Some(root) = self.viewer.layer() {
+                    let _: () = msg_send![
+                        &*root,
+                        insertSublayer:layer.as_ptr() as *mut AnyObject,
+                        below:old
+                    ];
+                }
+            }
+            CATransaction::commit();
         }
-        self.viewer_cover = Some((self.layer.clone(), g, zoom, pan));
+        if self.viewer_cover.is_none() {
+            self.viewer_cover = Some((self.layer.clone(), g, zoom, pan));
+        }
         self.layer = layer;
         self.last_geometry = None;
         true
@@ -6436,7 +6986,7 @@ impl Host {
         toolbar_top_inset(
             (self.gpui.bounds().size.height - self.window.contentLayoutRect().size.height) as f32,
             self.is_fullscreen(),
-            self.window.toolbar().is_some_and(|tb| tb.isVisible()),
+            self.window.toolbar().is_some(),
             &self.tokens.metrics,
         )
     }
@@ -6485,6 +7035,7 @@ impl Host {
     fn pending(&self) -> bool {
         self.last_geometry != Some(self.viewer_geometry())
             || self.staged_native_panels.borrow().is_some()
+            || self.native_pending.as_ref().is_some_and(|pending| pending())
     }
     fn present(&mut self) -> gpui_macos::composition::SlotChange {
         if let (Some((cover, cached, old_zoom, old_pan)), Some((_, Some(zoom), pan)), Some(r)) = (
@@ -6518,9 +7069,26 @@ impl Host {
                 // layer and AppKit sizes it; framing it here would move it to
                 // the content view's origin (the stray lower-left rectangle).
                 if self.viewer_transform.is_some() {
+                    let layer_frame = if self.viewer_cover.is_none()
+                        && let (Some((cached, old_zoom, old_pan)), Some((_, Some(zoom), pan)), Some(r)) = (
+                            self.viewer_raster,
+                            self.viewer_transform,
+                            self.viewer_rect.get(),
+                        )
+                    {
+                        cached_zoom_frame(
+                            cached.layer,
+                            [r.w as f64, r.h as f64],
+                            zoom / old_zoom,
+                            old_pan,
+                            pan,
+                        )
+                    } else {
+                        g.layer
+                    };
                     unsafe {
                         let _: () =
-                            msg_send![self.layer.as_ptr() as *mut AnyObject,setFrame:g.layer];
+                            msg_send![self.layer.as_ptr() as *mut AnyObject,setFrame:layer_frame];
                     }
                 }
                 self.layer.set_contents_scale(g.scale);
@@ -6703,7 +7271,15 @@ impl Host {
             if item.itemIdentifier().to_string() == "add"
                 && let Ok(add) = item.clone().downcast::<objc2_app_kit::NSMenuToolbarItem>()
             {
+                let three_d = !disabled.contains("studio.view");
                 for row in add.menu().itemArray().to_vec() {
+                    if row.tag() == ADD_3D_TAG {
+                        row.setHidden(!three_d);
+                        if !row.isSeparatorItem() {
+                            row.setEnabled(three_d);
+                        }
+                        continue;
+                    }
                     let command: Option<Retained<NSString>> =
                         unsafe { row.representedObject().map(|o| Retained::cast_unchecked(o)) };
                     if let Some(command) = command {
@@ -7002,6 +7578,7 @@ impl Host {
         if field && !self.fields.borrow().model.open {
             let mut p = self.fields.borrow_mut();
             p.model.choices = field_choices();
+            p.model.grouped = false;
             (p.anchor, p.model.page, p.dismiss) = (None, None, None);
             p.trigger = None;
             p.other_triggers.clear();
@@ -7030,6 +7607,48 @@ impl Host {
         placeholder: &str,
         composer: Option<(ComposerPicker, bool)>,
     ) {
+        self.open_field_menu(
+            owner,
+            choices,
+            anchor,
+            other_triggers,
+            page,
+            dismiss,
+            placeholder,
+            composer,
+            false,
+        );
+    }
+    pub fn open_add_menu(&mut self, choices: Vec<Choice>, anchor: Option<crate::layout::Rect>) {
+        let anchor = anchor.map(|mut anchor| {
+            anchor.x += (anchor.w - ADD_MENU_WIDTH) / 2.;
+            anchor.w = ADD_MENU_WIDTH;
+            anchor
+        });
+        self.open_field_menu(
+            None,
+            choices,
+            anchor,
+            Vec::new(),
+            None,
+            None,
+            "Search…",
+            None,
+            true,
+        );
+    }
+    fn open_field_menu(
+        &mut self,
+        owner: Option<Retained<NSWindow>>,
+        choices: Vec<Choice>,
+        anchor: Option<crate::layout::Rect>,
+        other_triggers: Vec<crate::layout::Rect>,
+        page: Option<usize>,
+        dismiss: Option<String>,
+        placeholder: &str,
+        composer: Option<(ComposerPicker, bool)>,
+        grouped: bool,
+    ) {
         if self.palette.borrow().model.open {
             self.palette.borrow_mut().hide();
         }
@@ -7057,6 +7676,7 @@ impl Host {
         p.other_triggers = other_triggers.into_iter().map(|r| rect(r, h)).collect();
         p.parent = owner;
         p.model.choices = choices;
+        p.model.grouped = grouped;
         (p.anchor, p.model.page, p.dismiss) = (anchor, page, dismiss);
         p.configure_field(composer);
         p.search
@@ -7295,14 +7915,29 @@ define_class!(
     #[unsafe(super(NSPanel))]
     #[thread_kind = MainThreadOnly]
     #[name = "PMShellPopupWindow"]
+    #[ivars = PopupWindowState]
     struct PopupWindow;
     impl PopupWindow {
         #[unsafe(method(canBecomeKeyWindow))]
-        fn can_key(&self) -> bool { true }
+        fn can_key(&self) -> bool { self.ivars().accepts_keys.get() }
         #[unsafe(method(canBecomeMainWindow))]
         fn can_main(&self) -> bool { false }
+        #[unsafe(method(resignKeyWindow))]
+        fn resign_key(&self) {
+            unsafe { let _: () = msg_send![super(self), resignKeyWindow]; }
+            if let Some(popup) = self.ivars().popup.borrow().upgrade()
+                && let Ok(mut popup) = popup.try_borrow_mut()
+                && popup.model.grouped && popup.model.open
+            {
+                popup.dismiss(false);
+            }
+        }
     }
 );
+struct PopupWindowState {
+    accepts_keys: Cell<bool>,
+    popup: RefCell<std::rc::Weak<RefCell<Popup>>>,
+}
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -7349,8 +7984,25 @@ define_class!(
         fn pick(&self, sender: &NSControl) {
             if let Some(p) = self.ivars().upgrade() {
                 let mut p = p.borrow_mut();
-                let Some(row) = p.rows.get(sender.tag() as usize).map(|row| row.kind) else { return };
+                let place = sender.tag() as usize;
+                if let Some(parent) = p.flyout_parent.as_ref().and_then(std::rc::Weak::upgrade) {
+                    drop(p);
+                    let mut parent = parent.borrow_mut();
+                    if let Some(&index) = parent.model.submenu_choices().get(place) {
+                        parent.pick_choice(index, true);
+                    }
+                    return;
+                }
+                let Some(row) = p.rows.get(place).map(|row| row.kind) else { return };
                 let index = match row {
+                    PickerRow::Category(_) => {
+                        p.model.enter_category(place);
+                        p.row_focus = false;
+                        p.focus_search();
+                        p.light(false);
+                        p.sync_flyout();
+                        return;
+                    }
                     PickerRow::Provider(index) => {
                         if let Some((provider, expanded)) = p.model.toggle_provider(index, None) {
                             p.row_focus = true;
@@ -7361,6 +8013,24 @@ define_class!(
                     PickerRow::Choice(index) => index,
                 };
                 p.pick_choice(index, false);
+            }
+        }
+        #[unsafe(method(pickAction:))]
+        fn pick_action(&self, sender: &NSControl) {
+            if let Some(p) = self.ivars().upgrade() {
+                let mut p = p.borrow_mut();
+                let place = sender.tag() as usize;
+                let cmd = p.rows.get(place).and_then(|row| match row.kind {
+                    PickerRow::Choice(index) => {
+                        p.model.choices.get(index)?.delete_command.clone()
+                    }
+                    _ => None,
+                });
+                if let Some(cmd) = cmd {
+                    p.dispatch_choice(&cmd);
+                    p.picked = true;
+                    p.hide();
+                }
             }
         }
     }
@@ -7423,7 +8093,22 @@ impl PopupList {
         if let Some(popup) = self.ivars().borrow().upgrade()
             && let Ok(mut popup) = popup.try_borrow_mut()
         {
-            popup.point(event.map(|e| self.convertPoint_fromView(e.locationInWindow(), None)));
+            let at = event.map(|e| self.convertPoint_fromView(e.locationInWindow(), None));
+            if let Some(parent) = popup
+                .flyout_parent
+                .as_ref()
+                .and_then(std::rc::Weak::upgrade)
+            {
+                let row = popup.row_at(at);
+                drop(popup);
+                if let Ok(mut parent) = parent.try_borrow_mut()
+                    && parent.model.point_submenu(row)
+                {
+                    parent.sync_flyout();
+                }
+            } else {
+                popup.point(at);
+            }
         }
     }
 }
@@ -7798,6 +8483,7 @@ struct PopupRow {
     kind: PickerRow,
     rect: NSRect,
     button: Retained<NSButton>,
+    delete_button: Option<Retained<NSButton>>,
 }
 /// The shape a palette or menu is built on. Rows stand `inset` inside the
 /// surface, so a row's corner is the surface's less that inset.
@@ -7845,12 +8531,10 @@ fn rounded_popup_layer(view: &NSView, radius: f64) -> Retained<objc2_quartz_core
 }
 
 const POPUP_SHADOW_PAD: f64 = 52.;
+const ADD_MENU_WIDTH: f32 = 228.;
 
-fn popup_card_size(frame: NSSize) -> NSSize {
-    NSSize::new(
-        frame.width - 2. * POPUP_SHADOW_PAD,
-        frame.height - 2. * POPUP_SHADOW_PAD,
-    )
+fn popup_card_size(frame: NSSize, pad: f64) -> NSSize {
+    NSSize::new(frame.width - 2. * pad, frame.height - 2. * pad)
 }
 
 fn popup_shadow_path(host: &NSView, size: NSSize, radius: f64) {
@@ -7897,6 +8581,7 @@ fn popup_content_view(
     t: &Tokens,
     surface: Surface,
     opacity: f32,
+    pad: f64,
 ) -> (Retained<NSView>, Retained<NSView>, Retained<NSView>) {
     let root = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::ZERO, size));
     root.setWantsLayer(true);
@@ -7904,10 +8589,10 @@ fn popup_content_view(
     layer.setBackgroundColor(None);
     layer.setOpacity(opacity);
 
-    let size = popup_card_size(size);
+    let size = popup_card_size(size, pad);
     let host = NSView::initWithFrame(
         NSView::alloc(mtm),
-        NSRect::new(NSPoint::new(POPUP_SHADOW_PAD, POPUP_SHADOW_PAD), size),
+        NSRect::new(NSPoint::new(pad, pad), size),
     );
     let sizing = NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable;
     host.setAutoresizingMask(sizing);
@@ -7916,7 +8601,13 @@ fn popup_content_view(
     let layer = host.layer().unwrap();
     layer.setMasksToBounds(false);
     layer.setShadowColor(Some(&NSColor::blackColor().CGColor()));
-    layer.setShadowOpacity(if t.scheme == Scheme::Dark { 0.42 } else { 0.22 });
+    layer.setShadowOpacity(if pad == 0. {
+        0.
+    } else if t.scheme == Scheme::Dark {
+        0.42
+    } else {
+        0.22
+    });
     layer.setShadowRadius(20.);
     layer.setShadowOffset(NSSize::new(0., -8.));
 
@@ -8037,6 +8728,41 @@ fn style_popup_search(search: &NSTextField, t: &Tokens, surface: Surface) {
         )));
     } else {
         search.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
+    }
+}
+/// Switches a popup's `NSSearchField` between the borderless header style used
+/// by the Threads picker (where `PopupLayout::rebuild` draws a crisp SF Symbol
+/// leading icon aligned with the rows below) and the standard bezeled search
+/// field used by other searchable popups.
+fn configure_threads_search_field(search: &NSTextField, t: &Tokens, is_threads: bool) {
+    // In AppKit, `setBordered(false)` also clears `isBezeled`, so clear
+    // bordered first and then restore the rounded search bezel for non-Threads
+    // searchable popups (font picker, parts picker, field menu).
+    search.setBordered(false);
+    search.setBezeled(!is_threads);
+    if !is_threads {
+        search.setBezelStyle(NSTextFieldBezelStyle::RoundedBezel);
+    }
+    search.setDrawsBackground(!is_threads);
+    search.setFont(Some(&NSFont::systemFontOfSize(if is_threads {
+        t.typography.body as f64
+    } else {
+        t.typography.title as f64
+    })));
+    search.setTextColor(Some(&native_color(t.colors.text)));
+    if let Some(cell) = search
+        .cell()
+        .and_then(|cell| cell.downcast::<NSSearchFieldCell>().ok())
+    {
+        if is_threads {
+            cell.setSearchButtonCell(None);
+            cell.setCancelButtonCell(None);
+            cell.setUsesSingleLineMode(true);
+            cell.setScrollable(true);
+        } else {
+            cell.resetSearchButtonCell();
+            cell.resetCancelButtonCell();
+        }
     }
 }
 
@@ -8202,10 +8928,20 @@ impl PopupLayoutCache {
 }
 
 fn popup_provider_summary(model: &Picker, chosen: &[PickerRow], index: usize) -> String {
+    if !model.provider_expanded(index) {
+        return model.provider_summary(index);
+    }
     model.provider_summary_with_count(index, || {
-        chosen.iter().filter(|row| {
-            matches!(row, PickerRow::Choice(i) if model.choices[*i].provider == model.choices[index].provider)
-        }).count()
+        chosen
+            .iter()
+            .filter(|row| match row {
+                PickerRow::Choice(i) => {
+                    let choice = &model.choices[*i];
+                    choice.provider == model.choices[index].provider && choice.is_provider_model()
+                }
+                _ => false,
+            })
+            .count()
     })
 }
 
@@ -8262,6 +8998,12 @@ pub struct Popup {
     /// What the rows were last built from: an open over the same rows
     /// reuses them (building 160 palette rows took a frame or more).
     built: Option<u64>,
+    /// Last hover command dispatched from a hovered/keyed menu row so leaving
+    /// or dismissing the menu can clear the preview (e.g. `partHover:`).
+    last_hover_command: Option<String>,
+    flyout: Option<Rc<RefCell<Popup>>>,
+    flyout_parent: Option<std::rc::Weak<RefCell<Popup>>>,
+    flyout_category: Option<usize>,
 }
 impl Popup {
     fn new(
@@ -8280,7 +9022,10 @@ impl Popup {
         };
         let frame = NSRect::new(NSPoint::ZERO, NSSize::new(width as f64 + 2. * POPUP_SHADOW_PAD, height as f64 + 2. * POPUP_SHADOW_PAD));
         let window: Retained<PopupWindow> = unsafe {
-            msg_send![PopupWindow::alloc(mtm),initWithContentRect:frame,styleMask:NSWindowStyleMask::Borderless,backing:NSBackingStoreType::Buffered,defer:false]
+            msg_send![super(PopupWindow::alloc(mtm).set_ivars(PopupWindowState {
+                accepts_keys: Cell::new(true),
+                popup: RefCell::new(std::rc::Weak::new()),
+            })),initWithContentRect:frame,styleMask:NSWindowStyleMask::Borderless,backing:NSBackingStoreType::Buffered,defer:false]
         };
         unsafe {
             window.setReleasedWhenClosed(false);
@@ -8296,7 +9041,8 @@ impl Popup {
         window.setHasShadow(false);
         window.setBackgroundColor(Some(&NSColor::clearColor()));
         appearance(&window, t);
-        let (root, shadow_host, body) = popup_content_view(mtm, frame.size, t, surface, 0.);
+        let (root, shadow_host, body) =
+            popup_content_view(mtm, frame.size, t, surface, 0., POPUP_SHADOW_PAD);
         window.setContentView(Some(&root));
         let (search, scroll, list) = popup_controls(
             mtm,
@@ -8365,6 +9111,10 @@ impl Popup {
             dismiss: None,
             picked: false,
             built: None,
+            last_hover_command: None,
+            flyout: None,
+            flyout_parent: None,
+            flyout_category: None,
         }));
         let target: Retained<PopupTarget> = unsafe {
             msg_send![
@@ -8382,6 +9132,7 @@ impl Popup {
                 chrome.clear.setTarget(Some(&target));
             }
             *p.list.ivars().borrow_mut() = Rc::downgrade(&popup);
+            *p.window.ivars().popup.borrow_mut() = Rc::downgrade(&popup);
         }
         popup.borrow_mut().me = Rc::downgrade(&popup);
         popup.borrow_mut().target = Some(target);
@@ -8432,6 +9183,10 @@ impl Popup {
     fn configure_field(&mut self, composer: Option<(ComposerPicker, bool)>) {
         self.composer = composer.map(|(kind, _)| kind);
         self.set_searchable(composer.is_none_or(|(_, on)| on));
+        let is_threads = self.composer == Some(ComposerPicker::Threads);
+        if self.surface != Surface::Palette {
+            configure_threads_search_field(&self.search, &self.tokens, is_threads);
+        }
         let owner = self.parent.contentRectForFrameRect(self.parent.frame());
         let interior = composer_picker_interior(crate::layout::Rect {
             w: owner.size.width as f32,
@@ -8443,12 +9198,26 @@ impl Popup {
         frame.size.width = self.composer.map_or(m.field_menu_width, |kind| {
             kind.width().min(interior.w)
         }) as f64 + 2. * POPUP_SHADOW_PAD;
+        if self.model.grouped {
+            frame.size.width = f64::from(ADD_MENU_WIDTH) + 2. * POPUP_SHADOW_PAD;
+        }
         self.max_height = if let Some(anchor) = self.anchor.filter(|_| self.composer == Some(ComposerPicker::Model)) {
             model_picker_frame(popup_rect(owner), popup_rect(anchor), (0., m.field_menu_height)).h
-        } else if self.composer == Some(ComposerPicker::Add) {
-            // "+" lists its attachment rows above Approvals' described rows:
-            // all of it shows, up to the window's room, never scrolled past
-            // its first row to reach the checked one.
+        } else if let Some(anchor) = self.anchor.filter(|_| is_threads) {
+            threads_picker_frame(
+                popup_rect(owner),
+                popup_rect(anchor),
+                (0., m.field_menu_height),
+                m.gap,
+            )
+            .h
+        } else if matches!(
+            self.composer,
+            Some(ComposerPicker::Add | ComposerPicker::Access)
+        ) {
+            // "+" and Access list described rows: all of them show, up to the
+            // window's room, never scrolled past the first row to reach the
+            // checked one.
             interior.h
         } else if self.composer.is_some() {
             m.field_menu_height.min(interior.h)
@@ -8465,8 +9234,15 @@ impl Popup {
         let surface = self.surface;
         appearance(&self.window, t);
         let opacity = if self.model.open { 1. } else { 0. };
-        let (root, shadow_host, body) =
-            popup_content_view(self.window.mtm(), self.window.frame().size, t, surface, opacity);
+        let pad = self.shadow_pad();
+        let (root, shadow_host, body) = popup_content_view(
+            self.window.mtm(),
+            self.window.frame().size,
+            t,
+            surface,
+            opacity,
+            pad,
+        );
         self.search.removeFromSuperview();
         self.scroll.removeFromSuperview();
         body.addSubview(&self.search);
@@ -8489,7 +9265,7 @@ impl Popup {
         }
         self.glider.setFillColor(&popup_highlight(t));
         self.window.setContentView(Some(&root));
-        self.window.setHasShadow(false);
+        self.window.setHasShadow(pad == 0.);
         self.shadow_host = shadow_host;
         self.body = body;
         self.refresh();
@@ -8504,6 +9280,10 @@ impl Popup {
             let c = match row {
                 PickerRow::Choice(i) => {
                     i.hash(&mut h);
+                    &self.model.choices[i]
+                }
+                PickerRow::Category(i) => {
+                    row.hash(&mut h);
                     &self.model.choices[i]
                 }
                 PickerRow::Provider(i) => {
@@ -8532,14 +9312,23 @@ impl Popup {
                 c.checked,
                 &c.font,
                 &c.provider,
+                c.swatch,
+                c.indent,
+                c.modified,
+                c.menu_icon,
                 self.shortcuts.get(&c.command),
             )
                 .hash(&mut h);
+            (&c.delete_command, c.separator_after).hash(&mut h);
         }
         if self.surface == Surface::Palette {
             self.model.query.hash(&mut h);
         }
         self.model.has_provider_headers().hash(&mut h);
+        self.model.grouped.hash(&mut h);
+        if self.model.grouped {
+            self.model.query.is_empty().hash(&mut h);
+        }
         unlisted.hash(&mut h);
         self.model.note().hash(&mut h);
         self.composer.map(|kind| kind as u8).hash(&mut h);
@@ -8581,7 +9370,8 @@ impl Popup {
         self.built = Some(key);
         self.update_row_selection(None);
         let mut frame = self.window.frame();
-        let card = popup_card_size(frame.size);
+        let pad = self.shadow_pad();
+        let card = popup_card_size(frame.size, pad);
         let old_search = self.search.frame();
         let old_scroll = self.scroll.frame();
         let height = PopupLayout {
@@ -8619,7 +9409,7 @@ impl Popup {
             if self.composer != Some(ComposerPicker::Model) {
                 frame.origin.y += card.height - height;
             }
-            frame.size.height = height + 2. * POPUP_SHADOW_PAD;
+            frame.size.height = height + 2. * pad;
             if animate_height && !self.tokens.accessibility.reduce_motion {
                 let search = self.search.frame();
                 let scroll = self.scroll.frame();
@@ -8791,6 +9581,44 @@ mod popup_corner_tests {
                 }
             }
         }
+
+        let (sender, commands) = async_channel::unbounded();
+        let add = Popup::new(
+            &parent,
+            &solid,
+            Surface::Menu,
+            vec![
+                Choice::new("Cube", "new3d:box").within("Mesh"),
+                Choice::new("Sphere", "new3d:sphere").within("Mesh"),
+                Choice::new("Camera", "new3d:camera").within("Camera"),
+            ],
+            sender,
+        );
+        let button = {
+            let mut add = add.borrow_mut();
+            add.model.grouped = true;
+            add.model.open = true;
+            add.configure_field(None);
+            add.refresh();
+            assert_eq!(add.rows.len(), 2);
+            add.key("down", false);
+            add.key("right", false);
+            let flyout = add.flyout.as_ref().unwrap().clone();
+            assert!(!flyout.borrow().window.canBecomeKeyWindow());
+            assert_eq!(flyout.borrow().rows.len(), 2);
+            add.key("escape", false);
+            assert!(add.model.open);
+            assert!(!flyout.borrow().model.open);
+            assert!(!flyout.borrow().window.isVisible());
+            add.key("right", false);
+            let button = flyout.borrow().rows[1].button.clone();
+            button
+        };
+        unsafe { button.performClick(None) };
+        assert_eq!(commands.try_recv().unwrap().name, "new3d:sphere");
+        let add = add.borrow();
+        assert!(!add.model.open);
+        assert!(!add.flyout.as_ref().unwrap().borrow().window.isVisible());
     }
 }
 
@@ -8848,7 +9676,10 @@ pub fn check_palette_typing() {
         "⌘D".into(),
     );
     popup.refresh();
-    assert_eq!(popup_card_size(popup.window.frame().size).width, 540.);
+    assert_eq!(
+        popup_card_size(popup.window.frame().size, POPUP_SHADOW_PAD).width,
+        540.
+    );
     assert!(!popup.search.isBezeled());
     assert!(!popup.search.drawsBackground());
     // Concentric with the palette's corner (31652371b).
@@ -9308,6 +10139,9 @@ impl PopupLayout<'_> {
             part.removeFromSuperview();
         }
         for row in self.rows.drain(..) {
+            if let Some(delete_button) = row.delete_button {
+                delete_button.removeFromSuperview();
+            }
             if !self
                 .cache
                 .buttons
@@ -9321,8 +10155,14 @@ impl PopupLayout<'_> {
         let t = self.tokens;
         let (m, shape) = (t.metrics, popup_shape(t, self.surface));
         let width = self.width;
-        let (inset, row_h) = (shape.inset as f64, shape.row as f64);
+        let is_threads = self.composer == Some(ComposerPicker::Threads);
+        let (inset, row_h) = if is_threads {
+            (6., 30.)
+        } else {
+            (shape.inset as f64, shape.row as f64)
+        };
         let model_rows = self.model.choices.iter().any(|c| c.provider.is_some());
+        let browsing = self.model.grouped && self.model.query.is_empty();
         let is_palette = self.surface == Surface::Palette;
         let reuse_buttons = is_palette && !model_rows;
         let palette_query = is_palette.then(|| self.model.query.trim().to_lowercase());
@@ -9335,10 +10175,14 @@ impl PopupLayout<'_> {
             }
         }
         let checks = chosen.iter().any(|row| match *row {
-            PickerRow::Choice(i) => self.model.choices[i].checked.is_some(),
+            PickerRow::Choice(i) => {
+                let c = &self.model.choices[i];
+                c.checked.is_some() || (!browsing && c.menu_icon.is_some())
+            }
             PickerRow::Provider(_) => true,
+            PickerRow::Category(_) => false,
         });
-        let sections = !model_rows && chosen.iter().any(|row| {
+        let sections = !self.model.grouped && !model_rows && chosen.iter().any(|row| {
             matches!(*row, PickerRow::Choice(i) if !self.model.choices[i].category.is_empty())
         });
         let edge = inset + t.space.md as f64;
@@ -9373,13 +10217,16 @@ impl PopupLayout<'_> {
         let shortcuts = self.shortcuts;
         for (place, &row) in chosen.iter().enumerate() {
             let (index, disclosure) = match row {
-                PickerRow::Choice(index) => (index, None),
+                PickerRow::Choice(index) | PickerRow::Category(index) => (index, None),
                 PickerRow::Provider(index) => (index, Some(self.model.provider_expanded(index))),
             };
+            let flyout = matches!(row, PickerRow::Category(_));
             let c = &model.choices[index];
             let summary = disclosure.map(|_| popup_provider_summary(model, chosen, index));
-            if disclosure.is_some() {
-                if seen_provider {
+            let section_break = browsing
+                && place > 0
+                && flyout != matches!(chosen[place - 1], PickerRow::Category(_));
+            if (disclosure.is_some() && seen_provider) || section_break {
                     let padding = f64::from(t.space.xs);
                     let thickness = self.list.window().map_or(1., |window| {
                         window.backingScaleFactor().recip()
@@ -9398,7 +10245,8 @@ impl PopupLayout<'_> {
                     self.list.addSubview(&line);
                     self.parts.push(Retained::into_super(line));
                     y += 2. * padding + thickness;
-                }
+            }
+            if disclosure.is_some() {
                 seen_provider = true;
             }
             if sections && category != Some(c.category.as_str()) {
@@ -9416,7 +10264,7 @@ impl PopupLayout<'_> {
                     y += shape.heading as f64;
                 }
             }
-            let detail = if disclosure.is_some() || is_palette {
+            let detail = if disclosure.is_some() || is_palette || browsing {
                 ""
             } else {
                 c.detail.as_str()
@@ -9445,6 +10293,45 @@ impl PopupLayout<'_> {
                 NSSize::new(width - inset * 2., item_h),
             );
             let mut trailing = rect.origin.x + rect.size.width - t.space.md as f64;
+            let mut item_lead = lead;
+            let icon = |name: &str, x: f64| {
+                let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                    &NSString::from_str(name),
+                    None,
+                )?;
+                let icon = NSImageView::imageViewWithImage(&image, mtm);
+                icon.setContentTintColor(Some(&native_color(t.colors.secondary)));
+                icon.setSymbolConfiguration(Some(
+                    &NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                        f64::from(m.symbol_inline - 2.),
+                        unsafe { NSFontWeightRegular },
+                    ),
+                ));
+                icon.setAccessibilityElement(false);
+                centred(
+                    &icon,
+                    x,
+                    y,
+                    row_h,
+                    f64::from(m.symbol_inline),
+                    f64::from(m.symbol_inline),
+                );
+                self.list.addSubview(&icon);
+                Some(Retained::into_super(Retained::into_super(icon)))
+            };
+            if browsing {
+                if let Some(view) = c.menu_icon.and_then(|name| icon(name, edge)) {
+                    self.parts.push(view);
+                }
+                item_lead += f64::from(m.symbol_inline + t.space.sm);
+            }
+            if flyout {
+                trailing -= f64::from(m.symbol_inline);
+                if let Some(view) = icon("chevron.right", trailing) {
+                    self.parts.push(view);
+                }
+                trailing -= f64::from(t.space.sm);
+            }
             if !is_palette && let Some(glyphs) = shortcuts.get(&c.command) {
                 let hint = self.label(
                     glyphs,
@@ -9499,6 +10386,23 @@ impl PopupLayout<'_> {
                 centred(&hint, trailing - w, y, row_h, w, caption_h);
                 trailing -= w + t.space.md as f64;
             }
+            if !is_palette && disclosure.is_none() && c.modified {
+                let dot = NSBox::initWithFrame(
+                    NSBox::alloc(mtm),
+                    NSRect::new(
+                        NSPoint::new(trailing - 6., y + ((row_h - 6.) / 2.).floor()),
+                        NSSize::new(6., 6.),
+                    ),
+                );
+                dot.setBoxType(NSBoxType::Custom);
+                dot.setBorderWidth(0.);
+                dot.setCornerRadius(3.);
+                dot.setFillColor(&native_color(t.colors.accent));
+                dot.setAccessibilityElement(false);
+                self.list.addSubview(&dot);
+                self.parts.push(Retained::into_super(dot));
+                trailing -= 6. + t.space.sm as f64;
+            }
             if !is_palette && disclosure.is_none() && c.checked == Some(true) {
                 let mark = NSImageView::imageViewWithImage(&symbol("checkmark", "Checked"), mtm);
                 mark.setSymbolConfiguration(Some(
@@ -9507,7 +10411,11 @@ impl PopupLayout<'_> {
                         unsafe { NSFontWeightSemibold },
                     ),
                 ));
-                mark.setContentTintColor(Some(&native_color(t.colors.text)));
+                mark.setContentTintColor(Some(&native_color(if is_threads {
+                    t.colors.accent
+                } else {
+                    t.colors.text
+                })));
                 mark.setAccessibilityElement(false);
                 centred(
                     &mark,
@@ -9520,9 +10428,40 @@ impl PopupLayout<'_> {
                 self.list.addSubview(&mark);
                 self.parts
                     .push(Retained::into_super(Retained::into_super(mark)));
+            } else if !browsing
+                && !is_palette
+                && disclosure.is_none()
+                && let Some(name) = c.menu_icon
+            {
+                let glyph = NSImageView::imageViewWithImage(&symbol(name, ""), mtm);
+                glyph.setSymbolConfiguration(Some(
+                    &NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                        (m.symbol_inline - 2.) as f64,
+                        unsafe { NSFontWeightMedium },
+                    ),
+                ));
+                glyph.setContentTintColor(Some(&native_color(t.colors.secondary)));
+                glyph.setAccessibilityElement(false);
+                centred(
+                    &glyph,
+                    edge,
+                    y,
+                    row_h,
+                    m.symbol_inline as f64,
+                    glyph.fittingSize().height.ceil(),
+                );
+                self.list.addSubview(&glyph);
+                self.parts
+                    .push(Retained::into_super(Retained::into_super(glyph)));
             }
-            let display_label = if disclosure.is_some() {
+            const DELETE_BUTTON_SIZE: f64 = 24.;
+            if !is_palette && disclosure.is_none() && c.delete_command.is_some() {
+                trailing -= DELETE_BUTTON_SIZE + 2.;
+            }
+            let display_label = if disclosure.is_some() || flyout {
                 c.category.clone()
+            } else if self.model.grouped {
+                c.label.clone()
             } else {
                 c.display_label(&self.model.query)
             };
@@ -9555,42 +10494,72 @@ impl PopupLayout<'_> {
                 decoration.layout(rect, body_h);
                 decoration.set_hidden(false);
             } else {
-                let (title, title_h) = if disclosure.is_some() || c.font.is_some() {
-                    let title = popup_label(&display_label, title_size, title_color, mtm);
-                    let height = if disclosure.is_some() {
-                        title.setFont(Some(&NSFont::systemFontOfSize_weight(
-                            f64::from(title_size),
-                            unsafe { NSFontWeightSemibold },
-                        )));
-                        semibold_body_h
-                    } else if let Some(face) = c.font.as_ref().and_then(|family| {
-                        NSFontManager::sharedFontManager(mtm).fontWithFamily_traits_weight_size(
-                            &NSString::from_str(family),
-                            NSFontTraitMask::empty(),
-                            5,
-                            t.typography.reading as f64,
-                        )
-                    }) {
-                        title.setFont(Some(&face));
-                        title.fittingSize().height.ceil()
+                let medium_weight = is_threads
+                    && disclosure.is_none()
+                    && (c.checked == Some(true) || c.menu_icon.is_some());
+                let (title, title_h) =
+                    if disclosure.is_some() || c.font.is_some() || medium_weight {
+                        let title = popup_label(&display_label, title_size, title_color, mtm);
+                        let height = if disclosure.is_some() {
+                            title.setFont(Some(&NSFont::systemFontOfSize_weight(
+                                f64::from(title_size),
+                                unsafe { NSFontWeightSemibold },
+                            )));
+                            semibold_body_h
+                        } else if medium_weight {
+                            title.setFont(Some(&NSFont::systemFontOfSize_weight(
+                                f64::from(title_size),
+                                unsafe { NSFontWeightMedium },
+                            )));
+                            body_h
+                        } else if let Some(face) = c.font.as_ref().and_then(|family| {
+                            NSFontManager::sharedFontManager(mtm).fontWithFamily_traits_weight_size(
+                                &NSString::from_str(family),
+                                NSFontTraitMask::empty(),
+                                5,
+                                t.typography.reading as f64,
+                            )
+                        }) {
+                            title.setFont(Some(&face));
+                            title.fittingSize().height.ceil()
+                        } else {
+                            body_h
+                        };
+                        self.list.addSubview(&title);
+                        self.parts
+                            .push(Retained::into_super(Retained::into_super(title.clone())));
+                        (title, height)
                     } else {
-                        body_h
+                        (
+                            self.label(&display_label, title_size, title_color, None),
+                            body_h,
+                        )
                     };
-                    self.list.addSubview(&title);
-                    self.parts
-                        .push(Retained::into_super(Retained::into_super(title.clone())));
-                    (title, height)
-                } else {
-                    (
-                        self.label(&display_label, title_size, title_color, None),
-                        body_h,
-                    )
-                };
-                let title_lead = if disclosure.is_some() {
+                let mut title_lead = if disclosure.is_some() {
                     edge + f64::from(m.symbol_inline + t.space.xs)
                 } else {
-                    lead
+                    item_lead + f64::from(c.indent.min(6)) * 12.
                 };
+                if disclosure.is_none()
+                    && let Some(rgb) = c.swatch
+                {
+                    let swatch = NSBox::initWithFrame(
+                        NSBox::alloc(mtm),
+                        NSRect::new(
+                            NSPoint::new(title_lead, y + ((row_h - 8.) / 2.).floor()),
+                            NSSize::new(8., 8.),
+                        ),
+                    );
+                    swatch.setBoxType(NSBoxType::Custom);
+                    swatch.setBorderWidth(1.);
+                    swatch.setBorderColor(&native_color(t.colors.separator));
+                    swatch.setCornerRadius(4.);
+                    swatch.setFillColor(&native_color(rgb));
+                    swatch.setAccessibilityElement(false);
+                    self.list.addSubview(&swatch);
+                    self.parts.push(Retained::into_super(swatch));
+                    title_lead += 8. + t.space.sm as f64;
+                }
                 centred(
                     &title,
                     title_lead,
@@ -9626,7 +10595,9 @@ impl PopupLayout<'_> {
             } else {
                 display_label
             };
-            let identifier = if disclosure.is_some() {
+            let identifier = if flyout {
+                format!("shell.add-category.{}", c.category)
+            } else if disclosure.is_some() {
                 format!("shell.model-provider.{}", c.provider.as_deref().unwrap_or_default())
             } else {
                 format!("shell.palette.{}", c.command)
@@ -9646,13 +10617,73 @@ impl PopupLayout<'_> {
                 disclosure,
                 reuse_buttons,
             );
+            let delete_button = (!is_palette && disclosure.is_none() && c.delete_command.is_some())
+                .then(|| {
+                    let delete = unsafe {
+                        NSButton::buttonWithImage_target_action(
+                            &symbol("trash", "Delete Thread"),
+                            self.target.map(|t| t as &AnyObject),
+                            Some(sel!(pickAction:)),
+                            mtm,
+                        )
+                    };
+                    delete.setBordered(false);
+                    delete.setSymbolConfiguration(Some(
+                        &NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                            12.,
+                            unsafe { NSFontWeightRegular },
+                        ),
+                    ));
+                    delete.setContentTintColor(Some(&native_color(t.colors.muted)));
+                    delete.setToolTip(Some(&NSString::from_str("Delete Thread")));
+                    delete.setAccessibilityLabel(Some(&NSString::from_str("Delete Thread")));
+                    delete.setAccessibilityIdentifier(Some(&NSString::from_str(&format!(
+                        "shell.palette.delete.{}",
+                        c.command
+                    ))));
+                    delete.setTag(place as isize);
+                    delete.setFrame(NSRect::new(
+                        NSPoint::new(
+                            rect.origin.x + rect.size.width - f64::from(t.space.xs) - DELETE_BUTTON_SIZE,
+                            y + ((row_h - DELETE_BUTTON_SIZE) / 2.).floor(),
+                        ),
+                        NSSize::new(DELETE_BUTTON_SIZE, DELETE_BUTTON_SIZE),
+                    ));
+                    delete.setHidden(true);
+                    self.list.addSubview(&delete);
+                    delete
+                });
             self.rows.push(PopupRow {
                 place,
                 kind: row,
                 rect,
                 button,
+                delete_button,
             });
             y += item_h;
+            if c.separator_after && place + 1 < chosen.len() {
+                let padding = f64::from(t.space.xs);
+                let thickness = self
+                    .list
+                    .window()
+                    .map_or(1., |window| window.backingScaleFactor().recip());
+                let line = NSBox::initWithFrame(
+                    NSBox::alloc(mtm),
+                    NSRect::new(
+                        NSPoint::new(edge, y + padding),
+                        NSSize::new((width - 2. * edge).max(0.), thickness),
+                    ),
+                );
+                line.setBoxType(NSBoxType::Custom);
+                line.setBorderWidth(0.);
+                line.setFillColor(
+                    &native_color(t.colors.separator).colorWithAlphaComponent(0.55),
+                );
+                line.setAccessibilityElement(false);
+                self.list.addSubview(&line);
+                self.parts.push(Retained::into_super(line));
+                y += 2. * padding + thickness;
+            }
         }
         if unlisted > 0 && !is_palette {
             let note = self.label(
@@ -9698,17 +10729,22 @@ impl PopupLayout<'_> {
         }
         let field_h = if is_palette {
             24.
+        } else if is_threads && self.searchable {
+            body_h
         } else if self.searchable {
             self.search.fittingSize().height.ceil()
         } else {
             0.
         };
+        let title_h = if model.grouped { body_h + inset } else { 0. };
         let (above, below) = if is_palette {
             (spotlight::HEADER, spotlight::FOOTER)
+        } else if is_threads && self.searchable {
+            (38., inset)
         } else {
             (
                 if self.searchable {
-                    inset * 2. + field_h
+                    inset * 2. + title_h + field_h
                 } else {
                     inset
                 },
@@ -9719,8 +10755,14 @@ impl PopupLayout<'_> {
         let height = above + shown + below;
         let (left, right, top) = if is_palette {
             (44., 44., (spotlight::HEADER - field_h) / 2.)
+        } else if is_threads && self.searchable {
+            (
+                edge + f64::from(m.symbol_inline + t.space.sm) - 2.,
+                edge,
+                (above - field_h) / 2.,
+            )
         } else {
-            (inset, inset, inset)
+            (inset, inset, inset + title_h)
         };
         let search_frame = NSRect::new(
             NSPoint::new(left, height - top - field_h),
@@ -9728,6 +10770,62 @@ impl PopupLayout<'_> {
         );
         if self.search.frame() != search_frame {
             self.search.setFrame(search_frame);
+        }
+        if is_threads
+            && self.searchable
+            && let Some(body) = unsafe { self.search.superview() }
+        {
+            let glyph = NSImageView::imageViewWithImage(&symbol("magnifyingglass", ""), mtm);
+            glyph.setSymbolConfiguration(Some(
+                &NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                    f64::from(m.symbol_inline - 2.),
+                    unsafe { NSFontWeightMedium },
+                ),
+            ));
+            glyph.setContentTintColor(Some(&native_color(t.colors.muted)));
+            glyph.setAccessibilityElement(false);
+            let icon_h = glyph.fittingSize().height.ceil();
+            glyph.setFrame(NSRect::new(
+                NSPoint::new(edge, height - above + ((above - icon_h) / 2.).floor()),
+                NSSize::new(f64::from(m.symbol_inline), icon_h),
+            ));
+            body.addSubview(&glyph);
+            self.parts
+                .push(Retained::into_super(Retained::into_super(glyph)));
+            let thickness = self
+                .list
+                .window()
+                .map_or(1., |window| window.backingScaleFactor().recip());
+            let line = NSBox::initWithFrame(
+                NSBox::alloc(mtm),
+                NSRect::new(
+                    NSPoint::new(0., height - above),
+                    NSSize::new(width, thickness),
+                ),
+            );
+            line.setBoxType(NSBoxType::Custom);
+            line.setBorderWidth(0.);
+            line.setFillColor(&native_color(t.colors.separator).colorWithAlphaComponent(0.55));
+            line.setAccessibilityElement(false);
+            body.addSubview(&line);
+            self.parts.push(Retained::into_super(line));
+        }
+        if model.grouped
+            && let Some(body) = unsafe { self.search.superview() }
+        {
+            let title = popup_label("Add", t.typography.body, t.colors.text, mtm);
+            title.setFont(Some(&NSFont::systemFontOfSize_weight(
+                f64::from(t.typography.body),
+                unsafe { NSFontWeightSemibold },
+            )));
+            title.setAccessibilityElement(true);
+            title.setFrame(NSRect::new(
+                NSPoint::new(edge, height - inset - body_h),
+                NSSize::new(width - 2. * edge, body_h),
+            ));
+            body.addSubview(&title);
+            self.parts
+                .push(Retained::into_super(Retained::into_super(title)));
         }
         let scroll_frame = NSRect::new(NSPoint::new(0., below), NSSize::new(width, shown));
         if self.scroll.frame() != scroll_frame {
@@ -9844,6 +10942,9 @@ pub fn capture_agent_picker(
         input["placeholder"].as_str().unwrap_or_default(),
         surface,
     );
+    if surface != Surface::Palette {
+        configure_threads_search_field(&search, t, kind == Some(ComposerPicker::Threads));
+    }
     search.setHidden(!searchable);
     search.setStringValue(&NSString::from_str(query));
     let mut model = Picker {
@@ -9854,6 +10955,15 @@ pub fn capture_agent_picker(
             c.checked = o["checked"].as_bool();
             c.is_default = o["default"] == true;
             c.informational = o["informational"] == true;
+            if o["icon"].as_str() == Some("plus") {
+                c.menu_icon = Some("plus");
+            }
+            if o["separatorAfter"] == true {
+                c.separator_after = true;
+            }
+            if o["deleteValue"].is_string() {
+                c.delete_command = Some(format!("delete:{i}"));
+            }
             c
         }).collect(),
         ..Default::default()
@@ -9936,6 +11046,7 @@ fn verify_provider_layout(t: &Tokens, model: &Picker, rows: &[PopupRow], parts: 
     let mut correct_label_colors = true;
     for row in rows {
         let (label, color) = match row.kind {
+            PickerRow::Category(_) => continue,
             PickerRow::Provider(index) => {
                 headers.push(row.rect);
                 (model.choices[index].category.clone(), t.colors.secondary)
@@ -10061,7 +11172,7 @@ impl Popup {
         let lit = lit.filter(|&place| {
             self.rows
                 .get(place)
-                .is_some_and(|row| matches!(row.kind, PickerRow::Choice(_)))
+                .is_some_and(|row| !matches!(row.kind, PickerRow::Provider(_)))
         });
         if self.lit_row_place == lit {
             return;
@@ -10071,12 +11182,19 @@ impl Popup {
                 row.button
                     .setAccessibilityValue(Some(&NSString::from_str("")))
             };
+            if let Some(delete) = &row.delete_button {
+                delete.setHidden(true);
+                delete.setContentTintColor(Some(&native_color(self.tokens.colors.muted)));
+            }
         }
         if let Some(row) = lit.and_then(|place| self.rows.get(place)) {
             unsafe {
                 row.button
                     .setAccessibilityValue(Some(&NSString::from_str("Selected")))
             };
+            if let Some(delete) = &row.delete_button {
+                delete.setHidden(false);
+            }
         }
         if let Some(theme) = &self.layout_cache.palette_theme {
             for place in [self.lit_row_place, lit].into_iter().flatten() {
@@ -10086,6 +11204,31 @@ impl Popup {
             }
         }
         self.lit_row_place = lit;
+        let next_hover = lit
+            .and_then(|place| self.rows.get(place))
+            .and_then(|row| match row.kind {
+                PickerRow::Choice(idx) => self.model.choices.get(idx),
+                PickerRow::Provider(_) | PickerRow::Category(_) => None,
+            })
+            .and_then(|choice| choice.hover_command.clone());
+        if self.last_hover_command != next_hover {
+            if let Some(cmd) = &next_hover {
+                let _ = self.sender.try_send(Command {
+                    name: cmd.clone(),
+                    args: Vec::new(),
+                    token: None,
+                });
+            } else if let Some(prev) = &self.last_hover_command
+                && let Some((prefix, _)) = prev.split_once(':')
+            {
+                let _ = self.sender.try_send(Command {
+                    name: format!("{prefix}:"),
+                    args: Vec::new(),
+                    token: None,
+                });
+            }
+            self.last_hover_command = next_hover;
+        }
     }
 
     /// Puts the highlight on the lit row. It appears where it lands when
@@ -10194,9 +11337,8 @@ impl Popup {
             timer.invalidate();
         }
     }
-    /// The pointer is at `at` in the list, or has left it.
-    fn point(&mut self, at: Option<NSPoint>) {
-        let row = at.and_then(|at| {
+    fn row_at(&self, at: Option<NSPoint>) -> Option<usize> {
+        at.and_then(|at| {
             self.rows
                 .iter()
                 .find(|row| {
@@ -10206,10 +11348,147 @@ impl Popup {
                         && at.y < row.rect.origin.y + row.rect.size.height
                 })
                 .map(|row| row.place)
-        });
-        if self.model.point(row) {
+        })
+    }
+    /// The pointer is at `at` in the list, or has left it.
+    fn point(&mut self, at: Option<NSPoint>) {
+        if self.model.point(self.row_at(at)) {
             self.light(true);
         }
+        if let Some(row) = self.lit_row_place.and_then(|place| self.rows.get(place))
+            && let Some(delete) = &row.delete_button
+        {
+            let over_delete = at.is_some_and(|pt| objc2_foundation::NSPointInRect(pt, delete.frame()));
+            delete.setContentTintColor(Some(&native_color(if over_delete {
+                self.tokens.colors.danger
+            } else {
+                self.tokens.colors.muted
+            })));
+        }
+        if self.model.submenu.is_some() || self.flyout_category.is_some() {
+            self.sync_flyout();
+        }
+    }
+    fn shadow_pad(&self) -> f64 {
+        // AppKit's shadow leaves the adjoining parent rows clickable.
+        if self.flyout_parent.is_some() {
+            0.
+        } else {
+            POPUP_SHADOW_PAD
+        }
+    }
+    fn owns_submenu_arrow(&self, key: &str) -> bool {
+        self.model.grouped
+            && (self.model.submenu.is_some()
+                || (key == "right" && matches!(self.model.lit_row(), Some(PickerRow::Category(_)))))
+    }
+    fn close_flyout(&mut self) {
+        if self.flyout_category.take().is_some()
+            && let Some(flyout) = &self.flyout
+        {
+            let mut flyout = flyout.borrow_mut();
+            flyout.model.open = false;
+            flyout.window.setIgnoresMouseEvents(true);
+            gpui_macos::child_window::forget(&flyout.window);
+            flyout.window.orderOut(None);
+            if flyout.window.parentWindow().is_some() {
+                self.window.removeChildWindow(&flyout.window);
+            }
+        }
+    }
+    fn sync_flyout(&mut self) {
+        let Some(menu) = self.model.submenu else {
+            self.close_flyout();
+            return;
+        };
+        let Some(row) = self.rows.get(menu.parent) else {
+            return;
+        };
+        let Some(screen) = self.window.screen().or_else(|| self.parent.screen()) else {
+            return;
+        };
+        let screen = popup_rect(screen.visibleFrame());
+        let row = self
+            .window
+            .convertRectToScreen(self.list.convertRect_toView(row.rect, None));
+        let card = self.window.convertRectToScreen(self.shadow_host.frame());
+        let width = ADD_MENU_WIDTH.min(screen.w);
+        let max_height = screen.h;
+        let flyout = self.flyout.get_or_insert_with(|| {
+            let flyout = Self::new(
+                &self.window,
+                &self.tokens,
+                Surface::Menu,
+                Vec::new(),
+                self.sender.clone(),
+            );
+            {
+                let mut popup = flyout.borrow_mut();
+                popup.flyout_parent = Some(self.me.clone());
+                popup.window.ivars().accepts_keys.set(false);
+                popup.set_searchable(false);
+            }
+            flyout
+        });
+        let mut flyout = flyout.borrow_mut();
+        let mut bounds = flyout.window.frame();
+        let changed = self.flyout_category != Some(menu.parent);
+        let first_layout = flyout.built.is_none();
+        let restyle = first_layout || self.tokens != flyout.tokens;
+        let resize = bounds.size.width != f64::from(width) || flyout.max_height != max_height;
+        if changed {
+            let choices = self
+                .model
+                .submenu_choices()
+                .into_iter()
+                .map(|index| {
+                    let mut choice = self.model.choices[index].clone();
+                    choice.category.clear();
+                    choice.detail.clear();
+                    choice
+                })
+                .collect();
+            flyout.model.choices = choices;
+            flyout.list.scrollPoint(NSPoint::ZERO);
+        }
+        let lit = menu.lit();
+        let lit_changed = flyout.model.keyed != lit;
+        flyout.model.keyed = lit;
+        flyout.model.open = true;
+        if restyle || changed || resize {
+            flyout.max_height = max_height;
+            bounds.size.width = f64::from(width);
+            flyout.window.setFrame_display(bounds, false);
+            if restyle {
+                flyout.tokens = self.tokens.clone();
+                flyout.restyle();
+            } else {
+                flyout.refresh();
+            }
+        } else if lit_changed {
+            flyout.light(false);
+        }
+        if lit_changed || changed {
+            flyout.reveal();
+        }
+        let frame = submenu_frame(
+            screen,
+            popup_rect(card),
+            (row.origin.y
+                + row.size.height
+                + f64::from(popup_shape(&self.tokens, Surface::Menu).inset)) as f32,
+            (width, flyout.window.frame().size.height as f32),
+        );
+        let origin = NSPoint::new(f64::from(frame.x), f64::from(frame.y));
+        if flyout.window.frame().origin != origin {
+            flyout.window.setFrameOrigin(origin);
+        }
+        if self.flyout_category.is_none() {
+            flyout.window.setIgnoresMouseEvents(false);
+            gpui_macos::child_window::attach(&flyout.window, &self.window);
+            gpui_macos::child_window::show(&flyout.window, false);
+        }
+        self.flyout_category = Some(menu.parent);
     }
     /// Scrolls the keyboard's row into sight (the first row with its heading).
     fn reveal(&self) {
@@ -10241,6 +11520,7 @@ impl Popup {
                 self.model.page = (!q.trim().is_empty()).then_some(PALETTE_SEARCH_PAGE);
             }
             let (chosen, unlisted) = self.model.search_and_list(q);
+            self.close_flyout();
             let key = self.rows_key(&chosen, unlisted);
             if self.built == Some(key) {
                 self.list.scrollPoint(NSPoint::ZERO);
@@ -10259,10 +11539,17 @@ impl Popup {
     fn place_at_composer(&self) {
         let Some(anchor) = self.anchor else { return };
         let parent = popup_rect(self.parent.contentRectForFrameRect(self.parent.frame()));
-        let size = popup_card_size(self.window.frame().size);
+        let size = popup_card_size(self.window.frame().size, self.shadow_pad());
         let dimensions = (size.width as f32, size.height as f32);
         let frame = if self.composer == Some(ComposerPicker::Model) {
             model_picker_frame(parent, popup_rect(anchor), dimensions)
+        } else if self.composer == Some(ComposerPicker::Threads) {
+            threads_picker_frame(
+                parent,
+                popup_rect(anchor),
+                dimensions,
+                self.tokens.metrics.gap,
+            )
         } else {
             let shape = popup_shape(&self.tokens, self.surface);
             let checked = popup_checked_offset(&self.model, &self.rows, &self.scroll, size.height, shape.row);
@@ -10282,6 +11569,12 @@ impl Popup {
     }
 
     fn press(&self, event: &NSEvent) -> Press {
+        if self.flyout_category.is_some()
+            && let Some(flyout) = &self.flyout
+            && event.windowNumber() == flyout.borrow().window.windowNumber()
+        {
+            return Press::Menu;
+        }
         if event.windowNumber() == self.window.windowNumber() {
             return if objc2_foundation::NSPointInRect(event.locationInWindow(), self.shadow_host.frame()) {
                 Press::Menu
@@ -10355,7 +11648,7 @@ impl Popup {
         }
         self.sync_badges();
         let p = self.parent.frame();
-        let s = popup_card_size(self.window.frame().size);
+        let s = popup_card_size(self.window.frame().size, self.shadow_pad());
         let origin = match self.anchor {
             // Under the control that opened it, its trailing edge on the
             // control's (as a field's pop-up menu); above it if there is no
@@ -10407,8 +11700,19 @@ impl Popup {
     }
     fn dismiss(&mut self, restore_focus: bool) {
         self.model.open = false;
+        self.model.submenu = None;
+        self.close_flyout();
         self.set_cmd_held(false);
         self.window.setIgnoresMouseEvents(true);
+        if let Some(prev) = self.last_hover_command.take()
+            && let Some((prefix, _)) = prev.split_once(':')
+        {
+            let _ = self.sender.try_send(Command {
+                name: format!("{prefix}:"),
+                args: Vec::new(),
+                token: None,
+            });
+        }
         // Closed with nothing chosen: the one who asked hears so.
         if !std::mem::take(&mut self.picked)
             && let Some(name) = self.dismiss.take()
@@ -10483,6 +11787,8 @@ impl Popup {
                 Some(i) => Some(if reverse { i - 1 } else { i + 1 }),
             };
             self.row_focus = next.is_some();
+            self.model.submenu = None;
+            self.close_flyout();
             if next.is_some() {
                 self.model.keyed = next;
                 self.model.hover = None;
@@ -10522,9 +11828,14 @@ impl Popup {
         }
         if !self.model.open {
             self.hide();
-        } else if self.model.lit() != before || self.row_focus != was_row_focus {
-            self.light(!repeat);
-            self.reveal();
+        } else {
+            if self.model.lit() != before || self.row_focus != was_row_focus {
+                self.light(!repeat);
+                self.reveal();
+            }
+            if self.model.submenu.is_some() || self.flyout_category.is_some() {
+                self.sync_flyout();
+            }
         }
     }
 }
@@ -11731,6 +13042,18 @@ mod cached_zoom_tests {
         assert!((next.origin.x + (200. - frame.origin.x) * 2. - 200.).abs() < 0.5);
         assert!((next.origin.y + (250. - frame.origin.y) * 2. - 250.).abs() < 0.5);
     }
+    #[test]
+    fn panning_a_cropped_layer_shifts_bottom_up_origin_without_scaling() {
+        let slot = [940., 610.];
+        let frame = NSRect::new(NSPoint::new(12., 34.), NSSize::new(900., 560.));
+        let old_pan = [40., -20.];
+        let pan = [115., 30.];
+        let next = cached_zoom_frame(frame, slot, 1., old_pan, pan);
+        assert_eq!(next.size, frame.size);
+        // Top-down +dx shifts right (+x); top-down +dy shifts down (-y in bottom-up layer coords).
+        assert!((next.origin.x - (frame.origin.x + 75.)).abs() < 1e-6);
+        assert!((next.origin.y - (frame.origin.y - 50.)).abs() < 1e-6);
+    }
 }
 
 #[cfg(test)]
@@ -11748,9 +13071,13 @@ mod restore_tab_tests {
     }
 }
 
-fn toolbar_top_inset(measured: f32, fullscreen: bool, visible: bool, m: &pm_design::Metrics) -> f32 {
-    if fullscreen && measured < 1. {
-        if visible { m.toolbar } else { m.dock_gap }
+fn toolbar_top_inset(measured: f32, fullscreen: bool, has_toolbar: bool, m: &pm_design::Metrics) -> f32 {
+    if fullscreen {
+        if has_toolbar {
+            measured.max(m.toolbar)
+        } else {
+            measured.max(m.dock_gap)
+        }
     } else {
         measured.max(0.)
     }
@@ -11762,7 +13089,9 @@ fn fullscreen_overlay_reserves_top_space_without_a_content_layout_inset() {
     let t = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
     let m = &t.metrics;
     assert_eq!(toolbar_top_inset(0., true, true, m), m.toolbar);
+    assert_eq!(toolbar_top_inset(8., true, true, m), m.toolbar);
+    assert_eq!(toolbar_top_inset(40., true, true, m), m.toolbar);
+    assert_eq!(toolbar_top_inset(60., true, true, m), 60.);
     assert_eq!(toolbar_top_inset(0.5, true, false, m), m.dock_gap);
-    assert_eq!(toolbar_top_inset(40., true, true, m), 40.);
     assert_eq!(toolbar_top_inset(-1., false, false, m), 0.);
 }

@@ -16,11 +16,23 @@ incremental = false
 debug = 0
 incremental = false
 
+# Shipped app bundle binaries: thin-LTO, single codegen unit, line-table .dSYM
+# packed alongside, symbols stripped from the shipped Mach-O so crashes still
+# symbolicate via `atos -l`.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+split-debuginfo = "packed"
+strip = "symbols"
+
 # Release code with review links (`cfg(debug_assertions)`): the soak
 # (scripts/stability/soak.py) drives a release-optimised app through them.
 [profile.soak]
 inherits = "release"
 debug-assertions = true
+strip = false
 
 # The engine's work counters (texture, buffer, pipeline and bind-group
 # creations, passes, draws, uploads, readbacks) reach a traced viewer's rows

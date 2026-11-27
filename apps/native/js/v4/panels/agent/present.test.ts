@@ -224,6 +224,22 @@ test("adjacent Markdown links retain distinct destinations", () => {
     { t: "One", a: true, href: "https://example.com/one" },
     { t: "Two", a: true, href: "https://example.com/two" },
   ]);
+  // CommonMark angle-bracketed paths with spaces render cleanly instead of raw markup.
+  expect(
+    inline(
+      "Exported [Do anything.mp3](</Users/chike/Library/Application Support/workspace/Do anything.mp3>) and verified it.",
+    ),
+  ).toEqual([
+    { t: "Exported " },
+    { t: "Do anything.mp3", c: true },
+    { t: " and verified it." },
+  ]);
+  expect(
+    inline("See [the guide](<https://example.com/my docs>)"),
+  ).toEqual([
+    { t: "See " },
+    { t: "the guide", a: true, href: "https://example.com/my docs" },
+  ]);
 });
 
 test("thread titles omit absolute file paths and file URLs", () => {

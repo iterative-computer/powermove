@@ -19,7 +19,7 @@ pub mod properties {
     pub use crate::view::{
         NATURE, QUALITY, SKIES, about, active_part, add_layer, add_models, dof_focus_options,
         estimate_seconds_per_frame, export_quality, fly_camera, new_menu, part_commands,
-        scatter_options, scene_summary, select_part, set_up_studio, shots,
+        part_control, scatter_options, scene_summary, select_part, set_up_studio, shots,
     };
     use crate::{Result, view};
     use pm_kernel::{Command, Published};
@@ -176,24 +176,30 @@ impl Session {
             return Err(invalid("Invalid Studio viewport or time"));
         }
         let p = self.current()?;
-        let root = p.snapshot.root().ok_or_else(|| invalid("No project"))?;
-        let comp_id = p.snapshot.open_comp();
-        let comp = pm_kernel::model::comp_node(root, comp_id.as_deref())
-            .ok_or_else(|| invalid("No composition"))?;
-        let comp = from_model(&comp.to_value())?;
-        let layers = comp["layers"]
-            .as_array()
-            .ok_or_else(|| invalid("No layers"))?;
-        let has_3d = layers.iter().any(|l| pm_scene3d::schema::role(l).is_some());
-        let selected = if p.selection.layers().len() == 1 {
-            layers.iter().find(|l| l["id"] == p.selection.layers()[0])
-        } else {
-            None
-        };
-        let mut mirror = QueryMirror::new(&p);
-        let inspector = selected
-            .map(|l| view::inspector(&p, &comp, l, time, &mut mirror))
-            .transpose()?;
+        let comp = view::composition(&p)?;
+        let layers =
+            pm_eval::node::array(comp.get("layers")).ok_or_else(|| invalid("No layers"))?;
+        let has_3d = layers.iter().any(|l| pm_scene3d::layer_role(l).is_some());
+        let mut inspector = None;
+        if let [id] = p.selection.layers()
+            && let Some((index, layer)) = view::layer_by_id(comp, id)
+        {
+            inspector = Some(if pm_scene3d::layer_role(layer).is_some() {
+                let fps = pm_eval::node::number(comp.get("fps")).unwrap_or(30.);
+                view::inspector(
+                    &p,
+                    fps,
+                    index,
+                    &view::layer_json(layer)?,
+                    time,
+                    &mut QueryMirror::new(&p),
+                )?
+            } else if let Some(diagnostic) = layer.get("native3dUpgradeDiagnostic") {
+                json!({"id":id,"error":"This 3D layer couldn’t be upgraded.","diagnostic":from_model(&diagnostic.to_value())?})
+            } else {
+                Value::Null
+            });
+        }
         let orthographic = view::orthographic(&p)?;
         let quality = p
             .ui_state
@@ -595,26 +601,31 @@ impl Session {
         let resolved =
             pm_kernel::commands::scene3d::resolve_scene(&p.snapshot, comp.as_deref(), self.time)
                 .map_err(|e| invalid(e.to_string()))?;
-        let root = p.snapshot.root().ok_or_else(|| invalid("No project"))?;
-        let c = pm_kernel::model::comp_node(root, comp.as_deref())
-            .ok_or_else(|| invalid("No composition"))?;
-        let c = from_model(&c.to_value())?;
+        let c = view::composition(&p)?;
         let selected = p.selection.layers();
-        let layers = c["layers"].as_array().ok_or_else(|| invalid("No layers"))?;
+        let in_selection = |id: &str| {
+            let mut next = Some(id);
+            let mut seen = std::collections::HashSet::new();
+            while let Some(id) = next {
+                if selected.iter().any(|selected| selected == id) {
+                    return true;
+                }
+                if !seen.insert(id) {
+                    break;
+                }
+                next = view::layer_by_id(c, id)
+                    .and_then(|(_, layer)| layer.get("group"))
+                    .and_then(view::node_str);
+            }
+            false
+        };
         let mut b: Option<Bounds> = None;
         for (id, v) in geometry
             .bounds
             .as_object()
             .ok_or_else(|| invalid("No geometry bounds"))?
         {
-            let include = selected.is_empty()
-                || selected.contains(id)
-                || layers.iter().find(|l| l["id"] == *id).is_some_and(|l| {
-                    selected
-                        .iter()
-                        .any(|g| pm_scene3d::geometry::descendants(l, g, layers))
-                });
-            if !include {
+            if !selected.is_empty() && !in_selection(id) {
                 continue;
             }
             let v = v
@@ -647,11 +658,9 @@ impl Session {
                 .as_f64()
                 .ok_or_else(|| invalid("Invalid camera lens"))
         };
-        let w = c["w"]
-            .as_f64()
+        let w = pm_eval::node::number(c.get("w"))
             .ok_or_else(|| invalid("Invalid composition width"))?;
-        let h = c["h"]
-            .as_f64()
+        let h = pm_eval::node::number(c.get("h"))
             .ok_or_else(|| invalid("Invalid composition height"))?;
         let lens = if cam["projection"] == "orthographic" {
             Lens::Orthographic {

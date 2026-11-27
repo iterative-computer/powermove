@@ -121,6 +121,60 @@ pub fn composition_tabs(ids: &[String], active: &str) -> Vec<CompositionTab> {
 }
 
 impl TimelineModel {
+    /// Expands key ids for Graph Editor edits: links `scale.*` axes whenever
+    /// Scale is not explicitly unlinked, and links `position.*` axes whenever
+    /// Position dimensions are not explicitly separated.
+    pub fn expand_graph_keys(&self, ids: &[String]) -> Vec<String> {
+        let mut result = ids.to_vec();
+        for id in ids {
+            if let Some((l, c, k)) = self.index.key(id) {
+                let family = if !l.scale_unlinked
+                    && (c.path == "scale.x"
+                        || c.path == "scale.y"
+                        || (l.three_d && c.path == "scale.z"))
+                {
+                    Some("scale")
+                } else if !l.position_separated && c.path.starts_with("position.") {
+                    Some("position")
+                } else {
+                    None
+                };
+                if let Some(path) = family {
+                    for other_id in self
+                        .track_channels(&l.id, path)
+                        .into_iter()
+                        .flat_map(|ch| &ch.keys)
+                        .filter(|other| (other.time - k.time).abs() < 1e-9)
+                        .map(|k| k.id.clone())
+                    {
+                        if !result.contains(&other_id) {
+                            result.push(other_id);
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+    /// True when `layer`'s Position is combined (not explicitly separated) and
+    /// has two or more animated axes, so the Graph Editor edits it as a single
+    /// unified Speed curve (After Effects behavior).
+    pub fn is_combined_position_speed(&self, layer_id: &str, channel: &str) -> bool {
+        if !(channel == "position" || channel.starts_with("position.")) {
+            return false;
+        }
+        let Some(layer) = self.index.layer(layer_id) else {
+            return false;
+        };
+        if layer.position_separated {
+            return false;
+        }
+        self.track_channels(layer_id, "position")
+            .into_iter()
+            .filter(|c| !c.keys.is_empty())
+            .count()
+            >= 2
+    }
     pub fn expand_scale_keys(&self, ids: &[String]) -> Vec<String> {
         self.expand_scale(ids, |id| self.index.key(id))
     }
@@ -136,10 +190,11 @@ impl TimelineModel {
         let mut result = ids.to_vec();
         for id in ids {
             if let Some((l, c, k)) = resolve(id)
-                && (c.path == "scale.x"
-                    || c.path == "scale.y"
-                    || (l.three_d && c.path == "scale.z")
-                    || (!l.separate_dimensions && c.path.starts_with("position.")))
+                && ((!l.scale_unlinked
+                    && (c.path == "scale.x"
+                        || c.path == "scale.y"
+                        || (l.three_d && c.path == "scale.z")))
+                    || (!l.position_separated && c.path.starts_with("position.")))
             {
                 let path = if c.path.starts_with("position.") {
                     "position"
@@ -150,7 +205,7 @@ impl TimelineModel {
                     .track_channels(&l.id, path)
                     .into_iter()
                     .flat_map(|c| &c.keys)
-                    .filter(|other| other.time == k.time)
+                    .filter(|other| (other.time - k.time).abs() < 1e-9)
                     .map(|k| k.id.clone())
                 {
                     if !result.contains(&id) {
@@ -184,8 +239,9 @@ impl TimelineModel {
             if all {
                 if let Some(k) = at {
                     commands.push(
-                        KeyframeCommand::Delete {
+                        KeyframeCommand::DeleteAt {
                             key_ids: vec![k.id.clone()],
+                            time,
                         }
                         .into(),
                     );
@@ -751,7 +807,7 @@ impl TimelineModel {
             return Err(ModelError::InvalidGesture);
         }
         let expanded = self.index.expanded_ids(ids);
-        let selected: HashSet<_> = expanded.iter().cloned().collect();
+        let selected: HashSet<_> = expanded.iter().map(String::as_str).collect();
         if selected.contains(target) {
             return Err(ModelError::InvalidGesture);
         }
@@ -765,14 +821,20 @@ impl TimelineModel {
                 return Err(ModelError::Locked(id.clone()));
             }
         }
-        let roots: Vec<_> = self
-            .index
-            .layers
+        let requested: HashSet<_> = ids.iter().map(String::as_str).collect();
+        let roots: Vec<_> = expanded
             .iter()
-            .filter(|l| {
-                ids.contains(&l.id) && !l.group.as_ref().is_some_and(|g| selected.contains(g))
+            .filter(|id| {
+                requested.contains(id.as_str())
+                    && !self
+                        .index
+                        .layer(id)
+                        .unwrap()
+                        .group
+                        .as_deref()
+                        .is_some_and(|group| selected.contains(group))
             })
-            .map(|l| l.id.clone())
+            .cloned()
             .collect();
         let group = if mode == DropMode::Inside {
             Some(target.into())
@@ -809,7 +871,7 @@ impl TimelineModel {
             .index
             .layers
             .iter()
-            .filter(|l| !selected.contains(&l.id))
+            .filter(|l| !selected.contains(l.id.as_str()))
             .map(|l| l.id.clone())
             .collect();
         let mut at = remaining

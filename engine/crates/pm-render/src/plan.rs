@@ -241,11 +241,11 @@ pub enum Source {
         composition_rate: pm_time::Rate,
     },
     /// A nested composition (precomp) or a group's compositing boundary.
-    Comp(Box<CompPlan>),
+    Comp(Arc<CompPlan>),
     /// The 3D scene pass output for one object layer.
     Object3d(Box<Object3dPlan>),
     /// Shape content (`crate::vector`).
-    Vector(Box<crate::vector::VectorSource>),
+    Vector(Arc<crate::vector::VectorSource>),
     /// A shader layer or an extension fragment layer
     /// (`crate::shader_layers`).
     Shader(Box<crate::shader_layers::ShaderSource>),
@@ -256,7 +256,7 @@ pub enum Source {
     Compat(CompatDraw),
     /// Motion-blur samples accumulated with additive blending into a
     /// transparent target in the parent's pixel space (`crate::motion`).
-    Accumulate(Box<CompPlan>),
+    Accumulate(Arc<CompPlan>),
 }
 
 /// An SVG image layer of a frame.
@@ -337,6 +337,9 @@ pub struct Build<'r> {
     /// (each boundary group is a pass), by the layer list's address and
     /// length (the document is borrowed for the whole build).
     passes: Vec<((usize, usize), std::sync::Arc<PassFacts>)>,
+    /// Whether any layer in `(layers_ptr, layers_len)` at `time` requires
+    /// rendering at composition density (`needs_composition_density`).
+    composition_density: Vec<((usize, usize, u64), bool)>,
     /// The session's compatibility rasters (`crate::compat`): layers a
     /// producer draws, and what the frame still needs from it.
     compat: Option<&'r dyn crate::compat::CompatRasters>,
@@ -349,6 +352,9 @@ pub struct Build<'r> {
     /// Layer draws kept from the last frame (`crate::reuse`): the
     /// interactive viewer's renders only.
     pub(crate) reuse: Option<&'r mut crate::reuse::DrawReuse>,
+    /// Interactive viewer group focus: only this group and its descendants
+    /// draw at the top composition level (`precomp_depth == 0`).
+    focus_group: Option<String>,
 }
 
 use crate::pass_facts::PassFacts;
@@ -406,13 +412,40 @@ impl Build<'_> {
         }
         scaled_world(scope, layer, time, scale, self.origin)
     }
-    fn pass_facts(&mut self, layers: &[Node], all: &[&Node]) -> std::sync::Arc<PassFacts> {
+    pub(crate) fn has_studio(&self) -> bool {
+        self.options3d.studio.is_some()
+    }
+
+    pub(crate) fn can_reuse_draws(&self) -> bool {
+        !self.compat_probe_only
+            && self.material.is_none()
+            && self.source_raster.is_none()
+            && self
+                .compat
+                .is_none_or(|raster| !raster.producing(crate::compat::CompatSource::RasterOverride))
+    }
+
+    pub(crate) fn interactive_rasters(&self) -> bool {
+        !self.final_output
+            && (self.read_ahead || self.sampling == crate::sampling::Sampling::Playback)
+    }
+
+    pub(crate) fn camera_preview(&self) -> bool {
+        !self.final_output
+            && self.sampling == crate::sampling::Sampling::Playback
+            && self.options3d.plane_camera.is_some()
+            && self.source_raster.is_none()
+            && self.material.is_none()
+    }
+
+    fn pass_facts(&mut self, comp: &Comp<'_>, all: &[&Node]) -> std::sync::Arc<PassFacts> {
+        let layers = comp.layers();
         let key = (layers.as_ptr() as usize, layers.len());
         if let Some((_, facts)) = self.passes.iter().find(|(k, _)| *k == key) {
             return facts.clone();
         }
         let facts = match self.reuse.as_deref_mut() {
-            Some(reuse) => reuse.pass_facts(layers, all),
+            Some(reuse) => reuse.pass_facts(comp, all),
             None => std::sync::Arc::new(PassFacts::of(all)),
         };
         self.passes.push((key, facts.clone()));
@@ -421,7 +454,7 @@ impl Build<'_> {
 }
 
 /// Options of a build beyond the frame's geometry.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct BuildOptions {
     /// Local material capture; addresses are compared only while the borrowed
     /// document is alive. No pointer is dereferenced or retained by a frame.
@@ -457,6 +490,8 @@ pub struct BuildOptions {
     pub keep_empty_groups: bool,
     /// Collect outstanding raster overrides without building native content.
     pub compat_probe_only: bool,
+    /// Interactive viewer group focus (`RenderRequest::focus_group`).
+    pub focus_group: Option<String>,
 }
 
 /// A bounded source-local material canvas, without its receiving model.
@@ -580,7 +615,7 @@ pub(crate) fn build_reusing<'r>(
     assets: &'r dyn AssetResolver,
     effects: Option<&'r dyn EffectHost>,
     options3d: crate::scene3d::Options3d,
-    text: Option<&'r mut crate::text::TextContext>,
+    mut text: Option<&'r mut crate::text::TextContext>,
     options: BuildOptions,
     compat: Option<&'r dyn crate::compat::CompatRasters>,
     reuse: Option<&'r mut crate::reuse::DrawReuse>,
@@ -594,11 +629,19 @@ pub(crate) fn build_reusing<'r>(
             crate::reuse::BuildKey {
                 sampling: options.sampling,
                 blur: options.blur,
-                view_override: options3d.view.is_some(),
+                view: options3d.view.clone(),
+                text: text.as_deref_mut().map(crate::text::TextContext::reuse_generation),
+                preview: options.preview,
+                keep_empty_groups: options.keep_empty_groups,
+                offline_cards: options.offline_cards,
+                studio: options3d.studio.is_some(),
                 origin: options.origin.map(|(x, y)| (x.to_bits(), y.to_bits())),
                 final_output: options.final_output,
                 read_ahead: options.read_ahead,
+                focus_group: options.focus_group.clone(),
             },
+            !options.final_output && options.sampling == crate::sampling::Sampling::Playback
+                && options3d.plane_camera.is_some(),
         );
     }
     let mut b = Build {
@@ -630,14 +673,17 @@ pub(crate) fn build_reusing<'r>(
         read_ahead: options.read_ahead,
         keep_empty_groups: options.keep_empty_groups,
         passes: Vec::new(),
+        composition_density: Vec::new(),
         compat,
         compat_missing: Vec::new(),
         compat_probe_only: options.compat_probe_only,
         preview: options.preview,
         offline_cards: options.offline_cards,
         reuse,
+        focus_group: options.focus_group,
     };
     let mut scope = Scope::new(ev, root_comp, project);
+    scope.view_camera = b.options3d.plane_camera;
     // One frame at one time: each layer's local matrix once per scope.
     scope.memoize_transforms();
     let plan = comp_pass(&mut scope, &mut b, time, width, height, scale, false, None);
@@ -721,8 +767,14 @@ impl TextDrawRun {
                         let mut quad =
                             text_texture(crate::text::TextContext::local_quad(plan, local.raster));
                         quad.offset_anchor(local.offset);
-                        if clip.is_some_and(|rect| !clip_local_raster(&mut quad, local.world, rect))
-                        {
+                        if clip.is_some_and(|rect| {
+                            !clip_local_raster(
+                                &mut quad,
+                                local.world,
+                                rect,
+                                b.interactive_rasters(),
+                            )
+                        }) {
                             continue;
                         }
                         let Quad::Texture {
@@ -805,17 +857,31 @@ pub(crate) fn comp_pass<'d>(
         && ((scale.0 - 1.0).abs() > 1e-9 || (scale.1 - 1.0).abs() > 1e-9)
         && let Some(host) = b.effects
     {
-        let mut needs = false;
-        for &layer in &all {
-            match host.needs_composition_density(scope, layer, time, b.final_output) {
-                Ok(true) => {
-                    needs = true;
-                    break;
+        let layers_slice = scope.comp.layers();
+        let density_key = (
+            layers_slice.as_ptr() as usize,
+            layers_slice.len(),
+            time.to_bits(),
+        );
+        let needs = if let Some(&(_, cached)) =
+            b.composition_density.iter().find(|(k, _)| *k == density_key)
+        {
+            cached
+        } else {
+            let mut found = false;
+            for &layer in &all {
+                match host.needs_composition_density(scope, layer, time, b.final_output) {
+                    Ok(true) => {
+                        found = true;
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(_) => {}
                 }
-                Ok(false) => {}
-                Err(_) => {}
             }
-        }
+            b.composition_density.push((density_key, found));
+            found
+        };
         if needs {
             let (cw, ch) = scope.comp_size();
             let side = |c: f64, w: u32, s: f64| {
@@ -866,7 +932,7 @@ pub(crate) fn comp_pass<'d>(
                     matrix: [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0],
                     content: Content::Placed(Box::new(Placed {
                         content: Content::Texture {
-                            source: Source::Comp(Box::new(inner)),
+                            source: Source::Comp(Arc::new(inner)),
                             uv: [0.0, 0.0, 1.0, 1.0],
                             alpha: 1.0,
                         },
@@ -907,7 +973,12 @@ pub(crate) fn comp_pass<'d>(
         return plan;
     }
     let parent_id = group_parent.map(|g| node::get(g, b"id").to_js());
-    let facts = b.pass_facts(scope.layers(), &all);
+    let facts = b.pass_facts(scope.comp, &all);
+    let omit_empty_groups = b.interactive_rasters()
+        && b.material.is_none()
+        && b.matte_depth == 0
+        && b.blur.is_none()
+        && !b.keep_empty_groups;
     // `compositingPass`: boundary groups stay one entry.
     let pass = {
         // `PM.transitionDef`: a host knows its registered transitions.
@@ -917,10 +988,30 @@ pub(crate) fn comp_pass<'d>(
         // applies (`opt.mblur !== false`).
         let blur_on = b.blur.is_some();
         let mut boundary = |s: &mut Scope<'_, 'd>, l: &'d Node| {
+            // In a 2D pass a non-drawing group can stand in for its whole
+            // subtree. In 3D those children can separate ordered runs.
+            if omit_empty_groups
+                && !facts.has_3d
+                && (facts.group_outside(l, time)
+                    || (statically_disabled(l) && facts.has_group_span(l)))
+            {
+                return Ok(true);
+            }
             s.group_creates_compositing_boundary(l, time, blur_on, &known)
         };
-        match scope.compositing_layers_with(&all, &facts.owners, parent_id.as_ref(), &mut boundary)
+        let mut compute = |s: &mut Scope<'_, 'd>| {
+            s.compositing_layers_with(&all, &facts.owners, parent_id.as_ref(), &mut boundary)
+        };
+        let result = if b.material.is_none()
+            && let Some(reuse) = b.reuse.as_deref_mut().filter(|r| r.geometry_active)
         {
+            reuse
+                .geometry
+                .membership(scope, group_parent, time, blur_on, compute)
+        } else {
+            compute(scope)
+        };
+        match result {
             Ok(p) => p,
             Err(e) => {
                 b.failures.push(LayerFailure {
@@ -943,6 +1034,12 @@ pub(crate) fn comp_pass<'d>(
         b.assets,
         b.options3d.view.as_ref(),
         b.precomp_depth == 0,
+        b.material.is_none(),
+        facts.has_3d,
+        b.reuse
+            .as_deref_mut()
+            .filter(|r| r.geometry_active)
+            .map(|r| &mut r.geometry),
     ) {
         Ok((ordered, ctx)) => {
             b.pass3d.push(ctx);
@@ -961,8 +1058,12 @@ pub(crate) fn comp_pass<'d>(
     // side regardless of their document stack order. The timeline cut and
     // stored layer order remain unchanged.
     let mut pass = pass;
+    let regular_pass = b.material.is_none();
+    let outside_span =
+        |layer: &Node| regular_pass && pm_eval::evaluator::outside_layer_span(layer, time);
     let pairs: Vec<_> = pass
         .iter()
+        .filter(|&&layer| !outside_span(layer))
         .filter_map(|&layer| {
             let overlap =
                 pm_eval::cut_transition::overlap(scope.comp.root(), layer, scope.layers(), time)?;
@@ -990,7 +1091,10 @@ pub(crate) fn comp_pass<'d>(
     }
     let solo = facts.solo;
     let mut text_run = TextDrawRun::default();
-    let batch_text = !b.compat_probe_only
+    // Repeated paused frames keep finalized text draws. The first pass at
+    // a time still batches any cold glyph work as a wave.
+    let batch_text = !(b.can_reuse_draws() && b.reuse.as_ref().is_some_and(|r| r.active()))
+        && !b.compat_probe_only
         && pm_text::render::scene::CanvasRows::available()
         && b.text.as_deref().is_some_and(|text| text.has_fonts())
         && b.material.is_none()
@@ -1001,11 +1105,22 @@ pub(crate) fn comp_pass<'d>(
         && b.matte_depth == 0;
     // Bottom (last) to top (first).
     for &layer in pass.iter().rev() {
+        // Outside its span a regular layer cannot draw. Avoid collecting
+        // its render dependencies just to let draw_layer reject it.
+        if outside_span(layer) {
+            continue;
+        }
         let id = node::get(layer, b"id").to_js();
         if facts.matte_sources.contains(&id) {
             continue;
         }
         let ty = js::layer_type(layer);
+        if omit_empty_groups
+            && ty == "group"
+            && (facts.group_outside(layer, time) || statically_disabled(layer))
+        {
+            continue;
+        }
         let has = |key| node::array(node::member(Some(layer), key)).is_some_and(|v| !v.is_empty());
         let candidate = batch_text
             && ty == "text"
@@ -1025,8 +1140,9 @@ pub(crate) fn comp_pass<'d>(
         {
             text_run.flush(b, &mut plan.draws);
         }
-        let drawn =
-            crate::reuse::draw(scope, b, layer, time, width, height, scale, solo, |s, b| {
+        let drawn = crate::reuse::draw(
+            scope, b, layer, &ty, time, width, height, scale, &facts,
+            |s, b| {
                 pm_perf::bump(pm_perf::Counter::LayersPlanned);
                 draw_layer(
                     s,
@@ -1040,7 +1156,8 @@ pub(crate) fn comp_pass<'d>(
                     &all,
                     candidate.then_some(&mut text_run),
                 )
-            });
+            },
+        );
         let draws = match drawn {
             Ok(draws) => draws,
             Err(e) => {
@@ -1064,6 +1181,13 @@ pub(crate) fn comp_pass<'d>(
     plan
 }
 
+fn statically_disabled(layer: &Node) -> bool {
+    matches!(
+        layer.get("on").map(Node::kind),
+        Some(pm_model::NodeKind::Bool(false))
+    )
+}
+
 /// `groupContainsSolo(group, layers, ancestors)`.
 fn group_contains_solo<'d>(
     scope: &mut Scope<'_, 'd>,
@@ -1082,6 +1206,24 @@ fn group_contains_solo<'d>(
             if pm_eval::js_sem::strict_eq(&node::get(a, b"id").to_js(), &gid) {
                 return Ok(true);
             }
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `group` is an ancestor of the layer with id `target_id`.
+fn group_contains_id<'d>(
+    scope: &mut Scope<'_, 'd>,
+    group: &'d Node,
+    target: &'d Node,
+) -> JsResult<bool> {
+    if js::layer_type(group) != "group" {
+        return Ok(false);
+    }
+    let gid = node::get(group, b"id").to_js();
+    for a in scope.group_ancestors(target)? {
+        if pm_eval::js_sem::strict_eq(&node::get(a, b"id").to_js(), &gid) {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -1110,6 +1252,33 @@ fn draw_layer<'d>(
         return drawn.map(|_| None);
     }
     let ty = js::layer_type(layer);
+    if b.precomp_depth == 0
+        && !b.forced_on.is_some_and(|p| std::ptr::eq(p, layer))
+        && let Some(focus) = b.focus_group.as_deref()
+    {
+        let focus_id = JsString::from(focus);
+        if let Some(&(i, duplicate)) = scope.layer_index().strings.get(&focus_id) {
+            let focus_layer = &scope.layers()[i];
+            let focus_js = JsValue::String(focus_id);
+            let is_focus_group = js::layer_type(focus_layer) == "group"
+                || (duplicate
+                    && all.iter().any(|&l| {
+                        js::layer_type(l) == "group"
+                            && pm_eval::js_sem::strict_eq(&node::get(l, b"id").to_js(), &focus_js)
+                    }));
+            if is_focus_group
+                && !pm_eval::js_sem::strict_eq(&node::get(layer, b"id").to_js(), &focus_js)
+            {
+                let ancestors = scope.group_ancestors(layer)?;
+                let under_focus = ancestors
+                    .iter()
+                    .any(|g| pm_eval::js_sem::strict_eq(&node::get(g, b"id").to_js(), &focus_js));
+                if !under_focus && !group_contains_id(scope, layer, focus_layer)? {
+                    return Ok(None);
+                }
+            }
+        }
+    }
     if solo && !js::flag(layer, "solo") {
         let ancestors = scope.group_ancestors(layer)?;
         if !ancestors.iter().any(|g| js::flag(g, "solo"))
@@ -1274,39 +1443,70 @@ fn draw_layer<'d>(
     let mblur = scope.evaluated(layer, node::member(Some(layer), "mblur"), time, "l.mblur")?;
     let blur = if mblur.truthy() { b.blur } else { None };
     let matted = js::flag(layer, "matteSource");
-    let dof = if let Some((focus_z, blur_pct)) = scope.dof_25d(layer, time)? {
-        let h = scope.plane_matrix(layer, time, false)?;
-        let (sx, sy) = scale;
-        let h_out = plane_at_origin(
-            [
-                h[0] * sx,
-                h[1] * sy,
-                h[2],
-                h[3] * sx,
-                h[4] * sy,
-                h[5],
-                h[6] * sx,
-                h[7] * sy,
-                h[8],
-            ],
-            b.origin,
-        );
-        pm_eval::space3d::inverse_plane(&h_out).map(|inv| {
-            let (cw, _) = scope.comp_size();
-            let f = cw.max(1.0) * scope.perspective_amount(layer, time).unwrap_or(50.0) / 36.0;
-            let focus_w = (1.0 + focus_z / f).max(0.05);
-            let scale_px = sx.max(sy).max(0.01);
-            let blur_px = blur_pct * 0.65 * scale_px;
-            let max_radius = (blur_px * 1.5).clamp(1.0, 48.0 * scale_px);
-            composite::Dof25d {
-                inv_w: [inv[2], inv[5], inv[8]],
-                focus_w,
-                blur_px,
-                max_radius,
-            }
-        })
-    } else {
-        None
+    let dof = {
+        let is_3d = scope.is_3d_layer(layer)?;
+        let camera_dof = if is_3d {
+            scope.camera_dof_3d(time)?
+        } else {
+            None
+        };
+        let layer_dof = if camera_dof.is_none() {
+            scope.dof_25d(layer, time)?
+        } else {
+            None
+        };
+        if camera_dof.is_some() || layer_dof.is_some() {
+            let h = scope.plane_matrix(layer, time, false)?;
+            let (sx, sy) = scale;
+            let h_out = plane_at_origin(
+                [
+                    h[0] * sx,
+                    h[1] * sy,
+                    h[2],
+                    h[3] * sx,
+                    h[4] * sy,
+                    h[5],
+                    h[6] * sx,
+                    h[7] * sy,
+                    h[8],
+                ],
+                b.origin,
+            );
+            pm_eval::space3d::inverse_plane(&h_out).map(|inv| {
+                let scale_px = sx.max(sy).max(0.01);
+                let (focus_w, blur_px) = if let Some((focus_dist, blur_pct)) = camera_dof {
+                    // With a 3D camera, `plane_matrix`'s `w` IS the exact depth
+                    // from the camera in scene units.
+                    (focus_dist.max(0.05), blur_pct * 0.85 * scale_px)
+                } else {
+                    let (focus_z, blur_pct) = layer_dof.unwrap();
+                    let (cw, ch) = scope.comp_size();
+                    let focus_w = if let Some(cam) = scope.projection_camera_3d(time).ok().flatten() {
+                        let [fwd, _, _] = cam.basis();
+                        let origin_depth = (-cam.position[0] * fwd[0]
+                            - cam.position[1] * fwd[1]
+                            - cam.position[2] * fwd[2])
+                            .max(0.5);
+                        (origin_depth + focus_z * pm_eval::space3d::scene_units_per_pixel(ch))
+                            .max(0.05)
+                    } else {
+                        let f =
+                            cw.max(1.0) * scope.perspective_amount(layer, time).unwrap_or(50.0) / 36.0;
+                        (1.0 + focus_z / f).max(0.05)
+                    };
+                    (focus_w, blur_pct * 0.65 * scale_px)
+                };
+                let max_radius = (blur_px * 1.5).clamp(1.0, 48.0 * scale_px);
+                composite::Dof25d {
+                    inv_w: [inv[2], inv[5], inv[8]],
+                    focus_w,
+                    blur_px,
+                    max_radius,
+                }
+            })
+        } else {
+            None
+        }
     };
     // Today's fast path draws straight into the accumulator; anything else
     // goes through the layer's own target.
@@ -1403,7 +1603,7 @@ fn draw_layer<'d>(
                 layer: id.clone(),
                 matrix: mul(&world, &[e.width, 0., 0., e.height, e.x, e.y]),
                 content: Content::Texture {
-                    source: Source::Comp(Box::new(plan)),
+                    source: Source::Comp(Arc::new(plan)),
                     uv: [0., 0., 1., 1.],
                     alpha: opacity,
                 },
@@ -1414,7 +1614,7 @@ fn draw_layer<'d>(
                 layer: id.clone(),
                 matrix: full,
                 content: Content::Texture {
-                    source: Source::Accumulate(Box::new(CompPlan {
+                    source: Source::Accumulate(Arc::new(CompPlan {
                         composition: comp_id.clone(),
                         group: true,
                         width,
@@ -1497,7 +1697,7 @@ fn draw_layer<'d>(
             layer: id.clone(),
             matrix: full,
             content: Content::Texture {
-                source: Source::Comp(Box::new(inner.clone())),
+                source: Source::Comp(Arc::new(inner)),
                 uv: [0.0, 0.0, 1.0, 1.0],
                 alpha,
             },
@@ -1608,8 +1808,73 @@ fn layer_draw_with_padding<'d>(
     padding: composite::effects::Padding,
     text: Option<DeferredText<'_>>,
 ) -> JsResult<Option<Draw>> {
-    let Some(mut quad) = content_quad(scope, b, layer, time, width, height, scale, text)? else {
-        return Ok(None);
+    let mut geometry_key = None;
+    let ty = js::layer_type(layer);
+    let camera_preview = b.camera_preview() && scope.view_camera.is_some();
+    if camera_preview
+        && matches!(ty.as_str(), "shape" | "text" | "solid" | "shader")
+        && b.compat
+            .is_none_or(|raster| !raster.producing(crate::compat::CompatSource::RasterOverride))
+        && !node::truthy(node::member(
+            node::member(node::member(Some(layer), "d"), "extrusion"),
+            "enabled",
+        ))
+        && text.is_none()
+        && b.matte_depth == 0
+        && b.forced_on.is_none()
+        && b.reuse.as_ref().is_some_and(|r| r.geometry_active)
+        && scope.is_3d_layer(layer)?
+    {
+        geometry_key = Some((
+            crate::reuse::scope_key(scope, time),
+            crate::reuse::address(layer),
+            [
+                u64::from(width),
+                u64::from(height),
+                scale.0.to_bits(),
+                scale.1.to_bits(),
+                b.origin.0.to_bits(),
+                b.origin.1.to_bits(),
+            ],
+        ));
+    }
+    let cached = geometry_key
+        .and_then(|key| b.reuse.as_ref()?.geometry.quads.get(&key))
+        .filter(|entry| entry.quad.reusable_local());
+    let (mut quad, world, plane_matrix) = if let Some(entry) = cached {
+        (entry.quad.clone(), entry.affine, Some(entry.world))
+    } else {
+        let failures = b.failures.len();
+        let unsupported = b.unsupported.len();
+        let Some(quad) = content_quad(scope, b, layer, time, width, height, scale, text)? else {
+            return Ok(None);
+        };
+        let affine = b.world(scope, layer, time, scale)?;
+        let mut plane_matrix = None;
+        if let Some(key) = geometry_key
+            && quad.reusable_local()
+            && b.failures.len() == failures
+            && b.unsupported.len() == unsupported
+        {
+            let world = scope.world3d(layer, time, false)?;
+            b.reuse.as_mut().unwrap().geometry.quads.insert(
+                key,
+                crate::reuse::LayerGeometry {
+                    quad: quad.clone(),
+                    affine,
+                    world,
+                },
+            );
+            plane_matrix = Some(world);
+        }
+        (quad, affine, plane_matrix)
+    };
+    let plane_matrix = match (plane_matrix, scope.view_camera) {
+        (Some(matrix), Some(camera)) => {
+            let (w, h) = scope.comp_size();
+            Some(camera.project_plane(&matrix, w, h))
+        }
+        _ => None,
     };
     if matches!(quad, Quad::Screen { .. })
         && b.source_raster.as_ref().is_some_and(|(comp, id, _)| {
@@ -1621,7 +1886,6 @@ fn layer_draw_with_padding<'d>(
             message: "Screen-space content cannot supply an unclipped source raster".into(),
         });
     }
-    let world = b.world(scope, layer, time, scale)?;
     // Clip the retained texels on the original local grid, after the size
     // anchor has been applied. Every shutter sample and intermediate pass
     // reaches here with its own transform and actual target dimensions.
@@ -1637,13 +1901,26 @@ fn layer_draw_with_padding<'d>(
             world,
             kurbo::Rect::new(0., 0., width.into(), height.into())
                 .inflate(margin.into(), margin.into()),
+            b.interactive_rasters(),
         )
     {
         return Ok(None);
     }
     let id = js::layer_id(layer);
     let full = [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0];
-    let ty = js::layer_type(layer);
+    let mut project = |w, h, ax, ay| -> JsResult<Option<crate::space25d::Plane>> {
+        if let Some(matrix) = plane_matrix {
+            Ok(Some(plane_at_origin(
+                crate::space25d::fold(&matrix, scale, w, h, ax, ay),
+                b.origin,
+            )))
+        } else {
+            Ok(
+                crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?
+                    .map(|p| plane_at_origin(p, b.origin)),
+            )
+        }
+    };
     let draw = match quad {
         Quad::Solid {
             rgb,
@@ -1655,8 +1932,7 @@ fn layer_draw_with_padding<'d>(
             ay,
         } => {
             let alpha = alpha * a;
-            let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?
-                .map(|p| plane_at_origin(p, b.origin));
+            let plane = project(w, h, ax, ay)?;
             // `NaN > 0` is false: a missing radius is none.
             let radius = if radius > 0.0 { radius } else { 0.0 };
             Draw {
@@ -1681,15 +1957,27 @@ fn layer_draw_with_padding<'d>(
             ay,
             uv,
         } => {
-            let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?
-                .map(|p| plane_at_origin(p, b.origin));
-            // Electron projects legacy canvas sources through the same
-            // bilinear sampler in 2D and 3D. Native level-2 planes retain
-            // their output-density resampler.
-            let sampling = (matches!(
-                ty.as_str(),
-                "image" | "video" | "precomp" | "shader" | "extension"
-            ) || (plane.is_some() && crate::sampling::is_level2(layer)))
+            let plane = project(w, h, ax, ay)?;
+            // Moving the camera projects the prepared layer-space raster
+            // directly. Building a new mip pyramid per visible quad would
+            // spend most of the preview on GPU setup.
+            let local_preview = camera_preview
+                && plane.is_some()
+                && matches!(
+                    &source,
+                    Source::Text(_)
+                        | Source::Vector(_)
+                        | Source::Shader(_)
+                        | Source::Image { .. }
+                        | Source::Video { .. }
+                        | Source::Comp(_)
+                );
+            // Settled level-2 planes and media use the output-density sampler.
+            let sampling = (!local_preview
+                && (matches!(
+                    ty.as_str(),
+                    "image" | "video" | "precomp" | "shader" | "extension"
+                ) || (plane.is_some() && crate::sampling::is_level2(layer))))
             .then_some(b.sampling);
             Draw {
                 layer: id.clone(),
@@ -1874,7 +2162,12 @@ fn matte_pass<'d>(
     plan
 }
 
-fn clip_local_raster(quad: &mut Quad, world: Mat2d, viewport: kurbo::Rect) -> bool {
+fn clip_local_raster(
+    quad: &mut Quad,
+    world: Mat2d,
+    viewport: kurbo::Rect,
+    keep_small_raster: bool,
+) -> bool {
     if let Quad::Texture {
         source,
         w,
@@ -1907,13 +2200,16 @@ fn clip_local_raster(quad: &mut Quad, world: Mat2d, viewport: kurbo::Rect) -> bo
             let Some(rect) = crate::raster_roi::visible(old, map, viewport) else {
                 return false;
             };
+            if keep_small_raster && old.area() <= 256 * 1024 {
+                return true;
+            }
             *ax -= (rect.x - old.x) as f64 * sx;
             *ay -= (rect.y - old.y) as f64 * sy;
             *w = rect.width as f64 * sx;
             *h = rect.height as f64 * sy;
             match source {
                 Source::Vector(v) => {
-                    if let crate::vector::VectorSource::Scene { rect: r, .. } = &mut **v {
+                    if let crate::vector::VectorSource::Scene { rect: r, .. } = Arc::make_mut(v) {
                         *r = rect;
                     }
                 }
@@ -1949,7 +2245,8 @@ fn scaled_world<'d>(
     ))
 }
 
-enum Quad {
+#[derive(Clone)]
+pub(crate) enum Quad {
     Solid {
         rgb: [f64; 3],
         a: f64,
@@ -1998,6 +2295,25 @@ fn content_quad<'d>(
 }
 
 impl Quad {
+    fn reusable_local(&self) -> bool {
+        match self {
+            Self::Solid { .. } => true,
+            Self::Texture { source, .. } => match source {
+                Source::Text(_) | Source::Vector(_) => true,
+                Source::Shader(source) => {
+                    if let crate::shader_layers::ProgramRef::Code { key, .. } = &source.program {
+                        source.scene_error.is_none()
+                            && !crate::shader_layers::translate::native_failed(key)
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     fn offset_anchor(&mut self, offset: pm_eval::anchor::Offset) {
         if offset.x != 0.0 || offset.y != 0.0 {
             match self {
@@ -2023,6 +2339,7 @@ fn native_content_quad<'d>(
     text: Option<DeferredText<'_>>,
 ) -> JsResult<Option<Quad>> {
     let ty = js::layer_type(layer);
+    let camera_preview = b.camera_preview() && scope.view_camera.is_some();
     let comp_id = scope.comp.id().to_string_lossy();
     if let Some(settings) = b.options3d.studio {
         let extrusion = node::member(node::member(Some(layer), "d"), "extrusion");
@@ -2081,11 +2398,8 @@ fn native_content_quad<'d>(
                 let mut plan = |scope: &mut Scope<'_, 'd>, world: &Mat2d, target| {
                     crate::vector::plan_shape(scope, layer, &d, time, world, target)
                 };
-                let playback = (b.read_ahead
-                    || b.sampling == crate::sampling::Sampling::Playback)
-                    && !b.final_output
-                    && b.source_raster.is_none()
-                    && b.material.is_none();
+                let playback =
+                    b.interactive_rasters() && b.source_raster.is_none() && b.material.is_none();
                 return local_level2(
                     scope,
                     layer,
@@ -2094,12 +2408,13 @@ fn native_content_quad<'d>(
                     b.origin,
                     pm_vector::render::scene::PixelRect::new(0, 0, width, height),
                     playback,
+                    camera_preview,
                     &mut plan,
                 );
             }
             let world = vector_world(scope, b, layer, time, scale)?;
-            if b.read_ahead
-                && !b.final_output
+            let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+            if b.interactive_rasters()
                 && b.source_raster.is_none()
                 && b.material.is_none()
                 && b.matte_depth == 0
@@ -2110,11 +2425,9 @@ fn native_content_quad<'d>(
                 && world[0] > 0.0
                 && world[3] > 0.0
                 && !crate::raster_roi::at_rest(&world)
-                && let Some(quad) = playback_shape(scope, layer, &d, time, &world)?
             {
-                return Ok(Some(quad));
+                return playback_shape(scope, layer, &d, time, &world, target);
             }
-            let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
             let quad = crate::vector::plan_shape(scope, layer, &d, time, &world, target)?;
             Ok(quad.map(device_quad))
         }
@@ -2237,6 +2550,7 @@ fn native_content_quad<'d>(
                             && !b.final_output
                             && b.source_raster.is_none()
                             && b.material.is_none(),
+                        camera_preview,
                         &mut plan,
                     );
                 }
@@ -2370,14 +2684,247 @@ fn native_content_quad<'d>(
             let ch = node::to_number(scope.comp.member("h"));
             let w = js::max(1.0, or_chain(js::get(&d, "w"), cw, wf));
             let hh = js::max(1.0, or_chain(js::get(&d, "h"), ch, hf));
-            let (tw, th) = if crate::sampling::is_level2(layer)
-                || node::truthy(node::member(Some(layer), "continuousRaster"))
-            {
-                // Continuous rasterization (section 8): the child renders
-                // at the density it is drawn at, never below its own size.
-                let density = if b.source_raster.as_ref().is_some_and(|(comp, id, _)| {
-                    *comp == scope.comp.id().to_string_lossy() && *id == js::layer_id(layer)
-                }) {
+            let sub = match Comp::in_root(root, &sub_id, scope.comp.revision()) {
+                Ok(c) => c,
+                Err(_) => return Ok(None),
+            };
+            let continuous = crate::sampling::is_level2(layer)
+                || node::truthy(node::member(Some(layer), "continuousRaster"));
+            let is_source_raster = b.source_raster.as_ref().is_some_and(|(comp, id, _)| {
+                *comp == scope.comp.id().to_string_lossy() && *id == js::layer_id(layer)
+            });
+            let (raw_dx, raw_dy) = if continuous && !is_source_raster && !camera_preview {
+                let offset = scope.size_anchor_offset(layer, time)?;
+                let (ax, ay) = (-offset.x, -offset.y);
+                let d_xy = match crate::space25d::projected(scope, layer, time, scale, w, hh, ax, ay)? {
+                    Some(plane) => match crate::space25d::corner_density(&plane) {
+                        Some((du, dv)) => (du / w.max(1e-9), dv / hh.max(1e-9)),
+                        None => scale,
+                    },
+                    None => {
+                        let m = scope.world_matrix(layer, time)?;
+                        (
+                            (m[0] * scale.0).hypot(m[1] * scale.1),
+                            (m[2] * scale.0).hypot(m[3] * scale.1),
+                        )
+                    }
+                };
+                (
+                    if d_xy.0.is_finite() { js::max(scale.0, d_xy.0) } else { scale.0 },
+                    if d_xy.1.is_finite() { js::max(scale.1, d_xy.1) } else { scale.1 },
+                )
+            } else {
+                scale
+            };
+
+            let full_tw_uncapped = js::max(2.0, js::round(w * raw_dx));
+            let full_th_uncapped = js::max(2.0, js::round(hh * raw_dy));
+            let oversize_w = (f64::from(width) * 1.15).max(2048.0);
+            let oversize_h = (f64::from(height) * 1.15).max(2048.0);
+
+            // When a continuously-rasterized precomp is zoomed far past the
+            // parent viewport (e.g. a 2425% scale-in), render only the visible
+            // sub-window instead of allocating a giant full-canvas texture.
+            let sub_has_screen3d = sub.layers().iter().any(|child| {
+                pm_eval::parenting::Role3d::of(child).is_some()
+                    || (js::layer_type(child) == "extension" && {
+                        let def = node::string(node::member(
+                            node::member(Some(child), "d"),
+                            "definition",
+                        ))
+                        .map(pm_model::JsString::to_string_lossy)
+                        .unwrap_or_default();
+                        def == crate::scene3d::legacy::SCENE3D_DEFINITION
+                            || b.options3d.mesh_definitions.contains_key(&def)
+                    })
+            });
+            let try_window = continuous
+                && !is_source_raster
+                && b.source_raster.is_none()
+                && b.material.is_none()
+                && !sub_has_screen3d
+                && (full_tw_uncapped > oversize_w || full_th_uncapped > oversize_h)
+                && !scope.has_renderable_effects(layer, time)?;
+
+            let windowed_rect = if try_window {
+                let offset = scope.size_anchor_offset(layer, time)?;
+                let sub_has_fx = sub.layers().iter().any(|child| {
+                    let is_source = node::string(node::member(Some(child), "effectSpace"))
+                        .is_some_and(|s| s.as_bytes() == b"source");
+                    !is_source
+                        && node::array(node::member(Some(child), "fx"))
+                            .is_some_and(|fx| !fx.is_empty())
+                });
+                let pad = 8.0 + if sub_has_fx { 128.0 } else { 0.0 };
+                let vw = f64::from(width);
+                let vh = f64::from(height);
+                let vp_corners = [
+                    [-pad, -pad],
+                    [vw + pad, -pad],
+                    [vw + pad, vh + pad],
+                    [-pad, vh + pad],
+                ];
+                let local_bounds = if scope.is_3d_layer(layer)? {
+                    crate::space25d::projected(scope, layer, time, scale, w, hh, -offset.x, -offset.y)?
+                        .map(|p| plane_at_origin(p, b.origin))
+                        .and_then(|p| pm_eval::space3d::inverse_plane(&p))
+                        .and_then(|inv| {
+                            let mut lo = [f64::INFINITY; 2];
+                            let mut hi = [f64::NEG_INFINITY; 2];
+                            for [px, py] in vp_corners {
+                                let denom = inv[2] * px + inv[5] * py + inv[8];
+                                if !denom.is_finite() || denom <= 1e-6 {
+                                    return None;
+                                }
+                                let lx = ((inv[0] * px + inv[3] * py + inv[6]) / denom) * w;
+                                let ly = ((inv[1] * px + inv[4] * py + inv[7]) / denom) * hh;
+                                if !(lx.is_finite() && ly.is_finite()) {
+                                    return None;
+                                }
+                                lo[0] = lo[0].min(lx);
+                                lo[1] = lo[1].min(ly);
+                                hi[0] = hi[0].max(lx);
+                                hi[1] = hi[1].max(ly);
+                            }
+                            Some((lo, hi))
+                        })
+                } else {
+                    let world = b.world(scope, layer, time, scale)?;
+                    let m = mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]);
+                    let det = m[0] * m[3] - m[1] * m[2];
+                    if det.is_finite() && det.abs() > 1e-12 {
+                        let mut lo = [f64::INFINITY; 2];
+                        let mut hi = [f64::NEG_INFINITY; 2];
+                        for [px, py] in vp_corners {
+                            let dx = px - m[4];
+                            let dy = py - m[5];
+                            let lx = (m[3] * dx - m[2] * dy) / det;
+                            let ly = (-m[1] * dx + m[0] * dy) / det;
+                            lo[0] = lo[0].min(lx);
+                            lo[1] = lo[1].min(ly);
+                            hi[0] = hi[0].max(lx);
+                            hi[1] = hi[1].max(ly);
+                        }
+                        Some((lo, hi))
+                    } else {
+                        None
+                    }
+                };
+                if let Some((lo, hi)) = local_bounds {
+                    let u0 = lo[0].clamp(0.0, w);
+                    let v0 = lo[1].clamp(0.0, hh);
+                    let u1 = hi[0].clamp(0.0, w);
+                    let v1 = hi[1].clamp(0.0, hh);
+                    if u1 <= u0 + 1e-6 || v1 <= v0 + 1e-6 {
+                        return Ok(None);
+                    }
+                    let playback = !b.final_output
+                        && (b.read_ahead || b.sampling == crate::sampling::Sampling::Playback);
+                    let max_edge = if playback {
+                        f64::from(width.max(height)).mul_add(1.25, 256.0).clamp(2048.0, 4096.0)
+                    } else {
+                        (f64::from(width.max(height)) * 2.0).clamp(8192.0, crate::sampling::MAX_TARGET)
+                    };
+                    let mut eff_dx = raw_dx;
+                    let mut eff_dy = raw_dy;
+                    let raw_win_w = (u1 - u0) * eff_dx;
+                    let raw_win_h = (v1 - v0) * eff_dy;
+                    let peak = raw_win_w.max(raw_win_h);
+                    if peak > max_edge && peak.is_finite() {
+                        let shrink = max_edge / peak;
+                        eff_dx *= shrink;
+                        eff_dy *= shrink;
+                    }
+                    let full_tw = (w * eff_dx).max(2.0);
+                    let full_th = (hh * eff_dy).max(2.0);
+                    let full_tw_lim = full_tw.floor().max(2.0);
+                    let full_th_lim = full_th.floor().max(2.0);
+                    let mut x0 = (u0 * eff_dx).floor().clamp(0.0, (full_tw_lim - 2.0).max(0.0));
+                    let mut y0 = (v0 * eff_dy).floor().clamp(0.0, (full_th_lim - 2.0).max(0.0));
+                    let mut x1 = (u1 * eff_dx).ceil().clamp(x0 + 2.0, full_tw_lim);
+                    let mut y1 = (v1 * eff_dy).ceil().clamp(y0 + 2.0, full_th_lim);
+                    // Snap playback window dimensions to 64px buckets so animated
+                    // scale-ins reuse the same GPU target in TargetPool every frame.
+                    if playback {
+                        let snap = |start: &mut f64, end: &mut f64, lim: f64| {
+                            let target_len = ((*end - *start) / 64.0).ceil() * 64.0;
+                            let len = target_len.clamp(2.0, lim.min(max_edge.floor()));
+                            if *start + len <= lim {
+                                *end = *start + len;
+                            } else {
+                                *end = lim;
+                                *start = (lim - len).max(0.0);
+                            }
+                        };
+                        snap(&mut x0, &mut x1, full_tw_lim);
+                        snap(&mut y0, &mut y1, full_th_lim);
+                    }
+                    let win_w = (x1 - x0).round().clamp(2.0, crate::sampling::MAX_TARGET) as u32;
+                    let win_h = (y1 - y0).round().clamp(2.0, crate::sampling::MAX_TARGET) as u32;
+                    Some((x0, y0, win_w, win_h, full_tw, full_th))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let child_time = scope.source_time(layer, time, Some(&mut b.retime))?;
+            let child_time = crate::retime::keep_frame_rate(layer, &sub, child_time);
+            // The child's video frames follow the center time of this level
+            // inside motion-blur samples.
+            let outer_center = b.video_center;
+            if let Some(center) = outer_center {
+                let c = scope.source_time(layer, center, Some(&mut b.retime))?;
+                b.video_center = Some(crate::retime::keep_frame_rate(layer, &sub, c));
+            }
+
+            if let Some((ox, oy, win_w, win_h, full_tw, full_th)) = windowed_rect {
+                let cw_sub = node::to_number(sub.member("w"));
+                let ch_sub = node::to_number(sub.member("h"));
+                let or_dim = |v: f64, f: f64| if v.is_nan() || v == 0.0 { f } else { v };
+                let inner_scale = (
+                    full_tw / js::max(1.0, or_dim(cw_sub, w)),
+                    full_th / js::max(1.0, or_dim(ch_sub, hh)),
+                );
+                b.precomp_depth += 1;
+                let outer_origin = std::mem::replace(&mut b.origin, (ox, oy));
+                let outer_windowed = std::mem::replace(&mut b.windowed, true);
+                let project = scope.project;
+                let inner = {
+                    let mut inner_scope = Scope::new(&mut *scope.ev, &sub, project);
+                    inner_scope.memoize_transforms();
+                    comp_pass(
+                        &mut inner_scope,
+                        b,
+                        child_time,
+                        win_w,
+                        win_h,
+                        inner_scale,
+                        true,
+                        None,
+                    )
+                };
+                b.precomp_depth -= 1;
+                b.origin = outer_origin;
+                b.windowed = outer_windowed;
+                b.video_center = outer_center;
+                let local_x0 = (ox / full_tw) * w;
+                let local_y0 = (oy / full_th) * hh;
+                let local_w = (f64::from(win_w) / full_tw) * w;
+                let local_h = (f64::from(win_h) / full_th) * hh;
+                return Ok(Some(Quad::Texture {
+                    source: Source::Comp(Arc::new(inner)),
+                    w: local_w,
+                    h: local_h,
+                    ax: -local_x0,
+                    ay: -local_y0,
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                }));
+            }
+
+            let (tw, th) = if continuous && !camera_preview {
+                let density = if is_source_raster {
                     scale
                 } else {
                     crate::sampling::precomp_density(scope, layer, time, scale, w, hh)?
@@ -2392,7 +2939,8 @@ fn native_content_quad<'d>(
                     js::max(2.0, js::round(hh * scale.1)),
                 )
             };
-            if !(tw.is_finite() && th.is_finite()) || tw > 16384.0 || th > 16384.0 {
+            if !(tw.is_finite() && th.is_finite()) {
+                b.video_center = outer_center;
                 b.failures.push(LayerFailure {
                     composition: comp_id,
                     layer: js::layer_id(layer),
@@ -2400,20 +2948,19 @@ fn native_content_quad<'d>(
                 });
                 return Ok(None);
             }
-            let (tw, th) = (tw as u32, th as u32);
-            let sub = match Comp::in_root(root, &sub_id, scope.comp.revision()) {
-                Ok(c) => c,
-                Err(_) => return Ok(None),
+            // In interactive viewer frames (not final export), a grazing 3D
+            // precomp whose horizon crosses the viewport cannot use the
+            // sub-window fast path; cap its fallback target so corner_density
+            // near w -> 0 cannot allocate a 16384x16384 (2 GiB) working target.
+            let target_cap = if !b.final_output && scope.is_3d_layer(layer)? {
+                (f64::from(width.max(height)) * 2.0).clamp(2048.0, 4096.0)
+            } else {
+                crate::sampling::MAX_TARGET
             };
-            let child_time = scope.source_time(layer, time, Some(&mut b.retime))?;
-            let child_time = crate::retime::keep_frame_rate(layer, &sub, child_time);
-            // The child's video frames follow the center time of this level
-            // inside motion-blur samples.
-            let outer_center = b.video_center;
-            if let Some(center) = outer_center {
-                let c = scope.source_time(layer, center, Some(&mut b.retime))?;
-                b.video_center = Some(crate::retime::keep_frame_rate(layer, &sub, c));
-            }
+            let (tw, th) = (
+                tw.min(target_cap) as u32,
+                th.min(target_cap) as u32,
+            );
             let inner_scale = derived_scale(&sub, tw, th);
             b.precomp_depth += 1;
             // A precomp renders its own target from its own origin (today's
@@ -2441,7 +2988,7 @@ fn native_content_quad<'d>(
             b.windowed = outer_windowed;
             b.video_center = outer_center;
             Ok(Some(Quad::Texture {
-                source: Source::Comp(Box::new(inner)),
+                source: Source::Comp(Arc::new(inner)),
                 w,
                 h: hh,
                 ax: 0.0,
@@ -3003,6 +3550,7 @@ fn offline_card<'d>(
             b.origin,
             target,
             (b.read_ahead || playback) && !b.final_output,
+            false,
             &mut plan,
         )
         .map(Some);
@@ -3026,46 +3574,72 @@ fn vector_world<'d>(
     Ok(mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]))
 }
 
-/// Raster small 2D shapes on a stable local grid during playback. The
-/// world transform moves the quad each frame, while its coverage can be
-/// reused until the geometry or the raster density changes.
+/// A small shape can keep its layer-space raster while the transform
+/// changes. Large shapes still paint directly into the visible target.
 fn playback_shape<'d>(
     scope: &mut Scope<'_, 'd>,
     layer: &'d Node,
     content: &pm_eval::Content,
     time: f64,
     world: &Mat2d,
+    target: pm_vector::render::scene::PixelRect,
 ) -> JsResult<Option<Quad>> {
-    let density = crate::text::continuous_raster_scale(world);
-    let local = [density, 0., 0., density, 0., 0.];
-    let bounds = crate::space25d::local::unbounded();
-    let Some(crate::vector::VectorQuad::Device { source, rect }) =
-        crate::vector::plan_shape(scope, layer, content, time, &local, bounds)?
+    use crate::vector::{VectorQuad, VectorSource};
+    let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let clip = crate::space25d::local::unbounded();
+    let Some(mut scene) = crate::vector::shape_coverage(scope, layer, content, time, &identity)?
     else {
         return Ok(None);
     };
-    // Large shapes keep the device path, where the viewport can bound the
-    // coverage before it is rasterized. A shape touching the local limit
-    // may have been clipped by the planning bounds.
-    if rect.area() > 256 * 1024
-        || rect.width > 4096
-        || rect.height > 4096
-        || rect.x <= bounds.x
-        || rect.y <= bounds.y
-        || i64::from(rect.x) + i64::from(rect.width)
-            >= i64::from(bounds.x) + i64::from(bounds.width)
-        || i64::from(rect.y) + i64::from(rect.height)
-            >= i64::from(bounds.y) + i64::from(bounds.height)
-    {
-        return Ok(None);
+    let density = crate::text::playback_raster_scale(world);
+    if let Some(rect) = scene.pixel_bounds(clip).filter(|rect| {
+        let w = f64::from(rect.width) * density + 2.0;
+        let h = f64::from(rect.height) * density + 2.0;
+        rect.x > clip.x
+            && rect.y > clip.y
+            && i64::from(rect.x) + i64::from(rect.width) < i64::from(clip.x) + i64::from(clip.width)
+            && i64::from(rect.y) + i64::from(rect.height)
+                < i64::from(clip.y) + i64::from(clip.height)
+            && w * h <= 256.0 * 1024.0
+            && w <= 4096.0
+            && h <= 4096.0
+    }) {
+        let affine = kurbo::Affine::new(*world);
+        let bounds = affine.transform_rect_bbox(kurbo::Rect::new(
+            f64::from(rect.x),
+            f64::from(rect.y),
+            f64::from(rect.x) + f64::from(rect.width),
+            f64::from(rect.y) + f64::from(rect.height),
+        ));
+        if bounds.x1 < -1.0
+            || bounds.y1 < -1.0
+            || bounds.x0 > f64::from(target.width) + 1.0
+            || bounds.y0 > f64::from(target.height) + 1.0
+        {
+            return Ok(None);
+        }
+        let affine = kurbo::Affine::scale(density);
+        for item in &mut scene.items {
+            item.transform = affine * item.transform;
+        }
+        return Ok(scene.pixel_bounds(clip).map(|rect| Quad::Texture {
+            source: Source::Vector(Arc::new(VectorSource::Scene { scene, rect })),
+            w: f64::from(rect.width) / density,
+            h: f64::from(rect.height) / density,
+            ax: -f64::from(rect.x) / density,
+            ay: -f64::from(rect.y) / density,
+            uv: [0., 0., 1., 1.],
+        }));
     }
-    Ok(Some(Quad::Texture {
-        source: Source::Vector(Box::new(source)),
-        w: f64::from(rect.width) / density,
-        h: f64::from(rect.height) / density,
-        ax: -f64::from(rect.x) / density,
-        ay: -f64::from(rect.y) / density,
-        uv: [0., 0., 1., 1.],
+    let affine = kurbo::Affine::new(*world);
+    for item in &mut scene.items {
+        item.transform = affine * item.transform;
+    }
+    Ok(scene.pixel_bounds(target).map(|rect| {
+        device_quad(VectorQuad::Device {
+            source: VectorSource::Scene { scene, rect },
+            rect,
+        })
     }))
 }
 
@@ -3093,6 +3667,7 @@ fn local_level2<'d>(
     origin: (f64, f64),
     target: pm_vector::render::scene::PixelRect,
     playback: bool,
+    camera_preview: bool,
     plan: &mut PlanVector<'_, 'd>,
 ) -> JsResult<Option<Quad>> {
     let clip = crate::space25d::local::unbounded();
@@ -3106,21 +3681,34 @@ fn local_level2<'d>(
         f64::from(r.width),
         f64::from(r.height),
     ];
-    let (dx, dy) = crate::space25d::local::density(scope, layer, time, scale, bounds)?;
+    // A moving viewer uses the output grid's density in layer space.
+    // Its texture can be retained while only the projected quad changes.
+    let (dx, dy) = if camera_preview {
+        scale
+    } else {
+        crate::space25d::local::density(scope, layer, time, scale, bounds)?
+    };
     if let crate::vector::VectorQuad::Device {
         source: crate::vector::VectorSource::Scene { scene, .. },
         ..
     } = first
     {
         // During live playback, rasterize 2.5D vector scenes once in layer
-        // space at a quarter-octave stepped density and project the cached
+        // space at a stepped density and project the cached
         // GPU texture through the 2.5D plane, avoiding per-frame CPU curve
         // flattening (`project_scene`) and 100% vector cache misses while a
         // 3D group animates. Paused/settled/export frames keep exact
         // output-space `project_scene` coverage.
+        let plane = crate::space25d::local::content_plane(scope, layer, time, scale)?
+            .map(|p| plane_at_origin(p, origin));
         if playback {
-            let sdx = crate::space25d::local::stepped(dx, bounds[2]);
-            let sdy = crate::space25d::local::stepped(dy, bounds[3]);
+            if plane.is_some_and(|p| {
+                crate::space25d::local::outside_target(&p, bounds, target.width, target.height)
+            }) {
+                return Ok(None);
+            }
+            let sdx = crate::space25d::local::playback_density_capped(dx, bounds[2]);
+            let sdy = crate::space25d::local::playback_density_capped(dy, bounds[3]);
             let scale_aff = pm_vector::kurbo::Affine::scale_non_uniform(sdx, sdy);
             let mut local_scene = scene.clone();
             for item in &mut local_scene.items {
@@ -3132,7 +3720,7 @@ fn local_level2<'d>(
                 && rect.height <= 4096
             {
                 return Ok(Some(Quad::Texture {
-                    source: Source::Vector(Box::new(crate::vector::VectorSource::Scene {
+                    source: Source::Vector(Arc::new(crate::vector::VectorSource::Scene {
                         scene: local_scene,
                         rect,
                     })),
@@ -3144,9 +3732,7 @@ fn local_level2<'d>(
                 }));
             }
         }
-        if let Some(plane) = crate::space25d::local::content_plane(scope, layer, time, scale)?
-            .map(|p| plane_at_origin(p, origin))
-        {
+        if let Some(plane) = plane {
             let projected = crate::space25d::local::project_scene(&scene, &plane, dx.max(dy));
             return Ok(projected.pixel_bounds(target).map(|rect| {
                 device_quad(crate::vector::VectorQuad::Device {
@@ -3172,7 +3758,7 @@ fn local_level2<'d>(
     };
     let crate::vector::VectorQuad::Device { source, rect } = second;
     Ok(Some(Quad::Texture {
-        source: Source::Vector(Box::new(source)),
+        source: Source::Vector(Arc::new(source)),
         w: f64::from(rect.width) / dx,
         h: f64::from(rect.height) / dy,
         ax: -f64::from(rect.x) / dx,
@@ -3185,7 +3771,7 @@ fn local_level2<'d>(
 fn device_quad(q: crate::vector::VectorQuad) -> Quad {
     match q {
         crate::vector::VectorQuad::Device { source, rect } => Quad::Device {
-            source: Source::Vector(Box::new(source)),
+            source: Source::Vector(Arc::new(source)),
             rect: [
                 f64::from(rect.x),
                 f64::from(rect.y),
@@ -3210,11 +3796,13 @@ fn text_quad<'d>(
     time: f64,
     target: (u32, u32),
     scale: (f64, f64),
-    measured: Option<crate::text::Level1Measured>,
+    mut measured: Option<crate::text::Level1Measured>,
     mut deferred: Option<DeferredText<'_>>,
 ) -> JsResult<Option<Quad>> {
     let comp_id = scope.comp.id().to_string_lossy();
     let world = b.world(scope, layer, time, scale)?;
+    let camera_preview = b.camera_preview() && scope.view_camera.is_some();
+    let interactive = b.interactive_rasters() && b.source_raster.is_none() && b.material.is_none();
     let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
         b.unsupported.push(Unsupported::layer(
             &comp_id,
@@ -3230,8 +3818,8 @@ fn text_quad<'d>(
     if level2 && let Some(defer) = deferred.take() {
         defer.paint.flush(text);
     }
-    if level2 && scope.is_3d_layer(layer)? {
-        return local_text(scope, b, layer, ty, time, scale);
+    if (level2 || camera_preview) && scope.is_3d_layer(layer)? {
+        return local_text(scope, b, layer, ty, time, target, scale);
     }
     if level2 {
         let offset = scope.size_anchor_offset(layer, time)?;
@@ -3257,10 +3845,11 @@ fn text_quad<'d>(
     }
     // Read-ahead identifies transport playback independently of sampling.
     // Reuse the local raster for plain 2D text during viewer playback.
-    let reuse_local =
-        b.read_ahead && !b.final_output && ty == "text" && crate::text::plain_level1(layer);
+    let reuse_local = interactive && ty == "text" && crate::text::plain_level1(layer);
     let plane = scope.is_3d_layer(layer)?;
-    let device_world = if plane {
+    let device_world = if reuse_local {
+        None
+    } else if plane {
         crate::space25d::local::content_plane(scope, layer, time, scale)?
             .map(|p| plane_at_origin(p, b.origin))
             .filter(|p| {
@@ -3272,7 +3861,7 @@ fn text_quad<'d>(
             })
             .filter(|m| m.iter().all(|v| v.is_finite()))
     } else {
-        (!reuse_local).then_some(world)
+        Some(world)
     };
     if let Some(m) = device_world.filter(|m| !crate::raster_roi::at_rest(m)) {
         let m = kurbo::Affine::new(m);
@@ -3294,7 +3883,30 @@ fn text_quad<'d>(
             }
         }));
     }
-    let density = crate::text::continuous_raster_scale(&world);
+    let density = if reuse_local {
+        if plane {
+            // Only paint the layer-local raster when some part of it can
+            // reach the viewport through the animated group plane.
+            if let Some(projected) =
+                crate::space25d::local::content_plane(scope, layer, time, scale)?
+            {
+                let (raster, local) = text.level1_raster(scope, layer, time)?;
+                let bounds = [-raster.anchor_x, -raster.anchor_y, raster.w, raster.h];
+                if crate::space25d::local::outside_target(
+                    &plane_at_origin(projected, b.origin),
+                    bounds,
+                    target.0,
+                    target.1,
+                ) {
+                    return Ok(None);
+                }
+                measured = local.or(measured);
+            }
+        }
+        crate::text::playback_raster_scale(&world)
+    } else {
+        crate::text::continuous_raster_scale(&world)
+    };
     let plain = !plane && crate::text::plain_level1(layer);
     if !plain && let Some(defer) = deferred.take() {
         defer.paint.flush(text);
@@ -3351,10 +3963,13 @@ fn local_text<'d>(
     layer: &'d Node,
     ty: &str,
     time: f64,
+    target: (u32, u32),
     scale: (f64, f64),
 ) -> JsResult<Option<Quad>> {
     const MARGIN: f64 = 65536.0;
     let comp_id = scope.comp.id().to_string_lossy();
+    let camera_preview = b.camera_preview() && scope.view_camera.is_some();
+    let interactive = b.interactive_rasters() && b.material.is_none() && b.source_raster.is_none();
     let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
         return Ok(None);
     };
@@ -3382,11 +3997,28 @@ fn local_text<'d>(
     };
     let [x0, y0, x1, y1] = first.crop.map(f64::from);
     let bounds = [x0 - MARGIN, y0 - MARGIN, x1 - x0, y1 - y0];
-    let (dx, dy) = crate::space25d::local::density(scope, layer, time, scale, bounds)?;
-    let (dx, dy) = (
-        crate::space25d::local::stepped(dx, bounds[2]),
-        crate::space25d::local::stepped(dy, bounds[3]),
-    );
+    if interactive
+        && let Some(plane) = crate::space25d::local::content_plane(scope, layer, time, scale)?
+        && crate::space25d::local::outside_target(
+            &plane_at_origin(plane, b.origin),
+            bounds,
+            target.0,
+            target.1,
+        )
+    {
+        return Ok(None);
+    }
+    let (dx, dy) = if camera_preview {
+        scale
+    } else {
+        crate::space25d::local::density(scope, layer, time, scale, bounds)?
+    };
+    let step = if interactive {
+        crate::space25d::local::playback_density_capped
+    } else {
+        crate::space25d::local::stepped
+    };
+    let (dx, dy) = (step(dx, bounds[2]), step(dy, bounds[3]));
     // Layer space at density, shifted so the content starts near the
     // canvas origin.
     let (ox, oy) = (
@@ -3982,7 +4614,7 @@ fn effect_inputs_once<'d>(
                         &[e.width, 0., 0., e.height, e.x, e.y],
                     ),
                     content: Content::Texture {
-                        source: Source::Comp(Box::new(plan)),
+                        source: Source::Comp(Arc::new(plan)),
                         uv: [0., 0., 1., 1.],
                         alpha: 1.,
                     },
@@ -4260,20 +4892,20 @@ mod tests {
             ] {
                 // A member that draws: the group draws.
                 assert_eq!(
-                    draws(&effects, &document(fx.clone(), 0., none), o),
+                    draws(&effects, &document(fx.clone(), 0., none), o.clone()),
                     1,
                     "{fx}"
                 );
                 // None does: left out.
                 assert_eq!(
-                    draws(&effects, &document(fx.clone(), 5., none), o),
+                    draws(&effects, &document(fx.clone(), 5., none), o.clone()),
                     0,
                     "{fx}"
                 );
                 // Kept for the depth and id surface.
                 let keep = BuildOptions {
                     keep_empty_groups: true,
-                    ..o
+                    ..o.clone()
                 };
                 assert_eq!(
                     draws(&effects, &document(fx.clone(), 5., half), keep),
@@ -4282,12 +4914,15 @@ mod tests {
                 );
                 // At half opacity (a boundary for that alone without
                 // effects): left out the same way.
-                assert_eq!(draws(&effects, &document(fx, 5., half), o), 0);
+                assert_eq!(draws(&effects, &document(fx, 5., half), o.clone()), 0);
             }
             // An effect switched off is not a stage.
             let mut off = gradient();
             off["on"] = json!(false);
-            assert_eq!(draws(&effects, &document(json!([off]), 5., half), o), 0);
+            assert_eq!(
+                draws(&effects, &document(json!([off]), 5., half), o.clone()),
+                0
+            );
         }
 
         #[test]
@@ -4297,21 +4932,25 @@ mod tests {
             let o = BuildOptions::default();
             // A generator draws from a transparent input.
             assert_eq!(
-                draws(&effects, &document(json!([gradient()]), 5., none), o),
+                draws(&effects, &document(json!([gradient()]), 5., none), o.clone()),
                 1
             );
             assert_eq!(
                 draws(
                     &effects,
                     &document(json!([dots(), gradient()]), 5., none),
-                    o
+                    o.clone()
                 ),
                 1
             );
             // A non-normal blend.
             let multiply = |g: &mut Value| g["blend"] = json!("multiply");
             assert_eq!(
-                draws(&effects, &document(json!([dots()]), 5., multiply), o),
+                draws(
+                    &effects,
+                    &document(json!([dots()]), 5., multiply),
+                    o.clone()
+                ),
                 1
             );
             // `dot-matrix-resolve` from another source (one byte changed):
@@ -4321,7 +4960,11 @@ mod tests {
             changed.replace_range(at..at + 1, "6");
             let unreviewed = host(&changed);
             assert_eq!(
-                draws(&unreviewed, &document(json!([dots()]), 5., none), o),
+                draws(
+                    &unreviewed,
+                    &document(json!([dots()]), 5., none),
+                    o.clone()
+                ),
                 1
             );
             assert_eq!(

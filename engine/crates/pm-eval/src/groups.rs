@@ -342,19 +342,8 @@ impl<'d> Scope<'_, 'd> {
         parent_group: Option<&JsValue>,
         boundary: &mut dyn FnMut(&mut Self, &'d Node) -> JsResult<bool>,
     ) -> JsResult<Vec<&'d Node>> {
-        debug_assert_eq!(owners.0.len(), layers.len());
-        let members = |parent: Option<&JsValue>| -> Vec<&'d Node> {
-            layers
-                .iter()
-                .zip(&owners.0)
-                .filter(|(_, owner)| match (owner, parent) {
-                    (None, None) => true,
-                    (Some(a), Some(b)) => js_sem::strict_eq(a, b),
-                    _ => false,
-                })
-                .map(|(l, _)| *l)
-                .collect()
-        };
+        debug_assert_eq!(owners.owners.len(), layers.len());
+        let members = |parent: Option<&JsValue>| owners.members(layers, parent);
         let mut result = Vec::new();
         let mut stack: Vec<std::vec::IntoIter<&'d Node>> = vec![members(parent_group).into_iter()];
         while let Some(level) = stack.last_mut() {
@@ -391,19 +380,75 @@ impl<'d> Scope<'_, 'd> {
 /// scan of every layer's `group` member per group was 9% of a viewer frame
 /// (docs/engine/perf.md).
 #[derive(Debug, Clone)]
-pub struct LayerOwners(Vec<Option<JsValue>>);
+pub struct LayerOwners {
+    owners: Vec<Option<JsValue>>,
+    roots: Vec<usize>,
+    groups: std::collections::HashMap<JsString, Vec<usize>>,
+}
 
 impl LayerOwners {
     pub fn of(layers: &[&Node]) -> LayerOwners {
-        LayerOwners(
-            layers
+        let mut out = Self {
+            owners: Vec::with_capacity(layers.len()),
+            roots: Vec::new(),
+            groups: Default::default(),
+        };
+        for (index, layer) in layers.iter().enumerate() {
+            let value = node::get(layer, b"group");
+            let owner = value.truthy().then(|| value.to_js());
+            match &owner {
+                None => out.roots.push(index),
+                Some(JsValue::String(id)) => out.groups.entry(id.clone()).or_default().push(index),
+                _ => {}
+            }
+            out.owners.push(owner);
+        }
+        out
+    }
+
+    fn members<'d>(&self, layers: &[&'d Node], parent: Option<&JsValue>) -> Vec<&'d Node> {
+        match parent {
+            None => self.roots.iter().map(|&i| layers[i]).collect(),
+            Some(JsValue::String(id)) => self
+                .groups
+                .get(id)
+                .into_iter()
+                .flatten()
+                .map(|&i| layers[i])
+                .collect(),
+            Some(id) => self
+                .owners
                 .iter()
-                .map(|l| {
-                    let g = node::get(l, b"group");
-                    if g.truthy() { Some(g.to_js()) } else { None }
+                .zip(layers)
+                .filter_map(|(owner, &layer)| {
+                    owner
+                        .as_ref()
+                        .is_some_and(|o| js_sem::strict_eq(o, id))
+                        .then_some(layer)
                 })
                 .collect(),
-        )
+        }
+    }
+
+    /// The members of a string-id group, in the flat layer list. A cycle
+    /// or malformed subgroup cannot be kept across plans.
+    pub fn descendants<'d>(&self, layers: &'d [Node], id: &JsString) -> Option<Vec<&'d Node>> {
+        let mut stack = vec![id.clone()];
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        while let Some(group) = stack.pop() {
+            if !seen.insert(group.clone()) {
+                return None;
+            }
+            for &i in self.groups.get(&group).into_iter().flatten() {
+                let layer = layers.get(i)?;
+                out.push(layer);
+                if is_type(layer, "group") {
+                    stack.push(node::string(node::member(Some(layer), "id"))?.clone());
+                }
+            }
+        }
+        Some(out)
     }
 }
 

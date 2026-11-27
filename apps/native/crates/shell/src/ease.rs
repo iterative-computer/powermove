@@ -124,18 +124,10 @@ pub struct Look {
     pub dot: Option<f64>,
 }
 
-/// The editor: its well, the unit square and the linear diagonal faintly,
-/// the curve in the accent, the handle lines and their knobs, the preview
-/// dot.
+/// The editor's grid, curve, handles and preview dot.
 pub fn paint_editor(graph: Graph, curve: &Curve, look: Look, t: &Tokens, window: &mut Window) {
     let c = &t.colors;
-    let dark = t.scheme == pm_design::Scheme::Dark;
-    let strong = if t.accessibility.increase_contrast {
-        1.8
-    } else {
-        1.
-    };
-    let alpha = if look.disabled { 0.4 } else { 1. };
+    let alpha = if look.disabled { 0.45 } else { 1. };
     let w = t.metrics.border;
     let pad = px(t.metrics.keyframe / 2. + w);
     let a = graph.area;
@@ -143,116 +135,87 @@ pub fn paint_editor(graph: Graph, curve: &Curve, look: Look, t: &Tokens, window:
         a.origin - point(pad, pad),
         size(a.size.width + pad * 2., a.size.height + pad * 2.),
     );
-    let corners = Corners::all(px(t.metrics.control_radius));
     window.paint_quad(
         PaintQuad::new(well)
-            .background(crate::kit::ink(0, if dark { 0.38 } else { 0.06 }))
-            .corner_radii(corners),
+            .background(crate::kit::ink(c.field, 1.))
+            .corner_radii(Corners::all(px(t.metrics.control_radius)))
+            .border_widths(px(w))
+            .border_color(crate::kit::ink(c.text, t.translucency.grid)),
     );
-    window.paint_inset_shadows(
-        well,
-        corners,
-        0.,
-        &[BoxShadow {
-            inset: true,
-            color: crate::kit::ink(0, if dark { 0.6 } else { 0.18 }).into(),
-            offset: point(px(0.), px(2.)),
-            blur_radius: px(4.),
-            spread_radius: px(0.),
-        }],
-    );
-    // The unit square: where the motion starts (0) and lands (1).
-    let faint = crate::kit::ink(c.text, t.translucency.grid * alpha * strong);
-    for (from, to) in [
-        ((0., 0.), (1., 0.)),
-        ((0., 1.), (1., 1.)),
-        ((0., 0.), (0., 1.)),
-        ((1., 0.), (1., 1.)),
-    ] {
-        line(graph.to_point(from), graph.to_point(to), w, faint, window);
+    let contrast = if t.accessibility.increase_contrast {
+        1.8
+    } else {
+        1.
+    };
+    let faint = crate::kit::ink(c.text, t.translucency.grid * contrast);
+    for n in [0., 0.25, 0.5, 0.75, 1.] {
+        line(
+            graph.to_point((n, 0.)),
+            graph.to_point((n, 1.)),
+            w,
+            faint,
+            window,
+        );
+        line(
+            graph.to_point((0., n)),
+            graph.to_point((1., n)),
+            w,
+            faint,
+            window,
+        );
     }
-    // Linear, for reference.
-    line(
-        graph.to_point((0., 0.)),
-        graph.to_point((1., 1.)),
-        w,
-        crate::kit::ink(c.text, t.translucency.line * 2. * alpha * strong),
-        window,
-    );
-    if look.disabled {
-        return;
-    }
-    let ink = crate::kit::ink(c.accent, alpha);
+
+    let accent = crate::kit::ink(c.accent, alpha);
+    let text = crate::kit::ink(c.text, alpha);
     let handles = [(curve[0], curve[1]), (curve[2], curve[3])];
     let ends = [(0., 0.), (1., 1.)];
-    for (end, handle) in ends.iter().zip(handles) {
-        line(
-            graph.to_point(*end),
-            graph.to_point(handle),
-            w,
-            crate::kit::ink(c.secondary, alpha),
-            window,
-        );
+    for (end, handle) in ends.into_iter().zip(handles) {
+        let from = graph.to_point(end);
+        let to = graph.to_point(handle);
+        if from != to {
+            let mut path = PathBuilder::stroke(px(1.)).dash_array(&[px(3.), px(3.)]);
+            path.move_to(from);
+            path.line_to(to);
+            if let Ok(path) = path.build() {
+                window.paint_path(path, accent);
+            }
+        }
     }
-    let mut path = PathBuilder::stroke(px(w * 2.));
-    path.move_to(graph.to_point((0., 0.)));
-    path.cubic_bezier_to(
-        graph.to_point((1., 1.)),
-        graph.to_point(handles[0]),
-        graph.to_point(handles[1]),
-    );
-    if let Ok(path) = path.build() {
-        window.paint_path(path, ink);
-    }
+    paint_curve(&graph, curve, PathBuilder::stroke(px(1.9)), text, window);
     for end in ends {
-        dot(
-            graph.to_point(end),
-            w * 4.,
-            crate::kit::ink(c.text, alpha),
-            window,
-        );
+        window.paint_quad(PaintQuad::new(marker(graph.to_point(end), 5.)).background(text));
     }
-    let d = t.metrics.keyframe;
+
     for (i, h) in handles.iter().enumerate() {
         let held = look.held == Some(i);
-        let side = if held { d + 2. * w + 2. } else { d };
-        let at = graph.to_point(*h);
-        let b = Bounds::new(
-            at - point(px(side / 2.), px(side / 2.)),
-            size(px(side), px(side)),
-        );
+        let b = marker(graph.to_point(*h), if held { 9. } else { 7. });
+        let corners = Corners::all(b.size.width / 2.);
         window.paint_drop_shadows(
             b,
-            Corners::all(b.size.width / 2.),
+            corners,
             0.,
             &[BoxShadow {
-                color: crate::kit::ink(0, 0.55 * alpha).into(),
+                color: crate::kit::ink(0, 0.35 * alpha).into(),
                 offset: point(px(0.), px(1.)),
-                blur_radius: px(2.5),
+                blur_radius: px(2.),
                 spread_radius: px(0.),
                 inset: false,
             }],
         );
-        let body = if held {
-            ink
-        } else {
-            crate::kit::ink(if dark { 0xf2f2f2 } else { 0xffffff }, alpha)
-        };
         window.paint_quad(
             PaintQuad::new(b)
-                .corner_radii(Corners::all(b.size.width / 2.))
-                .background(body)
-                .border_widths(px(w * 1.5))
-                .border_color(ink),
+                .corner_radii(corners)
+                .background(accent)
+                .border_widths(px(if held { 1. } else { 0. }))
+                .border_color(crate::kit::ink(c.text, 0.35)),
         );
     }
-    if let Some(x) = look.dot {
-        dot(graph.to_point((x, ease(curve, x))), d * 0.8, ink, window);
+    if let Some(x) = look.dot.filter(|_| !look.disabled) {
+        dot(graph.to_point((x, ease(curve, x))), 5., accent, window);
     }
 }
 
-/// A preset's thumbnail: its curve over the faint diagonal, fitted to
-/// `bounds` with the overshoot it has.
+/// A preset's thumbnail, fitted to `bounds` including the curve's overshoot.
 pub fn paint_thumbnail(bounds: Bounds<Pixels>, curve: &Curve, t: &Tokens, window: &mut Window) {
     let c = &t.colors;
     let w = t.metrics.border;
@@ -270,14 +233,22 @@ pub fn paint_thumbnail(bounds: Bounds<Pixels>, curve: &Curve, t: &Tokens, window
         (lo, hi) = (lo.min(y), hi.max(y));
     }
     let graph = Graph::new(area, (lo, hi));
-    line(
-        graph.to_point((0., 0.)),
-        graph.to_point((1., 1.)),
-        w,
-        crate::kit::ink(c.text, t.translucency.line * 2.),
+    paint_curve(
+        &graph,
+        curve,
+        PathBuilder::stroke(px(1.4)),
+        crate::kit::ink(c.secondary, 1.),
         window,
     );
-    let mut path = PathBuilder::stroke(px(w * 1.5));
+}
+
+fn paint_curve(
+    graph: &Graph,
+    curve: &Curve,
+    mut path: PathBuilder,
+    ink: gpui::Rgba,
+    window: &mut Window,
+) {
     path.move_to(graph.to_point((0., 0.)));
     path.cubic_bezier_to(
         graph.to_point((1., 1.)),
@@ -285,26 +256,19 @@ pub fn paint_thumbnail(bounds: Bounds<Pixels>, curve: &Curve, t: &Tokens, window
         graph.to_point((curve[2], curve[3])),
     );
     if let Ok(path) = path.build() {
-        window.paint_path(path, crate::kit::ink(c.text, 1.));
+        window.paint_path(path, ink);
     }
 }
 
 /// A dashed hover preview, independent of the editor's bound value and handles.
 pub fn paint_ghost(graph: Graph, curve: &Curve, t: &Tokens, window: &mut Window) {
-    for i in 0..60 {
-        if i % 3 == 2 {
-            continue;
-        }
-        let a = i as f64 / 60.;
-        let b = (i + 1) as f64 / 60.;
-        line(
-            graph.to_point(at(curve, a)),
-            graph.to_point(at(curve, b)),
-            t.metrics.border * 2.,
-            crate::kit::ink(t.colors.secondary, 1.),
-            window,
-        );
-    }
+    paint_curve(
+        &graph,
+        curve,
+        PathBuilder::stroke(px(1.4)).dash_array(&[px(4.), px(3.)]),
+        crate::kit::ink(t.colors.secondary, 0.8),
+        window,
+    );
 }
 
 fn line(from: Point<Pixels>, to: Point<Pixels>, width: f32, ink: gpui::Rgba, window: &mut Window) {
@@ -315,11 +279,15 @@ fn line(from: Point<Pixels>, to: Point<Pixels>, width: f32, ink: gpui::Rgba, win
         window.paint_path(path, ink);
     }
 }
-fn dot(at: Point<Pixels>, side: f32, ink: gpui::Rgba, window: &mut Window) {
-    let b = Bounds::new(
+fn marker(at: Point<Pixels>, side: f32) -> Bounds<Pixels> {
+    Bounds::new(
         at - point(px(side / 2.), px(side / 2.)),
         size(px(side), px(side)),
-    );
+    )
+}
+
+fn dot(at: Point<Pixels>, side: f32, ink: gpui::Rgba, window: &mut Window) {
+    let b = marker(at, side);
     window.paint_quad(
         PaintQuad::new(b)
             .corner_radii(Corners::all(b.size.width / 2.))

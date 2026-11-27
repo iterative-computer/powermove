@@ -10,6 +10,17 @@ fn main() {
         println!("cargo:rustc-link-search=native={}",out.display());println!("cargo:rustc-link-lib=static=studio_metalfx");
         for framework in ["Foundation","Metal","MetalFX","IOSurface"] {println!("cargo:rustc-link-lib=framework={framework}");}
         println!("cargo:rustc-link-lib=c++");
+        // `@available(macOS 26.0, *)` references `___isPlatformVersionAtLeast` from clang_rt.osx;
+        // LTO / stripped builds don't always inherit it transitively from other crates.
+        if let Ok(out) = std::process::Command::new("xcrun").args(["clang","--print-resource-dir"]).output()
+            && out.status.success()
+        {
+            let rt = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()).join("lib/darwin");
+            if rt.join("libclang_rt.osx.a").is_file() {
+                println!("cargo:rustc-link-search=native={}", rt.display());
+                println!("cargo:rustc-link-lib=static=clang_rt.osx");
+            }
+        }
     }
     if std::env::var_os("CARGO_FEATURE_OIDN").is_none() {
         return;

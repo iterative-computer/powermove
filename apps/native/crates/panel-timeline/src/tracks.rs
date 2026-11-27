@@ -71,8 +71,19 @@ pub fn area(kind: &str) -> Area {
     }
 }
 pub fn layout(index: &TimelineIndex, reveal: &RevealState) -> Layout {
+    layout_focused(index, reveal, None)
+}
+pub fn layout_focused(
+    index: &TimelineIndex,
+    reveal: &RevealState,
+    focused_group: Option<&str>,
+) -> Layout {
     let children = index.children();
-    let roots = index.roots(&children);
+    let roots = if let Some(gid) = focused_group {
+        children.get(&Some(gid.to_owned())).cloned().unwrap_or_default()
+    } else {
+        index.roots(&children)
+    };
     let mut units = vec![Unit::default(); index.layers.len()];
     let mut visited = HashSet::new();
     let mut order = Vec::new();
@@ -119,12 +130,11 @@ pub fn layout(index: &TimelineIndex, reveal: &RevealState) -> Layout {
                 .map(|k| units[*k].end)
                 .reduce(f64::max)
                 .unwrap_or(index.duration);
-            // Reserve the group strip and the members' lanes across both spans.
-            let (from, end) = if l.duration > 0. {
-                if kids.is_empty() {
+            let (from, end) = if kids.is_empty() {
+                if l.duration > 0. {
                     (l.from, l.from + l.duration)
                 } else {
-                    (from.min(l.from), end.max(l.from + l.duration))
+                    (0., index.duration)
                 }
             } else {
                 (from, end)

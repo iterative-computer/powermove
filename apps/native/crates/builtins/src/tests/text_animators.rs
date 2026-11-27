@@ -193,3 +193,121 @@ fn project_media_moves_are_a_plain_kernel_edit_with_undo() {
     assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
     assert_eq!(folder(&kernel), Value::Null);
 }
+
+#[test]
+fn text_size_control_resizes_each_selected_layer_about_its_anchor() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let project = json!({
+        "id":"synthetic","name":"Text size","compId":"root","w":320,"h":180,"fps":30,"dur":2,
+        "bg":"#000000","assets":{},"comps":{},
+        "layers":[
+            {"id":"point","type":"text","name":"Title","from":0,"dur":2,"on":true,
+             "p":{"position.x":{"v":160,"kf":[]},"position.y":{"v":90,"kf":[]},
+                  "anchor.x":{"v":30.1,"kf":[]},"anchor.y":{"v":60.3,"kf":[]}},
+             "d":{"text":"Title","font":"Inter","size":80,"color":"#FFFFFF"},"fx":[]},
+            {"id":"box","type":"text","name":"Paragraph","from":0,"dur":2,"on":true,
+             "p":{"position.x":{"v":50,"kf":[]},"position.y":{"v":60,"kf":[]},
+                  "anchor.x":{"v":30,"kf":[]},"anchor.y":{"v":20,"kf":[]}},
+             "d":{"text":"Paragraph","font":"Inter","size":40,"color":"#FFFFFF",
+                  "paragraph":true,"boxWidth":240},"fx":[]}
+        ]
+    });
+    kernel
+        .open(
+            "synthetic",
+            OpenSource::Untitled(data::model(&project).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let request = |call: pm_kernel::Call| {
+        let ack = kernel
+            .call("synthetic", Request::new(Caller::native(), call))
+            .wait()
+            .unwrap()
+            .unwrap();
+        assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)), "{ack:?}");
+    };
+    request(
+        SelectionCall::Layers {
+            ids: vec!["point".into(), "box".into()],
+            add: false,
+        }
+        .into(),
+    );
+
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("inspector").unwrap());
+    let publication = panels.take_publications().pop().unwrap();
+    let field = publication
+        .surface
+        .nodes()
+        .values()
+        .find(|n| n.props.get("id").and_then(Value::as_str) == Some("value:content.size:0"))
+        .expect("Size control");
+    let handle = field.props["binding"].as_str().unwrap();
+    let layers = || {
+        let p = kernel.published("synthetic").unwrap();
+        let root = p.snapshot.root().unwrap();
+        ["point", "box"].map(|id| {
+            let loc = pm_kernel::model::find_layer(root, id).unwrap();
+            data::wire(&pm_kernel::model::layer_at(root, &loc).unwrap().to_value())
+        })
+    };
+    let applied = || kernel.published("synthetic").unwrap().history.applied;
+    let initial = layers();
+    let before = applied();
+
+    finish(panels.write("inspector", handle, json!(160.)).unwrap());
+    let typed = layers();
+    assert_eq!(typed[0]["d"]["size"], 160.);
+    assert_eq!(typed[0]["p"]["anchor.x"]["v"], 60.2);
+    assert_eq!(typed[0]["p"]["anchor.y"]["v"], 120.6);
+    assert_eq!(typed[1]["d"]["size"], 160.);
+    assert_eq!(typed[1]["p"]["anchor.x"]["v"], 30.);
+    assert_eq!(typed[1]["p"]["anchor.y"]["v"], 80.);
+    for i in 0..2 {
+        for axis in ["position.x", "position.y"] {
+            assert_eq!(typed[i]["p"][axis], initial[i]["p"][axis]);
+        }
+    }
+    request(pm_kernel::HistoryCall::Undo.into());
+    assert_eq!(layers(), initial);
+
+    let ack = |pending: Result<
+        pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>,
+    >| {
+        let reply = pending.unwrap().wait().unwrap().unwrap().reply;
+        assert!(!matches!(reply, pm_kernel::Reply::Throw(_)), "{reply:?}");
+        reply
+    };
+    let begin = || match ack(panels.scrub_begin("inspector", Some("Size"))) {
+        pm_kernel::Reply::Gesture(id) => id,
+        other => panic!("no gesture: {other:?}"),
+    };
+    let step = |gesture, value| {
+        ack(panels.scrub_step("inspector", handle, gesture, json!(value)));
+    };
+    let gesture = begin();
+    step(gesture, 90.);
+    step(gesture, 120.);
+    assert_eq!(layers()[0]["p"]["anchor.y"]["v"], 60.3 * 1.5);
+    step(gesture, 80.);
+    // The primary returns exactly to its starting value and fractional pivot.
+    // The second layer has its own baseline of 40 and receives the value 80.
+    assert_eq!(layers()[0], initial[0]);
+    assert_eq!(layers()[1]["p"]["anchor.y"]["v"], 40.);
+    ack(panels.scrub_finish("inspector", gesture, false));
+    assert_eq!(layers(), initial);
+    assert_eq!(applied(), before);
+
+    let gesture = begin();
+    step(gesture, 90.);
+    step(gesture, 120.);
+    ack(panels.scrub_finish("inspector", gesture, true));
+    assert_eq!(applied(), before + 1);
+    request(pm_kernel::HistoryCall::Undo.into());
+    assert_eq!(layers(), initial);
+    panels.close();
+}

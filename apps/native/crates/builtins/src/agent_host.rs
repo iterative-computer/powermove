@@ -182,14 +182,8 @@ impl AgentLink {
                 };
             }
         };
-        let installed = self
-            .environment
-            .shared()
-            .as_ref()
-            .is_some_and(|environment| environment.available(provider));
-        let accounts = self.accounts().filter(|_| installed);
-        let Some(accounts) = accounts else {
-            let reason = format!("Powermove's built-in {name} runtime is missing.");
+        let Some(accounts) = self.accounts() else {
+            let reason = format!("Sign in to {name} in Settings.");
             return ("unavailable", reason);
         };
         let status = accounts.status(provider);
@@ -347,6 +341,7 @@ impl AgentLink {
     /// Providers this install can run, and the choices of the given one.
     pub fn catalog(&self, provider: Provider) -> Catalog {
         let environment = self.environment.shared();
+        let has_accounts = self.accounts().is_some();
         let mut providers = vec![];
         let aero = environment.as_ref().is_some_and(|env| env.aero.is_some());
         for (candidate, label) in [(Provider::Chatgpt, "ChatGPT"), (Provider::Claude, "Claude")] {
@@ -355,7 +350,7 @@ impl AgentLink {
                 _ => Runtime::Codex,
             };
             let installed = environment.as_ref().and_then(|e| e.binary(runtime));
-            if installed.is_some() || candidate == provider {
+            if has_accounts || installed.is_some() || candidate == provider {
                 providers.push((candidate.name().to_owned(), label.to_owned()));
             }
         }

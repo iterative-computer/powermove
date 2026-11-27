@@ -3,7 +3,7 @@
 //! `graph-presentation.ts`). Evaluated curve segments and the value domain
 //! come from the native evaluator; the renderer never fits, samples or
 //! changes a curve.
-use crate::render::{Error, Op, Rect, Viewport};
+use crate::render::{Error, Op, Rect, SceneSelection, Viewport};
 use pm_design::Tokens;
 use pm_kernel::commands::keyframes::EaseSide;
 use serde_json::json;
@@ -71,16 +71,40 @@ impl KeyShape {
         }
     }
 }
-/// The strip at the graph's top naming its curves.
+/// The strip at the graph's top naming its curves and quick graph controls.
 pub const LEGEND: f64 = 28.;
 /// The plot sits this far under the graph's top, clear of the legend, and
 /// `PLOT_BOTTOM` over its foot: keys at the value range's ends never clip.
 pub const PLOT_TOP: f64 = 42.;
 pub const PLOT_BOTTOM: f64 = 16.;
-/// A key mark's side, and how near a press must be to take a key or handle.
+/// A key mark's side, and how near a press must be to take a key, handle or grip.
 pub const VERTEX: f64 = 8.;
-pub const POINT_HIT: f64 = 8.;
-pub const HANDLE_HIT: f64 = 7.;
+pub const POINT_HIT: f64 = 10.;
+pub const HANDLE_HIT: f64 = 12.;
+pub const GRIP_HIT: f64 = 6.;
+/// What a pointer hits inside the Graph Editor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphHit {
+    Grip(usize),
+    Handle {
+        layer: String,
+        key: String,
+        side: EaseSide,
+    },
+    Key {
+        layer: String,
+        key: String,
+    },
+    SelectionBox,
+    LegendMode,
+    LegendFit,
+}
+/// Live hover & active drag decoration drawn on top of the graph.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GraphDecor {
+    pub hover: Option<GraphHit>,
+    pub active_handle: Option<(String, EaseSide)>,
+}
 /// The plot inside a graph `region`: values map into it.
 pub fn plot(region: Rect) -> Rect {
     Rect::new(
@@ -242,7 +266,8 @@ pub fn sample(
     t: &Tokens,
     mut value: impl FnMut(&str, &str, f64) -> Option<f64>,
 ) -> Option<Graph> {
-    const SAMPLES: usize = 48;
+    const SAMPLES: usize = 64;
+    let clean_zero = |v: f64| if v.abs() < 1e-6 { 0. } else { v };
     let index = &model.index;
     let (series, picked) = model.graph_series();
     let (layer_id, path) = model.graph_property().or_else(|| series.first().cloned())?;
@@ -252,164 +277,543 @@ pub fn sample(
     let mut range = (f64::INFINITY, f64::NEG_INFINITY);
     let mut chosen: Vec<(String, String)> = Vec::new();
     for pair in &series {
-        if !chosen.iter().any(|(_, path)| path == &pair.1) { chosen.push(pair.clone()); }
+        if !chosen.iter().any(|(_, path)| path == &pair.1) {
+            chosen.push(pair.clone());
+        }
     }
-    for (layer_id, channel_path) in &chosen {
-        let Some(layer) = index.layer(layer_id) else { continue; };
-        let Some(channel) = index.channel(layer_id, channel_path) else { continue; };
-        if channel.keys.is_empty() {
-            continue;
-        }
-        let at = |key: &crate::Key| layer.from + key.time;
-        // `side` picks the difference: -1 before `seconds`, 1 after, 0 across.
-        let mut plot = |seconds: f64, side: i8, reach: f64| -> Option<f64> {
-            if !speed {
-                return value(&layer_id, &channel.path, seconds);
-            }
-            let h = reach.clamp(1e-6, 1e-3);
-            let (a, b) = match side {
-                -1 => (seconds - h, seconds),
-                1 => (seconds, seconds + h),
-                _ => (seconds - h / 2., seconds + h / 2.),
-            };
-            let rate = (value(&layer_id, &channel.path, b)? - value(&layer_id, &channel.path, a)?)
-                / (b - a);
-            rate.is_finite().then_some(rate)
-        };
-        let mut segments = vec![];
-        // Before its first key and after its last the channel holds still:
-        // the curve runs flat across the layer, as v1 draws it.
-        let first = at(&channel.keys[0]);
-        let last = at(channel.keys.last().unwrap());
-        let start = layer.from.min(first);
-        let end = (layer.from + layer.duration).max(last);
-        let held = |seconds: f64, side: i8, plot: &mut dyn FnMut(f64, i8, f64) -> Option<f64>| {
-            if speed {
-                Some(0.)
-            } else {
-                plot(seconds, side, 1e-3)
-            }
-        };
-        let lead = if start < first - 1e-9 {
-            held(first, 1, &mut plot).map(|v| Segment {
-                from: Point {
-                    seconds: start,
-                    value: v,
-                },
-                to: Point {
-                    seconds: first,
-                    value: v,
-                },
-                controls: None,
-            })
-        } else {
-            None
-        };
-        let tail = if end > last + 1e-9 {
-            held(last, -1, &mut plot).map(|v| Segment {
-                from: Point {
-                    seconds: last,
-                    value: v,
-                },
-                to: Point {
-                    seconds: end,
-                    value: v,
-                },
-                controls: None,
-            })
-        } else {
-            None
-        };
-        segments.extend(lead);
-        for pair in channel.keys.windows(2) {
-            let (from, to) = (at(&pair[0]), at(&pair[1]));
-            let reach = (to - from) / SAMPLES as f64 / 4.;
-            let mut previous = None;
-            for step in 0..=SAMPLES {
-                let seconds = from + (to - from) * step as f64 / SAMPLES as f64;
-                let side = match step {
-                    0 => 1,
-                    SAMPLES => -1,
-                    _ => 0,
-                };
-                let point = Point {
-                    seconds,
-                    value: plot(seconds, side, reach)?,
-                };
-                range = (range.0.min(point.value), range.1.max(point.value));
-                if let Some(previous) = previous {
-                    segments.push(Segment {
-                        from: previous,
-                        to: point,
-                        controls: None,
-                    });
-                }
-                previous = Some(point);
-            }
-        }
-        segments.extend(tail);
-        let stored: Vec<_> = channel.keys.iter().map(|k| k.stored.to_value()).collect();
-        let handles = if speed {
-            vec![]
-        } else {
-            pm_kernel::commands::keyframes::handle_points(&stored)
-        };
-        let mut points = vec![];
-        for (i, key) in channel.keys.iter().enumerate() {
-            let seconds = at(key);
-            let last = i + 1 == channel.keys.len();
-            let point = Point {
-                seconds,
-                value: plot(seconds, if last { -1 } else { 1 }, 1e-3)?,
-            };
-            range = (range.0.min(point.value), range.1.max(point.value));
-            let selected = model.selection.key_selected(&layer_id, &key.id);
-            let shape = KeyShape::of(&stored[i]);
-            let interp = |key: usize, field: &str| {
-                stored[key].get(field).and_then(pm_model::Value::as_str) == Some("bezier")
-            };
-            let holds = |key: usize| KeyShape::of(&stored[key]) == KeyShape::Hold;
-            // v1: a side shows its handle when it has a neighbour that way,
-            // doesn't hold, and the key is selected or that side is Bézier.
-            let out =
-                i + 1 < channel.keys.len() && !holds(i) && (selected || interp(i, "outInterp"));
-            let inn = i > 0 && !holds(i - 1) && (selected || interp(i, "inInterp"));
-            let handles: Vec<_> = handles
-                .get(i)
-                .into_iter()
-                .flat_map(|[before, after]| [(EaseSide::In, *before), (EaseSide::Out, *after)])
-                .filter(|(side, _)| if *side == EaseSide::In { inn } else { out })
-                .filter_map(|(side, p)| {
-                    let (t, v) = p?;
-                    Some((
-                        side,
-                        Point {
-                            seconds: layer.from + t,
-                            value: v,
-                        },
-                    ))
+    // AE-style X/Y unification:
+    // - Linked Scale (`!layer.scale_unlinked`) collapses `scale.x`/`y`/`z` into
+    //   one unified Value curve named "Scale".
+    // - Combined Position (`!layer.position_separated`) collapses
+    //   `position.x`/`y`/`z` into one unified Speed curve with draggable Speed
+    //   Bezier handles until Separate Dimensions is turned on.
+    enum PlotItem {
+        Single {
+            layer_id: String,
+            channel_path: String,
+            unified_scale: bool,
+        },
+        CombinedPositionSpeed {
+            layer_id: String,
+            axes: Vec<String>,
+        },
+    }
+    let mut items: Vec<PlotItem> = Vec::new();
+    let mut handled_scale: std::collections::HashSet<String> = Default::default();
+    let mut handled_position: std::collections::HashSet<String> = Default::default();
+    for (lid, ch) in &chosen {
+        let Some(layer) = index.layer(lid) else { continue };
+        if !layer.scale_unlinked && matches!(ch.as_str(), "scale.x" | "scale.y" | "scale.z") {
+            let scale_axes: Vec<_> = chosen
+                .iter()
+                .filter(|(l, p)| {
+                    l == lid && matches!(p.as_str(), "scale.x" | "scale.y" | "scale.z")
                 })
                 .collect();
-            // The range is the curve's (v1): a handle may reach past it, and
-            // selecting a key never rescales the graph.
-            points.push(GraphPoint {
-                id: key.id.clone(),
-                point,
-                selected,
-                handles,
-                active_handle: None,
-                shape,
-            });
+            if scale_axes.len() >= 2 {
+                if handled_scale.insert(lid.clone()) {
+                    items.push(PlotItem::Single {
+                        layer_id: lid.clone(),
+                        channel_path: ch.clone(),
+                        unified_scale: true,
+                    });
+                }
+                continue;
+            }
         }
-        curves.push(Curve {
-            id: format!("{layer_id}:{}", channel.path),
-            name: model.channel_label(layer_id, &channel.path),
-            // v1's axis colours (`graphAxisColor`), in this appearance.
-            color: t.graph_curve(&channel.path, curves.len()),
-            focused: true,
-            segments,
-            points,
+        if !layer.position_separated
+            && matches!(ch.as_str(), "position.x" | "position.y" | "position.z")
+        {
+            let pos_axes: Vec<String> = chosen
+                .iter()
+                .filter(|(l, p)| {
+                    l == lid && matches!(p.as_str(), "position.x" | "position.y" | "position.z")
+                })
+                .map(|(_, p)| p.clone())
+                .collect();
+            if pos_axes.len() >= 2 {
+                if handled_position.insert(lid.clone()) {
+                    items.push(PlotItem::CombinedPositionSpeed {
+                        layer_id: lid.clone(),
+                        axes: pos_axes,
+                    });
+                }
+                continue;
+            }
+        }
+        items.push(PlotItem::Single {
+            layer_id: lid.clone(),
+            channel_path: ch.clone(),
+            unified_scale: false,
         });
+    }
+    let mut all_speed = !items.is_empty();
+    let ease_influence = |stored_key: &pm_model::Value, field: &str| -> f64 {
+        stored_key
+            .get(field)
+            .and_then(|e| e.get("influence"))
+            .and_then(pm_model::Value::as_f64)
+            .filter(|v| v.is_finite())
+            .unwrap_or(33.33)
+            .clamp(0.1, 100.)
+    };
+    for item in items {
+        match item {
+            PlotItem::CombinedPositionSpeed { layer_id, axes } => {
+                let Some(layer) = index.layer(&layer_id) else { continue };
+                let Some(primary) = index.channel(&layer_id, &axes[0]) else { continue };
+                if primary.keys.is_empty() {
+                    continue;
+                }
+                let mut times: Vec<f64> = axes
+                    .iter()
+                    .filter_map(|ax| index.channel(&layer_id, ax))
+                    .flat_map(|ch| ch.keys.iter().map(|k| layer.from + k.time))
+                    .collect();
+                times.sort_by(f64::total_cmp);
+                times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+                if times.is_empty() {
+                    continue;
+                }
+                let mut combined_speed = |seconds: f64, side: i8, reach: f64| -> Option<f64> {
+                    let h = reach.clamp(1e-6, 1e-3);
+                    let (a, b) = match side {
+                        -1 => (seconds - h, seconds),
+                        1 => (seconds, seconds + h),
+                        _ => (seconds - h / 2., seconds + h / 2.),
+                    };
+                    let mut sum_sq = 0.;
+                    for ax in &axes {
+                        let rate = (value(&layer_id, ax, b)? - value(&layer_id, ax, a)?) / (b - a);
+                        if !rate.is_finite() {
+                            return None;
+                        }
+                        sum_sq += rate * rate;
+                    }
+                    let mag = clean_zero(sum_sq.sqrt());
+                    mag.is_finite().then_some(mag)
+                };
+                let first = times[0];
+                let last = *times.last().unwrap();
+                let start = layer.from.min(first);
+                let end = (layer.from + layer.duration).max(last);
+                let mut segments = vec![];
+                if start < first - 1e-9 {
+                    segments.push(Segment {
+                        from: Point { seconds: start, value: 0. },
+                        to: Point { seconds: first, value: 0. },
+                        controls: None,
+                    });
+                    range = (range.0.min(0.), range.1.max(0.));
+                }
+                for pair in times.windows(2) {
+                    let (from, to) = (pair[0], pair[1]);
+                    let reach = (to - from) / SAMPLES as f64 / 4.;
+                    let mut previous = None;
+                    for step in 0..=SAMPLES {
+                        let seconds = from + (to - from) * step as f64 / SAMPLES as f64;
+                        let side = match step {
+                            0 => 1,
+                            SAMPLES => -1,
+                            _ => 0,
+                        };
+                        let point = Point {
+                            seconds,
+                            value: combined_speed(seconds, side, reach)?,
+                        };
+                        range = (range.0.min(point.value), range.1.max(point.value));
+                        if let Some(previous) = previous {
+                            segments.push(Segment {
+                                from: previous,
+                                to: point,
+                                controls: None,
+                            });
+                        }
+                        previous = Some(point);
+                    }
+                }
+                if end > last + 1e-9 {
+                    segments.push(Segment {
+                        from: Point { seconds: last, value: 0. },
+                        to: Point { seconds: end, value: 0. },
+                        controls: None,
+                    });
+                    range = (range.0.min(0.), range.1.max(0.));
+                }
+                let stored: Vec<_> = primary.keys.iter().map(|k| k.stored.to_value()).collect();
+                let mut points = vec![];
+                for (i, key) in primary.keys.iter().enumerate() {
+                    let seconds = layer.from + key.time;
+                    let is_last = i + 1 == primary.keys.len();
+                    let in_spd = if i > 0 {
+                        combined_speed(seconds, -1, 1e-3).unwrap_or(0.)
+                    } else {
+                        0.
+                    };
+                    let out_spd = if !is_last {
+                        combined_speed(seconds, 1, 1e-3).unwrap_or(0.)
+                    } else {
+                        0.
+                    };
+                    let point_val = if is_last { in_spd } else { out_spd };
+                    range = (range.0.min(point_val), range.1.max(point_val));
+                    let selected = axes.iter().any(|ax| {
+                        index.channel(&layer_id, ax).is_some_and(|ch| {
+                            ch.keys.iter().any(|k| {
+                                (k.time - key.time).abs() < 1e-9
+                                    && model.selection.key_selected(&layer_id, &k.id)
+                            })
+                        })
+                    });
+                    let shape = KeyShape::of(&stored[i]);
+                    let interp = |idx: usize, field: &str| {
+                        stored[idx].get(field).and_then(pm_model::Value::as_str) == Some("bezier")
+                    };
+                    let holds = |idx: usize| KeyShape::of(&stored[idx]) == KeyShape::Hold;
+                    let out_ok =
+                        i + 1 < primary.keys.len() && !holds(i) && (selected || interp(i, "outInterp"));
+                    let in_ok = i > 0 && !holds(i - 1) && (selected || interp(i, "inInterp"));
+                    let mut handles = vec![];
+                    if in_ok {
+                        let dt = (key.time - primary.keys[i - 1].time).abs();
+                        if dt > 1e-6 {
+                            let inf = ease_influence(&stored[i], "inEase");
+                            handles.push((
+                                EaseSide::In,
+                                Point {
+                                    seconds: seconds - (inf / 100.) * dt,
+                                    value: in_spd,
+                                },
+                            ));
+                        }
+                    }
+                    if out_ok {
+                        let dt = (primary.keys[i + 1].time - key.time).abs();
+                        if dt > 1e-6 {
+                            let inf = ease_influence(&stored[i], "outEase");
+                            handles.push((
+                                EaseSide::Out,
+                                Point {
+                                    seconds: seconds + (inf / 100.) * dt,
+                                    value: out_spd,
+                                },
+                            ));
+                        }
+                    }
+                    points.push(GraphPoint {
+                        id: key.id.clone(),
+                        point: Point {
+                            seconds,
+                            value: point_val,
+                        },
+                        selected,
+                        handles,
+                        active_handle: None,
+                        shape,
+                    });
+                }
+                curves.push(Curve {
+                    id: format!("{layer_id}:position"),
+                    name: if speed {
+                        "Position".into()
+                    } else {
+                        "Position (Speed)".into()
+                    },
+                    color: t.colors.accent,
+                    focused: true,
+                    segments,
+                    points,
+                });
+            }
+            PlotItem::Single {
+                layer_id,
+                channel_path,
+                unified_scale,
+            } => {
+                if !speed {
+                    all_speed = false;
+                }
+                let Some(layer) = index.layer(&layer_id) else { continue; };
+                let Some(channel) = index.channel(&layer_id, &channel_path) else { continue; };
+                if channel.keys.is_empty() {
+                    continue;
+                }
+                let at = |key: &crate::Key| layer.from + key.time;
+                // `side` picks the difference: -1 before `seconds`, 1 after, 0 across.
+                let mut plot = |seconds: f64, side: i8, reach: f64| -> Option<f64> {
+                    if !speed {
+                        return value(&layer_id, &channel.path, seconds);
+                    }
+                    let h = reach.clamp(1e-6, 1e-3);
+                    let (a, b) = match side {
+                        -1 => (seconds - h, seconds),
+                        1 => (seconds, seconds + h),
+                        _ => (seconds - h / 2., seconds + h / 2.),
+                    };
+                    let rate = clean_zero(
+                        (value(&layer_id, &channel.path, b)? - value(&layer_id, &channel.path, a)?)
+                            / (b - a),
+                    );
+                    rate.is_finite().then_some(rate)
+                };
+                let mut segments = vec![];
+                // Before its first key and after its last the channel holds still:
+                // the curve runs flat across the layer, as v1 draws it.
+                let first = at(&channel.keys[0]);
+                let last = at(channel.keys.last().unwrap());
+                let start = layer.from.min(first);
+                let end = (layer.from + layer.duration).max(last);
+                let held =
+                    |seconds: f64, side: i8, plot: &mut dyn FnMut(f64, i8, f64) -> Option<f64>| {
+                        if speed {
+                            Some(0.)
+                        } else {
+                            plot(seconds, side, 1e-3)
+                        }
+                    };
+                let lead = if start < first - 1e-9 {
+                    held(first, 1, &mut plot).map(|v| Segment {
+                        from: Point {
+                            seconds: start,
+                            value: v,
+                        },
+                        to: Point {
+                            seconds: first,
+                            value: v,
+                        },
+                        controls: None,
+                    })
+                } else {
+                    None
+                };
+                let tail = if end > last + 1e-9 {
+                    held(last, -1, &mut plot).map(|v| Segment {
+                        from: Point {
+                            seconds: last,
+                            value: v,
+                        },
+                        to: Point {
+                            seconds: end,
+                            value: v,
+                        },
+                        controls: None,
+                    })
+                } else {
+                    None
+                };
+                let stored: Vec<_> = channel.keys.iter().map(|k| k.stored.to_value()).collect();
+                let value_handles = if speed {
+                    vec![]
+                } else {
+                    pm_kernel::commands::keyframes::handle_points(&stored)
+                };
+                // For non-expression, non-spring Value Graph segments, use exact
+                // cubic Béziers (razor-sharp at any zoom); fall back to dense
+                // sampling for expressions, springs, and Speed Graph.
+                let has_expr = channel
+                    .expression
+                    .as_ref()
+                    .is_some_and(|e| !e.to_string_lossy().trim().is_empty());
+                let exact_bezier = !speed
+                    && !has_expr
+                    && stored.iter().all(|k| k.get("spring").is_none());
+                segments.extend(lead);
+                for (seg_idx, pair) in channel.keys.windows(2).enumerate() {
+                    let (from, to) = (at(&pair[0]), at(&pair[1]));
+                    if exact_bezier {
+                        let v0 = pair[0].value.as_f64().or_else(|| plot(from, 1, 1e-3))?;
+                        let v1 = pair[1].value.as_f64().or_else(|| plot(to, -1, 1e-3))?;
+                        let p0 = Point { seconds: from, value: v0 };
+                        let p3 = Point { seconds: to, value: v1 };
+                        range = (range.0.min(v0).min(v1), range.1.max(v0).max(v1));
+                        if KeyShape::of(&stored[seg_idx]) == KeyShape::Hold {
+                            let corner = Point { seconds: to, value: v0 };
+                            segments.push(Segment { from: p0, to: corner, controls: None });
+                            segments.push(Segment { from: corner, to: p3, controls: None });
+                        } else {
+                            let out_is_bezier = stored[seg_idx]
+                                .get("outInterp")
+                                .and_then(pm_model::Value::as_str)
+                                == Some("bezier")
+                                || stored[seg_idx].get("eo").is_some();
+                            let in_is_bezier = stored[seg_idx + 1]
+                                .get("inInterp")
+                                .and_then(pm_model::Value::as_str)
+                                == Some("bezier")
+                                || stored[seg_idx + 1].get("ei").is_some();
+                            let controls = if out_is_bezier || in_is_bezier {
+                                let c1 = value_handles
+                                    .get(seg_idx)
+                                    .and_then(|h| h[1])
+                                    .map(|(t, v)| Point { seconds: layer.from + t, value: v })
+                                    .unwrap_or_else(|| Point {
+                                        seconds: from + (to - from) / 3.,
+                                        value: v0 + (v1 - v0) / 3.,
+                                    });
+                                let c2 = value_handles
+                                    .get(seg_idx + 1)
+                                    .and_then(|h| h[0])
+                                    .map(|(t, v)| Point { seconds: layer.from + t, value: v })
+                                    .unwrap_or_else(|| Point {
+                                        seconds: from + (to - from) * (2. / 3.),
+                                        value: v0 + (v1 - v0) * (2. / 3.),
+                                    });
+                                // Sample curve interior for exact Y range (handles overshoot).
+                                for step in 1..16 {
+                                    let u = step as f64 / 16.;
+                                    let r = 1. - u;
+                                    let y = r * r * r * v0
+                                        + 3. * r * r * u * c1.value
+                                        + 3. * r * u * u * c2.value
+                                        + u * u * u * v1;
+                                    if y.is_finite() {
+                                        range = (range.0.min(y), range.1.max(y));
+                                    }
+                                }
+                                Some([c1, c2])
+                            } else {
+                                None
+                            };
+                            segments.push(Segment { from: p0, to: p3, controls });
+                        }
+                        continue;
+                    }
+                    let reach = (to - from) / SAMPLES as f64 / 4.;
+                    let mut previous = None;
+                    for step in 0..=SAMPLES {
+                        let seconds = from + (to - from) * step as f64 / SAMPLES as f64;
+                        let side = match step {
+                            0 => 1,
+                            SAMPLES => -1,
+                            _ => 0,
+                        };
+                        let point = Point {
+                            seconds,
+                            value: plot(seconds, side, reach)?,
+                        };
+                        range = (range.0.min(point.value), range.1.max(point.value));
+                        if let Some(previous) = previous {
+                            segments.push(Segment {
+                                from: previous,
+                                to: point,
+                                controls: None,
+                            });
+                        }
+                        previous = Some(point);
+                    }
+                }
+                segments.extend(tail);
+                let mut points = vec![];
+                for (i, key) in channel.keys.iter().enumerate() {
+                    let seconds = at(key);
+                    let last = i + 1 == channel.keys.len();
+                    let point = Point {
+                        seconds,
+                        value: plot(seconds, if last { -1 } else { 1 }, 1e-3)?,
+                    };
+                    range = (range.0.min(point.value), range.1.max(point.value));
+                    let selected = if unified_scale {
+                        model.track_channels(&layer_id, "scale").iter().any(|ch| {
+                            ch.keys.iter().any(|k| {
+                                (k.time - key.time).abs() < 1e-9
+                                    && model.selection.key_selected(&layer_id, &k.id)
+                            })
+                        })
+                    } else {
+                        model.selection.key_selected(&layer_id, &key.id)
+                    };
+                    let shape = KeyShape::of(&stored[i]);
+                    let interp = |key: usize, field: &str| {
+                        stored[key].get(field).and_then(pm_model::Value::as_str) == Some("bezier")
+                    };
+                    let holds = |key: usize| KeyShape::of(&stored[key]) == KeyShape::Hold;
+                    // v1: a side shows its handle when it has a neighbour that way,
+                    // doesn't hold, and the key is selected or that side is Bézier.
+                    let out = i + 1 < channel.keys.len()
+                        && !holds(i)
+                        && (selected || interp(i, "outInterp"));
+                    let inn = i > 0 && !holds(i - 1) && (selected || interp(i, "inInterp"));
+                    let handles: Vec<_> = if speed {
+                        let mut h = vec![];
+                        if inn {
+                            let dt = (key.time - channel.keys[i - 1].time).abs();
+                            if dt > 1e-6 {
+                                let inf = ease_influence(&stored[i], "inEase");
+                                let v = plot(seconds, -1, 1e-3).unwrap_or(point.value);
+                                h.push((
+                                    EaseSide::In,
+                                    Point {
+                                        seconds: seconds - (inf / 100.) * dt,
+                                        value: v,
+                                    },
+                                ));
+                            }
+                        }
+                        if out {
+                            let dt = (channel.keys[i + 1].time - key.time).abs();
+                            if dt > 1e-6 {
+                                let inf = ease_influence(&stored[i], "outEase");
+                                let v = plot(seconds, 1, 1e-3).unwrap_or(point.value);
+                                h.push((
+                                    EaseSide::Out,
+                                    Point {
+                                        seconds: seconds + (inf / 100.) * dt,
+                                        value: v,
+                                    },
+                                ));
+                            }
+                        }
+                        h
+                    } else {
+                        value_handles
+                            .get(i)
+                            .into_iter()
+                            .flat_map(|[before, after]| {
+                                [(EaseSide::In, *before), (EaseSide::Out, *after)]
+                            })
+                            .filter(|(side, _)| if *side == EaseSide::In { inn } else { out })
+                            .filter_map(|(side, p)| {
+                                let (t, v) = p?;
+                                Some((
+                                    side,
+                                    Point {
+                                        seconds: layer.from + t,
+                                        value: v,
+                                    },
+                                ))
+                            })
+                            .collect()
+                    };
+                    // The range is the curve's (v1): a handle may reach past it, and
+                    // selecting a key never rescales the graph.
+                    points.push(GraphPoint {
+                        id: key.id.clone(),
+                        point,
+                        selected,
+                        handles,
+                        active_handle: None,
+                        shape,
+                    });
+                }
+                curves.push(Curve {
+                    id: format!("{layer_id}:{}", channel.path),
+                    name: if unified_scale {
+                        "Scale".into()
+                    } else {
+                        model.channel_label(&layer_id, &channel.path)
+                    },
+                    // v1's axis colours (`graphAxisColor`), in this appearance.
+                    color: if unified_scale {
+                        t.colors.accent
+                    } else {
+                        t.graph_curve(&channel.path, curves.len())
+                    },
+                    focused: true,
+                    segments,
+                    points,
+                });
+            }
+        }
     }
     if curves.is_empty() {
         return None;
@@ -431,15 +835,16 @@ pub fn sample(
             .collect();
         times.sort_by(f64::total_cmp);
         times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-        let channels: Vec<String> = model
-            .track_channels(&layer_id, &path)
-            .into_iter()
-            .filter(|c| !c.keys.is_empty())
-            .map(|c| c.path.clone())
+        let channels: Vec<(String, String)> = curves
+            .iter()
+            .filter_map(|c| {
+                let (l, ch) = c.id.rsplit_once(':')?;
+                Some((l.to_owned(), ch.to_owned()))
+            })
             .collect();
         let mut at = |seconds: f64, side: i8, reach: f64| -> Option<Point> {
             let mut points = vec![];
-            for channel in &channels {
+            for (lid, channel) in &channels {
                 let value = if speed {
                     let h = reach.clamp(1e-6, 1e-3);
                     let (a, b) = match side {
@@ -447,9 +852,9 @@ pub fn sample(
                         1 => (seconds, seconds + h),
                         _ => (seconds - h / 2., seconds + h / 2.),
                     };
-                    (value(&layer_id, channel, b)? - value(&layer_id, channel, a)?) / (b - a)
+                    (value(lid, channel, b)? - value(lid, channel, a)?) / (b - a)
                 } else {
-                    value(&layer_id, channel, seconds)?
+                    value(lid, channel, seconds)?
                 };
                 points.push(Point { seconds, value });
             }
@@ -499,12 +904,12 @@ pub fn sample(
     let merged = model.graph_merge && curves.len() == 1 && curves[0].points.is_empty();
     let mut graph = Graph::new(curves, range.0 - margin, range.1 + margin).ok()?;
     graph.merged = merged;
-    graph.speed = speed;
+    graph.speed = speed || all_speed;
     graph.series = series;
     graph.picked = picked;
     graph.view = format!(
         "{}:{}:{layer_id}:{path}",
-        if speed { "speed" } else { "value" },
+        if speed || all_speed { "speed" } else { "value" },
         model.graph_merge
     );
     Some(graph)
@@ -655,6 +1060,11 @@ impl Graph {
             ),
             |(a, b, c, d), (x, y)| (a.min(*x), b.max(*x), c.min(*y), d.max(*y)),
         );
+        // Co-located keys (e.g. linked Scale X/Y at a single time & value)
+        // have no box span; drawing 8 grips on top of one vertex obscures it.
+        if (x1 - x0) < 1. && (y1 - y0) < 1. {
+            return None;
+        }
         (x0, x1, y0, y1) = (x0 - pad, x1 + pad, y0 - pad, y1 + pad);
         if x1 - x0 < 16. {
             let m = (x0 + x1) / 2.;
@@ -693,15 +1103,161 @@ impl Graph {
     pub fn value_of(curve: &Curve, seconds: f64) -> Option<f64> { curve.value_at(seconds) }
     /// Whether this graph, shown over `min`..`max` (the range on screen),
     /// still reads well there: every value fits, and the values fill at
-    /// least half of it. Then the range on screen is kept and nothing under
-    /// the pointer moves.
+    /// least a quarter of it. Keeping wider hysteresis prevents sudden Y-axis
+    /// jumps right after releasing a drag.
     pub fn fits_in(&self, min: f64, max: f64) -> bool {
         let span = max - min;
         self.min >= min - 1e-9
             && self.max <= max + 1e-9
             && span > 0.
-            && (self.max - self.min) >= span * 0.5
+            && (self.max - self.min) >= span * 0.25
     }
+    /// Bounding rects of the quick controls in the legend strip: `(mode_pill, fit_button)`.
+    pub fn legend_controls(&self, region: Rect) -> (Rect, Rect) {
+        let right = region.x + region.width - 8.;
+        let fit_w = 34.;
+        let mode_w = 52.;
+        let h = 18.;
+        let y = region.y + (LEGEND - h) / 2.;
+        let fit = Rect::new((right - fit_w).max(region.x), y, fit_w, h);
+        let mode = Rect::new((fit.x - 6. - mode_w).max(region.x), y, mode_w, h);
+        (mode, fit)
+    }
+    /// Single authoritative hit test shared by clicks, drags, hover highlights,
+    /// and cursors.
+    pub fn hit_test(&self, v: Viewport, region: Rect, x: f64, y: f64) -> Option<GraphHit> {
+        if x < region.x || x > region.x + region.width || y < region.y || y > region.y + region.height
+        {
+            return None;
+        }
+        if y < region.y + LEGEND {
+            let (mode, fit) = self.legend_controls(region);
+            let inside = |r: Rect| x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height;
+            if inside(fit) {
+                return Some(GraphHit::LegendFit);
+            }
+            if inside(mode) {
+                return Some(GraphHit::LegendMode);
+            }
+            return None;
+        }
+        let boxed = self.selection_box(v, region);
+        if let Some(b) = boxed
+            && self.transformable()
+            && let Some(grip) = grip_at(b, x, y)
+        {
+            return Some(GraphHit::Grip(grip));
+        }
+        let plot = plot(region);
+        let bottom = plot.y + plot.height;
+        let y_of = |value: f64| bottom - (value - self.min) / (self.max - self.min) * plot.height;
+        let from = v.scroll_time;
+        let to = from + (v.width - v.layer_column) / v.pps;
+
+        let mut best_handle: Option<(bool, f64, String, String, EaseSide)> = None;
+        let mut best_key: Option<(bool, f64, String, String)> = None;
+
+        for curve in &self.curves {
+            let Some((layer, _)) = curve.id.rsplit_once(':') else {
+                continue;
+            };
+            for key in &curve.points {
+                let kx = v.x(key.point.seconds);
+                // Check handles even if the key itself is slightly outside view.
+                for (side, handle) in &key.handles {
+                    let hx = v.x(handle.seconds);
+                    let hy = y_of(handle.value);
+                    let d = (hx - x).hypot(hy - y);
+                    if d <= HANDLE_HIT {
+                        let better = match &best_handle {
+                            None => true,
+                            // Prefer handles on selected keys, then nearest distance.
+                            Some((sel, bd, _, _, _)) => {
+                                (key.selected && !*sel) || (key.selected == *sel && d < *bd)
+                            }
+                        };
+                        if better {
+                            best_handle = Some((
+                                key.selected,
+                                d,
+                                layer.to_owned(),
+                                key.id.clone(),
+                                *side,
+                            ));
+                        }
+                    }
+                }
+                if key.point.seconds < from - 1e-6 || key.point.seconds > to + 1e-6 {
+                    continue;
+                }
+                // In Speed Graph, a discontinuous key has two vertical anchors
+                // (`in_spd` and `out_spd`); hit-test all of them.
+                let mut kd = (kx - x).hypot(y_of(key.point.value) - y);
+                if self.speed {
+                    for (_, h) in &key.handles {
+                        kd = kd.min((kx - x).hypot(y_of(h.value) - y));
+                    }
+                }
+                if kd <= POINT_HIT {
+                    let better = match &best_key {
+                        None => true,
+                        Some((sel, bd, _, _)) => {
+                            (key.selected && !*sel) || (key.selected == *sel && kd < *bd)
+                        }
+                    };
+                    if better {
+                        best_key = Some((key.selected, kd, layer.to_owned(), key.id.clone()));
+                    }
+                }
+            }
+        }
+        // Only let a key beat a handle when the pointer is directly on top of
+        // the key vertex (< 5px) and closer to the key than the handle.
+        let key_wins = match (&best_key, &best_handle) {
+            (Some((_, kd, _, _)), Some((_, hd, _, _, _))) => *kd < 5. && *kd < *hd,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if !key_wins
+            && let Some((_, _, layer, key, side)) = best_handle
+        {
+            return Some(GraphHit::Handle { layer, key, side });
+        }
+        if let Some((_, _, layer, key)) = best_key {
+            return Some(GraphHit::Key { layer, key });
+        }
+        if boxed
+            .is_some_and(|b| x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height)
+        {
+            return Some(GraphHit::SelectionBox);
+        }
+        None
+    }
+    /// Keys whose drawn centres the box covers, in curve and time order.
+    pub fn marquee_keys(&self, v: Viewport, region: Rect, area: Rect) -> Vec<(String, String)> {
+        let plot = plot(region);
+        let from = v.scroll_time + (area.x.max(v.layer_column) - v.layer_column) / v.pps;
+        let to = v.scroll_time
+            + ((area.x + area.width).min(v.width) - v.layer_column) / v.pps;
+        let mut keys = Vec::new();
+        if from > to {
+            return keys;
+        }
+        for curve in &self.curves {
+            let Some((layer, _)) = curve.id.rsplit_once(':') else { continue };
+            let start = curve.points.partition_point(|key| key.point.seconds < from);
+            let end = curve.points.partition_point(|key| key.point.seconds <= to);
+            for key in &curve.points[start..end] {
+                let y = plot.y + plot.height
+                    - (key.point.value - self.min) / (self.max - self.min) * plot.height;
+                if y >= area.y && y <= area.y + area.height {
+                    keys.push((layer.to_owned(), key.id.clone()));
+                }
+            }
+        }
+        keys
+    }
+
     /// The graph drawn into `region` (the whole graph, legend included),
     /// v1's way, with each curve's value marked where the playhead crosses.
     pub fn prepare(
@@ -710,6 +1266,29 @@ impl Graph {
         region: Rect,
         t: &Tokens,
         playhead: Option<f64>,
+    ) -> Result<Vec<Op>, Error> {
+        self.prepare_with_selection(v, region, t, playhead, None)
+    }
+
+    pub fn prepare_with_selection(
+        &self,
+        v: Viewport,
+        region: Rect,
+        t: &Tokens,
+        playhead: Option<f64>,
+        selection: Option<&SceneSelection>,
+    ) -> Result<Vec<Op>, Error> {
+        self.prepare_with_state(v, region, t, playhead, selection, None)
+    }
+
+    pub fn prepare_with_state(
+        &self,
+        v: Viewport,
+        region: Rect,
+        t: &Tokens,
+        playhead: Option<f64>,
+        selection: Option<&SceneSelection>,
+        decor: Option<&GraphDecor>,
     ) -> Result<Vec<Op>, Error> {
         if !v.valid()
             || ![region.x, region.y, region.width, region.height]
@@ -799,44 +1378,137 @@ impl Graph {
             let start = curve.points.partition_point(|key| key.point.seconds < from);
             let stop = curve.points.partition_point(|key| key.point.seconds <= to);
             let mut marks = vec![];
+            let layer = curve.id.rsplit_once(':').map(|(layer, _)| layer);
             for key in &curve.points[start..stop] {
+                let selected = selection.zip(layer)
+                    .map_or(key.selected, |(selection, layer)| selection.key(layer, &key.id));
                 let p = point(key.point);
-                // Tangents: dashed, a hollow knob; a selected key's in yellow.
-                let handle_ink = if key.selected { t.graph_handle_selected() } else { ink };
+                let key_hovered = decor.is_some_and(|d| {
+                    matches!(&d.hover, Some(GraphHit::Key { key: hk, .. }) if hk == &key.id)
+                });
+                // In Speed Graph, a discontinuous key has distinct incoming &
+                // outgoing speed anchors: draw a vertical dashed connector when
+                // they differ so each handle stems cleanly from its own speed.
+                if self.speed {
+                    let in_y = key
+                        .handles
+                        .iter()
+                        .find(|(s, _)| *s == EaseSide::In)
+                        .map(|(_, h)| y_of(h.value));
+                    let out_y = key
+                        .handles
+                        .iter()
+                        .find(|(s, _)| *s == EaseSide::Out)
+                        .map(|(_, h)| y_of(h.value));
+                    if let (Some(iy), Some(oy)) = (in_y, out_y)
+                        && (iy - oy).abs() > 1.
+                    {
+                        let mut jump = Op::new(
+                            format!("graph-speed-jump:{}", key.id),
+                            "line",
+                            region,
+                            ink,
+                        );
+                        jump.stroke = 1.;
+                        jump.opacity = 0.55;
+                        jump.detail = json!({"from":[p[0], iy],"to":[p[0], oy],"dash":[2.,2.]});
+                        jump.clip = Some(body);
+                        ops.push(jump);
+                    }
+                }
+                // Tangents & handle knobs: hovered or active handles enlarge and
+                // draw solid arms for crisp feedback when interactive decor is on.
+                let interactive = decor.is_some();
+                let handle_ink = if selected { t.graph_handle_selected() } else { ink };
                 for (side, handle) in &key.handles {
                     let h = point(*handle);
+                    let anchor = if self.speed {
+                        [p[0], h[1]]
+                    } else {
+                        p
+                    };
                     let side_name = side_name(*side);
+                    let active = interactive
+                        && (key.active_handle == Some(*side)
+                            || decor.is_some_and(|d| {
+                                d.active_handle
+                                    .as_ref()
+                                    .is_some_and(|(ak, as_)| ak == &key.id && as_ == side)
+                            }));
+                    let hovered = decor.is_some_and(|d| {
+                        matches!(&d.hover, Some(GraphHit::Handle { key: hk, side: hs, .. }) if hk == &key.id && hs == side)
+                    });
+                    let emphasized = active || hovered;
                     let mut line = Op::new(
                         format!("graph-tangent:{}:{side_name}", key.id),
                         "line",
                         region,
-                        handle_ink,
+                        if emphasized { t.graph_handle_selected() } else { handle_ink },
                     );
-                    line.stroke = 1.;
-                    line.detail = json!({"from":p,"to":h,"dash":[2.,2.]});
+                    line.stroke = if emphasized { 1.6 } else { 1. };
+                    line.detail = if emphasized {
+                        json!({"from":anchor,"to":h})
+                    } else {
+                        json!({"from":anchor,"to":h,"dash":[2.,2.]})
+                    };
                     line.clip = Some(body);
                     ops.push(line);
+                    let knob = if emphasized {
+                        9.
+                    } else if interactive {
+                        7.
+                    } else {
+                        6.
+                    };
+                    let knob_ink = if emphasized { t.graph_handle_selected() } else { handle_ink };
                     let mut dot = Op::new(
                         format!("graph-handle:{}:{side_name}", key.id),
                         "circle",
-                        Rect::new(h[0] - 3., h[1] - 3., 6., 6.),
-                        if key.selected { handle_ink } else { c.panel },
+                        Rect::new(h[0] - knob / 2., h[1] - knob / 2., knob, knob),
+                        if selected || emphasized { knob_ink } else { c.panel },
                     );
-                    dot.detail = json!({"keyline":handle_ink,"keylineWidth":1.});
+                    dot.detail = json!({
+                        "keyline": if active { c.text } else { knob_ink },
+                        "keylineWidth": if emphasized { 1.5 } else if interactive { 1.2 } else { 1. },
+                    });
                     dot.clip = Some(body);
                     ops.push(dot);
                 }
-                let half = VERTEX / 2.;
+                let side_len = if key_hovered { VERTEX + 1.5 } else { VERTEX };
+                let half = side_len / 2.;
+                let ring = if selected {
+                    Some(t.graph_key_selected())
+                } else if key_hovered {
+                    Some(c.text)
+                } else {
+                    None
+                };
                 let mut mark = Op::new(
                     format!("graph-key:{}", key.id),
                     "graph-vertex",
-                    Rect::new(p[0] - half, p[1] - half, VERTEX, VERTEX),
+                    Rect::new(p[0] - half, p[1] - half, side_len, side_len),
                     ink,
                 );
-                mark.detail =
-                    json!({"kind":key.shape.name(),"ring":key.selected.then(|| t.graph_key_selected())});
+                mark.detail = json!({"kind":key.shape.name(),"ring":ring});
                 mark.clip = Some(body);
                 marks.push(mark);
+                // Secondary vertex marker at the split incoming speed anchor.
+                if self.speed
+                    && let Some((_, in_h)) = key.handles.iter().find(|(s, _)| *s == EaseSide::In)
+                    && (y_of(in_h.value) - p[1]).abs() > 2.
+                {
+                    let iy = y_of(in_h.value);
+                    let sub = 5.5;
+                    let mut sub_mark = Op::new(
+                        format!("graph-key-split:{}", key.id),
+                        "circle",
+                        Rect::new(p[0] - sub / 2., iy - sub / 2., sub, sub),
+                        c.panel,
+                    );
+                    sub_mark.detail = json!({"keyline": if selected { t.graph_key_selected() } else { ink }, "keylineWidth": 1.3});
+                    sub_mark.clip = Some(body);
+                    marks.push(sub_mark);
+                }
             }
             // Keys over every tangent.
             ops.extend(marks);
@@ -964,6 +1636,13 @@ impl Graph {
         rule.opacity = alpha as f64;
         rule.clip = Some(region);
         ops.push(rule);
+        let (mode_rect, fit_rect) = self.legend_controls(region);
+        let show_pills = decor.is_some() && region.width >= 180.;
+        let legend_limit = if show_pills {
+            (mode_rect.x - 8.).max(region.x + 12.)
+        } else {
+            right - 8.
+        };
         let mut x = region.x + 12.;
         let legend: Vec<(String, u32)> = if self.merged {
             vec![("Merged curves".to_owned(), c.accent)]
@@ -975,7 +1654,7 @@ impl Graph {
         };
         for (name, ink) in legend {
             let width = name.chars().count() as f64 * small * 0.58 + 25.;
-            if x + width > right - 8. {
+            if x + width > legend_limit {
                 let mut more = Op::new(
                     "graph-legend-more",
                     "text",
@@ -1008,6 +1687,47 @@ impl Graph {
             ops.push(label);
             x += width;
         }
+        // Quick Value/Speed toggle & Fit controls on the right of the legend strip.
+        let mode_hover = decor.is_some_and(|d| d.hover == Some(GraphHit::LegendMode));
+        let fit_hover = decor.is_some_and(|d| d.hover == Some(GraphHit::LegendFit));
+        let mut draw_pill = |id: &str, rect: Rect, text: &str, active: bool, hovered: bool| {
+            let mut bg = Op::new(
+                format!("graph-pill-bg:{id}"),
+                "rounded-rect",
+                rect,
+                if active {
+                    c.selected_fill
+                } else if hovered {
+                    c.hover
+                } else {
+                    c.field
+                },
+            );
+            bg.radius = 4.;
+            bg.clip = Some(strip);
+            ops.push(bg);
+            let mut lbl = Op::new(
+                format!("graph-pill:{id}"),
+                "text",
+                rect,
+                if active || hovered { c.text } else { c.secondary },
+            );
+            lbl.text = Some(text.to_owned());
+            lbl.font_size = small;
+            lbl.detail = json!({"align":"center"});
+            lbl.clip = Some(strip);
+            ops.push(lbl);
+        };
+        if show_pills {
+            draw_pill(
+                "mode",
+                mode_rect,
+                if self.speed { "Speed" } else { "Value" },
+                self.speed,
+                mode_hover,
+            );
+            draw_pill("fit", fit_rect, "Fit", false, fit_hover);
+        }
         Ok(ops)
     }
 }
@@ -1027,10 +1747,10 @@ pub fn grips(b: Rect) -> [(f64, f64); 8] {
         (x0, my),
     ]
 }
-/// The grip within 6 points of `(x, y)`, the nearest.
+/// The grip within `GRIP_HIT` points of `(x, y)`, the nearest.
 pub fn grip_at(b: Rect, x: f64, y: f64) -> Option<usize> {
     let mut best = None;
-    let mut reach = 6.;
+    let mut reach = GRIP_HIT;
     for (i, (gx, gy)) in grips(b).into_iter().enumerate() {
         let d = (x - gx).hypot(y - gy);
         if d <= reach {
@@ -1125,5 +1845,75 @@ mod tests {
         );
         assert_eq!(time_step(100.), 1.);
         assert_eq!(time_step(1000.), 0.1);
+    }
+
+    #[test]
+    fn linked_scale_and_combined_position_collapse_xy_until_unlinked_or_separated() {
+        use pm_kernel::DocumentStore;
+        use std::sync::Arc;
+        let make = |extra: &str, key: &str| {
+            let project = pm_model::json::parse(&format!(
+                r#"{{
+                    "id": "p", "name": "GraphXY", "w": 1920, "h": 1080, "fps": 30, "dur": 5,
+                    "layers": [{{
+                        "id": "L1", "type": "solid", "name": "Box", "from": 0, "dur": 5,
+                        {extra}
+                        "p": {{
+                            "scale.x": {{"v": 100, "kf": [{{"t": 0, "v": 100, "i": "sx0"}}, {{"t": 2, "v": 200, "i": "sx1"}}]}},
+                            "scale.y": {{"v": 100, "kf": [{{"t": 0, "v": 100, "i": "sy0"}}, {{"t": 2, "v": 200, "i": "sy1"}}]}},
+                            "position.x": {{"v": 100, "kf": [{{"t": 0, "v": 100, "i": "px0"}}, {{"t": 2, "v": 400, "i": "px1"}}]}},
+                            "position.y": {{"v": 100, "kf": [{{"t": 0, "v": 100, "i": "py0"}}, {{"t": 2, "v": 500, "i": "py1"}}]}}
+                        }}
+                    }}]
+                }}"#
+            ))
+            .unwrap();
+            let mut store = DocumentStore::new_untitled(project);
+            store.select_layers(["L1"], false);
+            store.select_keys([key]);
+            let mut m = crate::TimelineModel::default();
+            m.index = Arc::new(crate::TimelineIndex::from_snapshot(&store.snapshot()));
+            m.selection = store.selection().clone();
+            m.rebuild_rows();
+            m
+        };
+        let eval = |_: &str, ch: &str, t: f64| -> Option<f64> {
+            let u = (t / 2.).clamp(0., 1.);
+            Some(match ch {
+                "scale.x" | "scale.y" => 100. + 100. * u,
+                "position.x" => 100. + 300. * u,
+                "position.y" => 100. + 400. * u,
+                _ => 0.,
+            })
+        };
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+
+        // Default linked scale + combined position:
+        // - Scale collapses to 1 curve named "Scale"
+        // - Position collapses to 1 Speed curve named "Position (Speed)" with handles
+        let m = make("", "sx0");
+        let g = sample(&m, &tokens, eval).expect("scale graph");
+        assert_eq!(g.curves().len(), 1);
+        assert_eq!(g.curves()[0].name, "Scale");
+        assert!(!g.speed);
+
+        let m = make("", "px0");
+        let g = sample(&m, &tokens, eval).expect("position speed graph");
+        assert_eq!(g.curves().len(), 1);
+        assert_eq!(g.curves()[0].name, "Position (Speed)");
+        assert!(g.speed);
+        // Velocity magnitude of (300/2, 400/2) = (150, 200) is 250 px/s.
+        assert!((g.curves()[0].points[0].point.value - 250.).abs() < 1e-3);
+        assert!(!g.curves()[0].points[0].handles.is_empty(), "speed handle shown");
+
+        // Unlinked scale + separated position: X and Y plot separately again.
+        let m = make(r#""scaleLinked": false, "separateDimensions": true,"#, "sx0");
+        let g = sample(&m, &tokens, eval).expect("unlinked scale graph");
+        assert_eq!(g.curves().len(), 2);
+
+        let m = make(r#""scaleLinked": false, "separateDimensions": true,"#, "px0");
+        let g = sample(&m, &tokens, eval).expect("separated position graph");
+        assert_eq!(g.curves().len(), 2);
+        assert!(!g.speed);
     }
 }

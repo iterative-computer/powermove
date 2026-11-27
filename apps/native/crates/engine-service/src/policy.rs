@@ -111,6 +111,8 @@ pub struct CacheKey {
     pub studio_preview: crate::studio::Preview,
     /// `ViewCamera::key` of the pane's camera.
     pub studio_view: u64,
+    /// Interactive focused group hash (0 when none).
+    pub focus_group: u64,
     /// What the frame read besides its document, as observed when it was
     /// drawn: its media files' stamps and the override wrappers answering.
     pub inputs: u64,
@@ -122,18 +124,26 @@ pub struct CacheKey {
     pub resources: u64,
 }
 impl CacheKey {
-    pub fn same_content(self, other: Self) -> bool {
+    /// Same rendered scene content regardless of viewer zoom/pan output
+    /// geometry (`width`, `height`, `crop`, `scale`). Whole-composition
+    /// surfaces stay valid under this key and serve any zoomed/panned crop
+    /// directly in the display pass without re-rendering.
+    pub fn same_scene_content(self, other: Self) -> bool {
         self.content == other.content
             && self.revision == other.revision
             && self.inputs == other.inputs
             && self.tone == other.tone
             && self.fonts == other.fonts
             && self.resources == other.resources
+            && self.studio_preview == other.studio_preview
+            && self.studio_view == other.studio_view
+            && self.focus_group == other.focus_group
+    }
+    pub fn same_content(self, other: Self) -> bool {
+        self.same_scene_content(other)
             && self.width == other.width
             && self.height == other.height
             && self.crop == other.crop
-            && self.studio_preview == other.studio_preview
-            && self.studio_view == other.studio_view
     }
 }
 
@@ -276,6 +286,17 @@ impl AutoQuality {
             self.slower_stills = cost_ms > SLOW_REDUCED * interval_ms;
         } else if cost_ms < 0.5 * interval_ms {
             self.slower_stills = false;
+        }
+    }
+    /// Elapsed work on a cancelled frame is a lower bound. It can lower
+    /// interactive quality, but it cannot tell us a higher scale will fit.
+    pub(crate) fn record_interrupted(&mut self, cost_ms: f64, interval_ms: f64, scale: f64) {
+        if scale >= 1. && cost_ms > interval_ms {
+            self.record_still(cost_ms, interval_ms, scale);
+        } else if scale == AUTO_FLOOR && cost_ms > SLOW_REDUCED * interval_ms {
+            self.slow_stills = true;
+            self.slower_stills = true;
+            self.quick_stills = 0;
         }
     }
     /// A playing frame drawn at `scale` took `cost_ms` (start to GPU done),

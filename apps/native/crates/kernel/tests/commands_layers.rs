@@ -1152,19 +1152,80 @@ fn anchor_align_selection_left_skips_locked_and_is_idempotent() {
     use pm_kernel::{TransformCommand, commands::transform::AlignMode};
     let mut s = store();
     let original = layer(&s, "locked");
+    let before_box = projected_anchor(&s, "box");
+    let before_top = projected_anchor(&s, "top");
+    let shift = 0.0 - before_box.0.min(before_top.0);
     let command = || TransformCommand::Align {
         layer_ids: vec!["box".into(), "locked".into(), "top".into()],
         mode: AlignMode::Left,
         time: 0.0,
     };
     run(&mut s, command());
-    close(projected_anchor(&s, "box").0, 10.0);
-    close(projected_anchor(&s, "top").0, 10.0);
+    close(projected_anchor(&s, "box").0, before_box.0 + shift);
+    close(projected_anchor(&s, "top").0, before_top.0 + shift);
     assert_eq!(layer(&s, "locked"), original);
     assert_eq!(s.history().len(), 1);
     let before = s.revision();
     run(&mut s, command());
     assert_eq!(s.revision(), before);
+}
+
+#[test]
+fn anchor_align_multi_selection_centers_selection_midpoint_preserving_spacing() {
+    use pm_kernel::{TransformCommand, commands::transform::AlignMode};
+    let mut s = store();
+    let a = projected_anchor(&s, "top");
+    let b = projected_anchor(&s, "box");
+    let spacing_y = b.1 - a.1;
+    run(
+        &mut s,
+        TransformCommand::Align {
+            layer_ids: vec!["top".into(), "box".into()],
+            mode: AlignMode::VerticalCenter,
+            time: 0.0,
+        },
+    );
+    let a_after = projected_anchor(&s, "top");
+    let b_after = projected_anchor(&s, "box");
+    // Comp height is 100 -> midpoint of selection moves to 50 while relative spacing stays intact.
+    close((a_after.1 + b_after.1) / 2.0, 50.0);
+    close(b_after.1 - a_after.1, spacing_y);
+}
+
+#[test]
+fn new_text_centers_anchor_y_and_center_anchor_vertical_preserves_x() {
+    use pm_kernel::{LayerCommand, TransformCommand};
+    let mut s = store();
+    run(&mut s, LayerCommand::Add(Box::new(add("t1", "text"))));
+    let t1 = layer(&s, "t1");
+    // Default text size is 128 -> vertically centered anchor.y = 64.
+    close(num(&t1, &["p", "anchor.y", "v"]), 64.0);
+    close(num(&t1, &["p", "anchor.x", "v"]), 0.0);
+
+    // Explicit anchor.y (e.g. paragraph drag pinning top edge) is respected.
+    let mut add2 = add("t2", "text");
+    add2.properties.insert("anchor.y", Value::Number(0.0));
+    run(&mut s, LayerCommand::Add(Box::new(add2)));
+    close(num(&layer(&s, "t2"), &["p", "anchor.y", "v"]), 0.0);
+
+    // CenterAnchorVertical updates anchor.y while preserving anchor.x and visual position.
+    let mut solid = add("s1", "solid");
+    solid.properties.insert("anchor.x", Value::Number(12.0));
+    solid.properties.insert("anchor.y", Value::Number(0.0));
+    run(&mut s, LayerCommand::Add(Box::new(solid)));
+    let before_pos_y = num(&layer(&s, "s1"), &["p", "position.y", "v"]);
+    run(
+        &mut s,
+        TransformCommand::CenterAnchorVertical {
+            layer_ids: vec!["s1".into()],
+            time: 0.0,
+        },
+    );
+    let after = layer(&s, "s1");
+    let ay = num(&after, &["p", "anchor.y", "v"]);
+    close(ay, 50.0);
+    close(num(&after, &["p", "anchor.x", "v"]), 12.0);
+    close(num(&after, &["p", "position.y", "v"]), before_pos_y + ay);
 }
 
 #[test]
@@ -1196,7 +1257,7 @@ fn anchor_align_parent_and_child_3d_projection() {
         });
         let a = projected_anchor(&s, "top");
         let b = projected_anchor(&s, "box");
-        let target = (a.0 + b.0) / 2.0;
+        let shift = 100.0 - (a.0 + b.0) / 2.0;
         // Child first in selection deliberately exercises ancestor ordering.
         run(
             &mut s,
@@ -1206,8 +1267,8 @@ fn anchor_align_parent_and_child_3d_projection() {
                 time: 0.0,
             },
         );
-        close(projected_anchor(&s, "top").0, target);
-        close(projected_anchor(&s, "box").0, target);
+        close(projected_anchor(&s, "top").0, a.0 + shift);
+        close(projected_anchor(&s, "box").0, b.0 + shift);
         close(projected_anchor(&s, "top").1, a.1);
         close(projected_anchor(&s, "box").1, b.1);
         assert_eq!(s.history().len(), 1);
@@ -2255,6 +2316,180 @@ fn duplicate_group_and_explicit_child_preserves_caller_ids_without_double_copy()
         .filter(|l| l.get("group").and_then(Value::as_str) == Some("g1_new"))
         .count();
     assert_eq!(children_of_copy, 2);
+}
+
+#[test]
+fn group_3d_layers_auto_enables_3d_and_centers_depth_pivot() {
+    let mut s = store_with(|p| {
+        p.as_object_mut().unwrap().insert(
+            "layers",
+            parse(
+                r#"[
+                    {"id":"a","type":"shape","name":"Front","threeD":true,"from":0,"dur":4,"on":true,"p":{"position.x":{"v":400,"kf":[]},"position.y":{"v":300,"kf":[]},"position.z":{"v":100,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]},"anchor.z":{"v":0,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"scale.z":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"rotation.x":{"v":0,"kf":[]},"rotation.y":{"v":0,"kf":[]},"orientation.x":{"v":0,"kf":[]},"orientation.y":{"v":0,"kf":[]},"orientation.z":{"v":0,"kf":[]},"perspective":{"v":50,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{"w":100,"h":100},"fx":[]},
+                    {"id":"b","type":"shape","name":"Back","threeD":true,"from":0,"dur":4,"on":true,"p":{"position.x":{"v":600,"kf":[]},"position.y":{"v":300,"kf":[]},"position.z":{"v":300,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]},"anchor.z":{"v":0,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"scale.z":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"rotation.x":{"v":0,"kf":[]},"rotation.y":{"v":0,"kf":[]},"orientation.x":{"v":0,"kf":[]},"orientation.y":{"v":0,"kf":[]},"orientation.z":{"v":0,"kf":[]},"perspective":{"v":50,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}
+                ]"#,
+            )
+            .unwrap(),
+        );
+    });
+    run(
+        &mut s,
+        GroupCommand::Group {
+            layer_ids: vec!["a".into(), "b".into()],
+            group_id: "g3d".into(),
+            name: Some("Stack3D".into()),
+            time: 0.0,
+        },
+    );
+    let g = layer(&s, "g3d");
+    assert_eq!(get(&g, &["threeD"]).as_bool(), Some(true));
+    assert!((num(&g, &["p", "anchor.z", "v"]) - 200.0).abs() < 1e-4);
+    assert!((num(&g, &["p", "position.z", "v"]) - 200.0).abs() < 1e-4);
+}
+
+#[test]
+fn group_initializes_from_and_dur_to_member_span() {
+    let mut s = store_with(|p| {
+        p.as_object_mut()
+            .unwrap()
+            .insert("dur", Value::Number(103.0));
+        p.as_object_mut().unwrap().insert(
+            "layers",
+            parse(
+                r#"[
+                    {"id":"a","type":"shape","name":"A","from":31.0,"dur":2.5,"on":true,"p":{},"d":{}},
+                    {"id":"b","type":"shape","name":"B","from":32.0,"dur":3.0,"on":true,"p":{},"d":{}}
+                ]"#,
+            )
+            .unwrap(),
+        );
+    });
+    run(
+        &mut s,
+        GroupCommand::Group {
+            layer_ids: vec!["a".into(), "b".into()],
+            group_id: "g".into(),
+            name: Some("Shots".into()),
+            time: 32.0,
+        },
+    );
+    let g = layer(&s, "g");
+    assert_eq!(num(&g, &["from"]), 31.0);
+    assert_eq!(num(&g, &["dur"]), 4.0);
+}
+
+#[test]
+fn deleting_parent_null_preserves_child_world_pose_like_unlinking() {
+    let make_parented = || {
+        let mut s = store_with(|p| {
+            let layers = p
+                .as_object_mut()
+                .unwrap()
+                .get_mut("layers")
+                .unwrap()
+                .as_array_mut()
+                .unwrap();
+            layers.insert(
+                0,
+                parse(
+                    r#"{"id":"rig","type":"null","name":"Rig","from":0,"dur":10,"on":true,"p":{
+                        "position.x":{"v":600,"kf":[{"i":"rk0","t":0,"v":600},{"i":"rk1","t":4,"v":1000}],"expr":null},
+                        "position.y":{"v":400,"kf":[],"expr":null},
+                        "anchor.x":{"v":0,"kf":[],"expr":null},"anchor.y":{"v":0,"kf":[],"expr":null},
+                        "scale.x":{"v":200,"kf":[],"expr":null},"scale.y":{"v":200,"kf":[],"expr":null},
+                        "rotation":{"v":90,"kf":[],"expr":null},"skew":{"v":0,"kf":[],"expr":null},
+                        "opacity":{"v":100,"kf":[],"expr":null}
+                    },"d":{}}"#,
+                )
+                .unwrap(),
+            );
+        });
+        // Parent `box` to the animated null at t = 2.0 (where rig.position.x = 800).
+        run(
+            &mut s,
+            LayerCommand::Set {
+                layer_id: "box".into(),
+                patch: LayerPatch {
+                    parent: Some(ParentChange {
+                        parent: Some("rig".into()),
+                        time: 2.0,
+                    }),
+                    ..Default::default()
+                },
+            },
+        );
+        s
+    };
+    let mut s = make_parented();
+    // Deleting the null at t = 2.0 must match manually unlinking at t = 2.0.
+    let mut unlinked = make_parented();
+    run(
+        &mut unlinked,
+        LayerCommand::Set {
+            layer_id: "box".into(),
+            patch: LayerPatch {
+                parent: Some(ParentChange {
+                    parent: None,
+                    time: 2.0,
+                }),
+                ..Default::default()
+            },
+        },
+    );
+    run(
+        &mut s,
+        LayerCommand::DeleteAt {
+            layer_ids: vec!["rig".into()],
+            time: 2.0,
+        },
+    );
+    assert!(!ids(&s).contains(&"rig".to_owned()));
+    let after_delete = layer(&s, "box");
+    let after_unlink = layer(&unlinked, "box");
+    assert!(get(&after_delete, &["parent"]).is_null());
+    for ch in ["position.x", "position.y", "scale.x", "scale.y", "rotation"] {
+        let a = num(&after_delete, &["p", ch, "v"]);
+        let b = num(&after_unlink, &["p", ch, "v"]);
+        assert!(
+            (a - b).abs() < 1e-4,
+            "{ch}: after delete {a} != after unlink {b}"
+        );
+    }
+    // Undo restores the null and parenting cleanly in one step.
+    s.undo().unwrap();
+    assert!(ids(&s).contains(&"rig".to_owned()));
+    assert_eq!(get(&layer(&s, "box"), &["parent"]).as_str(), Some("rig"));
+}
+
+#[test]
+fn enabling_3d_on_group_with_3d_children_centers_z_pivot() {
+    let mut s = store_with(|p| {
+        p.as_object_mut().unwrap().insert(
+            "layers",
+            parse(
+                r#"[
+                    {"id":"g","type":"group","name":"Card","threeD":false,"from":0,"dur":4,"on":true,"p":{"position.x":{"v":500,"kf":[]},"position.y":{"v":300,"kf":[]},"anchor.x":{"v":500,"kf":[]},"anchor.y":{"v":300,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{},"fx":[]},
+                    {"id":"c1","type":"shape","name":"Front","group":"g","threeD":true,"from":0,"dur":4,"on":true,"p":{"position.x":{"v":500,"kf":[]},"position.y":{"v":300,"kf":[]},"position.z":{"v":120,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]},"anchor.z":{"v":0,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"scale.z":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"rotation.x":{"v":0,"kf":[]},"rotation.y":{"v":0,"kf":[]},"orientation.x":{"v":0,"kf":[]},"orientation.y":{"v":0,"kf":[]},"orientation.z":{"v":0,"kf":[]},"perspective":{"v":50,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{"w":100,"h":100},"fx":[]},
+                    {"id":"c2","type":"shape","name":"Back","group":"g","threeD":true,"from":0,"dur":4,"on":true,"p":{"position.x":{"v":500,"kf":[]},"position.y":{"v":300,"kf":[]},"position.z":{"v":320,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]},"anchor.z":{"v":0,"kf":[]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"scale.z":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"rotation.x":{"v":0,"kf":[]},"rotation.y":{"v":0,"kf":[]},"orientation.x":{"v":0,"kf":[]},"orientation.y":{"v":0,"kf":[]},"orientation.z":{"v":0,"kf":[]},"perspective":{"v":50,"kf":[]},"opacity":{"v":100,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}
+                ]"#,
+            )
+            .unwrap(),
+        );
+    });
+    run(
+        &mut s,
+        LayerCommand::Set {
+            layer_id: "g".into(),
+            patch: LayerPatch {
+                three_d: Some(true),
+                ..Default::default()
+            },
+        },
+    );
+    let g = layer(&s, "g");
+    assert_eq!(get(&g, &["threeD"]).as_bool(), Some(true));
+    assert!((num(&g, &["p", "anchor.z", "v"]) - 220.0).abs() < 1e-4);
+    assert!((num(&g, &["p", "position.z", "v"]) - 220.0).abs() < 1e-4);
 }
 
 /// A composition without a `threeD` layer answers that no layer is 3D

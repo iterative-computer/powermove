@@ -31,12 +31,7 @@ impl DocumentSource {
         let height = pm_eval::node::number(comp.member("h"))
             .unwrap_or(1.)
             .max(1.);
-        let unit = 6. / height;
-        let bridge = pm_scene3d::render::gltf::math::compose(
-            [-width * unit / 2., 3., 0.],
-            [0., 0., 0., 1.],
-            [unit, -unit, -unit],
-        );
+        let bridge = pm_eval::space3d::pixel_to_scene(width, height);
         let flip =
             pm_scene3d::render::gltf::math::compose([0.; 3], [0., 0., 0., 1.], [1., -1., -1.]);
         let layers: Vec<_> = scope.layers().iter().collect();

@@ -295,6 +295,8 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     let mut extension_notice = ExtensionNotice::default();
     let mut studio_status = None;
     let mut measured = None::<(f32, Slot)>;
+    let mut last_playhead_style = None::<(u32, u32, f32, u64)>;
+    let mut last_playing_event = None::<bool>;
     // The display link's next vsync (host seconds): where a playing playhead
     // and timecode will be seen, rather than where the last sample stood.
     let mut vsync = None::<f64>;
@@ -402,6 +404,22 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 if let Some(clock)=status.clock {
                     // Shuttling is a run too: the live timecode shows at every speed.
                     let playing=status.wants_display && clock.state!=pm_protocol::clock::TransportState::Stopped;
+                    let playing_now = v.playing();
+                    if last_playing_event != Some(playing_now) {
+                        last_playing_event = Some(playing_now);
+                        if let Some(runtime) = &v.builtins.runtime {
+                            let seconds = clock.media_time.get() as f64
+                                / pm_protocol::common::TICKS_PER_SECOND as f64;
+                            runtime.emit_event(
+                                "playback",
+                                &serde_json::json!({
+                                    "playing": playing_now,
+                                    "time": seconds,
+                                    "rate": clock.rate.num as f64 / clock.rate.den.max(1) as f64,
+                                }),
+                            );
+                        }
+                    }
                     // Playing, the head and timecode show the time at the vsync this
                     // tick lands on. A sample's own time only moves when a new one
                     // arrives, so a late sample held the head a frame, then jumped two.
@@ -430,7 +448,16 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let _:()=msg_send![&*layers.timecode,setFontSize:host.tokens.typography.timecode as f64];
                         // The text ink, as the paused readout (the accent marks the playhead alone).
                         let _:()=msg_send![&*layers.timecode,setForegroundColor:&*cg!(colors.text)];
-                        if let Some(p)=&playhead { p.style(&host.tokens, scale); }
+                        let style_key = (
+                            host.tokens.playhead().color,
+                            host.tokens.playhead().halo.0,
+                            host.tokens.metrics.border,
+                            scale.to_bits(),
+                        );
+                        if last_playhead_style != Some(style_key) {
+                            last_playhead_style = Some(style_key);
+                            if let Some(p)=&playhead { p.style(&host.tokens, scale); }
+                        }
                         let geometry=v.builtins.timeline_place;
                         let seconds=head_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64;
                         // Playing, the timeline pages to keep its head in sight (v1).

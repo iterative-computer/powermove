@@ -108,7 +108,7 @@ pub struct CopiedKey {
 /// One key of `replace_keyframes`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyframeSpec {
-    /// Layer-local seconds (negative becomes 0).
+    /// Layer-local seconds, bounded by the composition start for delayed layers.
     pub time: f64,
     pub value: Value,
     /// Named ease (default linear); ignored when `temporal` is given.
@@ -216,6 +216,11 @@ pub enum KeyframeCommand {
     /// keeps that key's value as its static value. Missing ids are ignored.
     /// Label "Delete Keyframes".
     Delete { key_ids: Vec<String> },
+    /// Delete selected keys at composition `time` (the playhead): a channel
+    /// losing its last key keeps the value currently evaluated at `time`
+    /// instead of snapping back to the first key's value. Missing ids are
+    /// ignored. Label "Delete Keyframes".
+    DeleteAt { key_ids: Vec<String>, time: f64 },
     /// Clear All Keyframes / Remove Animation: the channel becomes static at
     /// the value its keys give at `time` (the playhead) and loses its keys.
     /// Label "Clear Keyframes".
@@ -326,7 +331,7 @@ impl KeyframeCommand {
             KeyframeCommand::Simplify { .. } => "Simplify Keyframes",
             KeyframeCommand::Add { .. } => "Add Keyframe",
             KeyframeCommand::Toggle { .. } => "Toggle Keyframe",
-            KeyframeCommand::Delete { .. } => "Delete Keyframes",
+            KeyframeCommand::Delete { .. } | KeyframeCommand::DeleteAt { .. } => "Delete Keyframes",
             KeyframeCommand::ClearAll { .. } => "Clear Keyframes",
             KeyframeCommand::Move { .. } => "Move Keyframes",
             KeyframeCommand::Edit { .. } => "Edit Keyframe",
@@ -362,13 +367,8 @@ impl KeyframeCommand {
                 key_id,
                 value,
             } => add_key(cx, layer_id, channel, *time, key_id, value.as_ref(), true),
-            KeyframeCommand::Delete { key_ids } => {
-                let ids: HashSet<&str> = key_ids.iter().map(String::as_str).collect();
-                edit_tracks(cx, &ids, |_, prop, _| {
-                    track::remove_keys(prop, &ids);
-                    Ok(())
-                })
-            }
+            KeyframeCommand::Delete { key_ids } => delete_keys(cx, key_ids, None),
+            KeyframeCommand::DeleteAt { key_ids, time } => delete_keys(cx, key_ids, Some(*time)),
             KeyframeCommand::ClearAll {
                 layer_id,
                 channel,
@@ -595,13 +595,29 @@ fn easing_curve(curve: &EaseSpec) -> Result<[f64; 4], CommandError> {
 }
 
 /// `key.eo = …; key.ei = …` through the bridge accessors of
-/// `temporal-bridge.ts`, then `key.hold = false`.
-fn set_unit_handles(keys: &mut [Value], index: usize, eo: [f64; 2], ei: [f64; 2]) {
+/// `temporal-bridge.ts`, then `key.hold = false`, touching only the requested
+/// sides (`apply_in`, `apply_out`) so easing a selected span of keyframes never
+/// corrupts adjacent unselected segments.
+fn set_unit_handles_sides(
+    keys: &mut [Value],
+    index: usize,
+    eo: [f64; 2],
+    ei: [f64; 2],
+    apply_in: bool,
+    apply_out: bool,
+) {
+    if !apply_in && !apply_out {
+        return;
+    }
     if !keys.iter().all(|k| track::numeric(k.get("v"))) {
         let m = values::obj(&mut keys[index]);
-        m.insert("eo", pair(eo));
-        m.insert("ei", pair(ei));
-        m.insert("hold", Value::Bool(false));
+        if apply_out {
+            m.insert("eo", pair(eo));
+            m.insert("hold", Value::Bool(false));
+        }
+        if apply_in {
+            m.insert("ei", pair(ei));
+        }
         return;
     }
     let mut e = track::ease_key(&keys[index]);
@@ -619,13 +635,22 @@ fn set_unit_handles(keys: &mut [Value], index: usize, eo: [f64; 2], ei: [f64; 2]
         ),
         None => (1.0, 1.0),
     };
-    let (dt, dv) = span(other(1).or_else(|| other(-1)));
-    e.out_interp = Interp::Bezier;
     e.auto_bezier = false;
-    e.out_ease = pm_eval::temporal::ease_from_unit_handle(eo, dt, dv, Side::Out);
-    let (dt, dv) = span(other(-1).or_else(|| other(1)));
-    e.in_interp = Interp::Bezier;
-    e.in_ease = pm_eval::temporal::ease_from_unit_handle(ei, dt, dv, Side::In);
+    if apply_in != apply_out {
+        // Modifying only one side of an interior boundary key decouples it from
+        // the untouched adjacent segment so future edits keep them independent.
+        e.continuous = false;
+    }
+    if apply_out {
+        let (dt, dv) = span(other(1).or_else(|| other(-1)));
+        e.out_interp = Interp::Bezier;
+        e.out_ease = pm_eval::temporal::ease_from_unit_handle(eo, dt, dv, Side::Out);
+    }
+    if apply_in {
+        let (dt, dv) = span(other(-1).or_else(|| other(1)));
+        e.in_interp = Interp::Bezier;
+        e.in_ease = pm_eval::temporal::ease_from_unit_handle(ei, dt, dv, Side::In);
+    }
     track::write_ease(&mut keys[index], &e);
 }
 
@@ -690,6 +715,12 @@ fn pair(v: [f64; 2]) -> Value {
 }
 
 /// `setEasing(command)`.
+///
+/// When 2+ consecutive keyframes are selected on a track, the curve is applied
+/// to the segments *between* the selected keyframes without touching the outer
+/// incoming handle before the first selected key or the outer outgoing handle
+/// after the last selected key (when unselected neighbors exist). Isolated
+/// single selected keyframes still receive both handles.
 fn set_easing(cx: &mut Cx<'_>, key_ids: &[String], curve: &EaseSpec) -> Result<(), CommandError> {
     let ids: HashSet<&str> = key_ids
         .iter()
@@ -705,15 +736,40 @@ fn set_easing(cx: &mut Cx<'_>, key_ids: &[String], curve: &EaseSpec) -> Result<(
     edit_tracks(cx, &ids, |_, prop, _| {
         let keys = track::keys_mut(prop);
         track::temporal_keys(keys);
-        for i in 0..keys.len() {
-            if keys[i]
-                .get("i")
-                .and_then(Value::as_str)
-                .is_some_and(|k| ids.contains(k))
-            {
-                found = true;
-                set_unit_handles(keys, i, [curve[0], curve[1]], [curve[2], curve[3]]);
+        let selected: Vec<bool> = keys
+            .iter()
+            .map(|k| {
+                k.get("i")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| ids.contains(id))
+            })
+            .collect();
+        let len = keys.len();
+        for i in 0..len {
+            if !selected[i] {
+                continue;
             }
+            found = true;
+            let prev_selected = i > 0 && selected[i - 1];
+            let next_selected = i + 1 < len && selected[i + 1];
+            let (apply_in, apply_out) = if prev_selected || next_selected {
+                // Part of a selected segment span: preserve outer unselected
+                // neighbor segments (`k[i-1] -> k[i]` and `k[i] -> k[i+1]`).
+                let apply_in = prev_selected || i == 0;
+                let apply_out = next_selected || i + 1 == len;
+                (apply_in, apply_out)
+            } else {
+                // Isolated single selected keyframe on this track.
+                (true, true)
+            };
+            set_unit_handles_sides(
+                keys,
+                i,
+                [curve[0], curve[1]],
+                [curve[2], curve[3]],
+                apply_in,
+                apply_out,
+            );
         }
         Ok(())
     })?;
@@ -721,6 +777,211 @@ fn set_easing(cx: &mut Cx<'_>, key_ids: &[String], curve: &EaseSpec) -> Result<(
         return Err(CommandError::KeyframeNotFound(String::new()));
     }
     Ok(())
+}
+
+/// Write at a snapped layer-local time, including frames before a delayed layer.
+fn set_snapped_key(
+    prop: &mut Value,
+    time: f64,
+    value: Value,
+    ease: &str,
+    fps: f64,
+    new_id: impl FnOnce() -> String,
+) -> (String, bool) {
+    if time >= 0.0 {
+        return track::set_key_on(prop, time, value, ease, fps, false, new_id);
+    }
+    let keys = track::keys_mut(prop);
+    if let Some(key) = keys.iter_mut().find(|key| {
+        key.get("t")
+            .is_some_and(|t| (track::js_number(t) - time).abs() < 0.5 / fps)
+    }) {
+        values::obj(key).insert("v", value);
+        return (track::key_id(key), false);
+    }
+    let id = new_id();
+    keys.push(track::legacy_key(time, value, ease, id.clone()));
+    track::sort_keys(keys);
+    (id, true)
+}
+
+/// Inserts a new keyframe at `snapped` while preserving an existing enclosing
+/// numeric curve segment (via exact de Casteljau subdivision for Bézier
+/// segments, or hold propagation for held segments) so placing a keyframe on
+/// an animated curve never interrupts its value or speed curve.
+/// Returns `Some(())` when handled as an interior segment split, or `None` to
+/// fall back to standard key insertion.
+fn insert_preserving_segment(
+    prop: &mut Value,
+    snapped: f64,
+    explicit_value: Option<&Value>,
+    key_id: &str,
+) -> Option<()> {
+    use pm_eval::temporal::{
+        EPSILON, EaseKeyframe, LINEAR_INFLUENCE, TimeValue, clamp_influence, is_held_segment,
+        make_ease, refresh_auto_bezier, segment_control_points, segment_param_at_time,
+        value_at_time,
+    };
+
+    let existing = track::keys_of(prop);
+    if existing.len() < 2 || existing.iter().any(|k| !track::numeric(k.get("v"))) {
+        return None;
+    }
+
+    // Ensure keys are sorted and normalized into the native temporal ease model
+    // before reading control points so legacy handles are preserved too.
+    let keys = track::keys_mut(prop);
+    track::sort_keys(keys);
+    track::temporal_keys(keys);
+
+    let mut eased: Vec<EaseKeyframe> = keys.iter().map(track::ease_key).collect();
+    refresh_auto_bezier(&mut eased);
+
+    // Find the segment (i, i + 1) strictly containing `snapped`.
+    let seg = (0..eased.len() - 1).find(|&i| {
+        let ta = eased[i].t;
+        let tb = eased[i + 1].t;
+        ta.is_finite() && tb.is_finite() && snapped > ta + EPSILON && snapped < tb - EPSILON
+    })?;
+
+    // Spring-driven segments cannot be split into two cubic Béziers.
+    if keys[seg].get("spring").is_some() {
+        return None;
+    }
+
+    let mut a = eased[seg];
+    let mut b = eased[seg + 1];
+    let va = a.v?;
+    let _vb = b.v?;
+
+    let expected_v = value_at_time(&a, &b, snapped);
+    if !expected_v.is_finite() {
+        return None;
+    }
+    if let Some(explicit) = explicit_value {
+        let ev = explicit.as_f64().filter(|v| v.is_finite())?;
+        // Only preserve the curve when the caller didn't supply a deliberately
+        // different value (e.g., UI passing the evaluated readout at playhead).
+        if (ev - expected_v).abs() > 1e-2 * (1.0 + expected_v.abs()) {
+            return None;
+        }
+    }
+
+    let linear = make_ease(0.0, LINEAR_INFLUENCE);
+    let mut new_key = Map::new();
+    new_key.insert("t", Value::Number(snapped));
+    new_key.insert("v", Value::Number(expected_v));
+    new_key.insert("i", values::s(key_id));
+    let mut new_key = Value::Object(new_key);
+
+    if is_held_segment(&a, &b) {
+        let held_val = Value::Number(va);
+        values::obj(&mut new_key).insert("v", held_val);
+        let m = EaseKeyframe {
+            t: snapped,
+            v: Some(va),
+            in_interp: Interp::Linear,
+            out_interp: if a.out_interp == Interp::Hold {
+                Interp::Hold
+            } else {
+                Interp::Linear
+            },
+            in_ease: linear,
+            out_ease: linear,
+            auto_bezier: false,
+            continuous: false,
+        };
+        track::write_ease(&mut new_key, &m);
+        keys.insert(seg + 1, new_key);
+        return Some(());
+    }
+
+    if a.out_interp == Interp::Linear && b.in_interp == Interp::Linear {
+        let m = EaseKeyframe::linear(snapped, expected_v);
+        track::write_ease(&mut new_key, &m);
+        keys.insert(seg + 1, new_key);
+        return Some(());
+    }
+
+    // Exact de Casteljau subdivision of the cubic Bézier segment A → B at u.
+    let curve = segment_control_points(&a, &b);
+    let u = segment_param_at_time(&a, &b, snapped);
+    let lerp = |p: TimeValue, q: TimeValue| TimeValue {
+        t: p.t + (q.t - p.t) * u,
+        v: p.v + (q.v - p.v) * u,
+    };
+    let q0 = lerp(curve.p0, curve.p1);
+    let q1 = lerp(curve.p1, curve.p2);
+    let q2 = lerp(curve.p2, curve.p3);
+    let r0 = lerp(q0, q1);
+    let r1 = lerp(q1, q2);
+    let s = lerp(r0, r1);
+
+    let dt_left = snapped - a.t;
+    let dt_right = b.t - snapped;
+    if !(dt_left > EPSILON && dt_right > EPSILON) {
+        return None;
+    }
+
+    let handle_to_ease = |key_pt: TimeValue, ctrl_pt: TimeValue, dt: f64, side: Side, fallback_speed: f64| {
+        let reach = match side {
+            Side::Out => ctrl_pt.t - key_pt.t,
+            Side::In => key_pt.t - ctrl_pt.t,
+        };
+        let rise = match side {
+            Side::Out => ctrl_pt.v - key_pt.v,
+            Side::In => key_pt.v - ctrl_pt.v,
+        };
+        let influence = clamp_influence((reach.max(0.0) / dt) * 100.0);
+        let speed = if reach.abs() > EPSILON {
+            rise / reach
+        } else {
+            fallback_speed
+        };
+        make_ease(speed, influence)
+    };
+
+    let a_out_fallback = pm_eval::temporal::resolved_out_ease(&a, &b).speed;
+    let b_in_fallback = pm_eval::temporal::resolved_in_ease(&a, &b).speed;
+    let a_out_ease = handle_to_ease(curve.p0, q0, dt_left, Side::Out, a_out_fallback);
+    let m_in_ease = handle_to_ease(s, r0, dt_left, Side::In, a_out_fallback);
+    let m_out_ease = handle_to_ease(s, r1, dt_right, Side::Out, m_in_ease.speed);
+    let b_in_ease = handle_to_ease(curve.p3, q2, dt_right, Side::In, b_in_fallback);
+
+    // Freeze auto-bezier on the two bounding keys into continuous Bézier so
+    // refresh_auto_bezier does not overwrite their subdivided handles, while
+    // keeping their opposite-side tangents (already refreshed above) intact.
+    if a.auto_bezier {
+        a.auto_bezier = false;
+        a.continuous = true;
+    }
+    a.out_interp = Interp::Bezier;
+    a.out_ease = a_out_ease;
+
+    if b.auto_bezier {
+        b.auto_bezier = false;
+        b.continuous = true;
+    }
+    b.in_interp = Interp::Bezier;
+    b.in_ease = b_in_ease;
+
+    let m = EaseKeyframe {
+        t: snapped,
+        v: Some(s.v),
+        in_interp: Interp::Bezier,
+        out_interp: Interp::Bezier,
+        in_ease: m_in_ease,
+        out_ease: m_out_ease,
+        auto_bezier: false,
+        continuous: true,
+    };
+
+    values::obj(&mut new_key).insert("v", Value::Number(s.v));
+    track::write_ease(&mut keys[seg], &a);
+    track::write_ease(&mut keys[seg + 1], &b);
+    track::write_ease(&mut new_key, &m);
+    keys.insert(seg + 1, new_key);
+    Some(())
 }
 
 /// Add Keyframe at Playhead and the diamond.
@@ -735,7 +996,9 @@ fn add_key(
 ) -> Result<(), CommandError> {
     let (loc, mut layer, channel, path) = properties::resolve(cx, layer_id, channel)?;
     let fps = track::safe_fps(cx.fps(loc.comp_id.as_deref()));
-    let local = track::local_time(&layer, values::finite(time, "time")?);
+    let min_time = track::local_time(&layer, 0.0).min(0.0);
+    let local = track::local_time(&layer, values::finite(time, "time")?.max(0.0));
+    let snapped = values::snap(local, fps).max(min_time);
     let prop = channels::get_mut(&mut layer, &path).expect("resolved");
     let existing = track::keys_of(prop).iter().position(|k| {
         (track::js_number(k.get("t").unwrap_or(&Value::Null)) - local).abs() < 0.5 / fps
@@ -748,18 +1011,52 @@ fn add_key(
         }
         Some(_) => return Ok(()),
         None => {
-            let v = match value {
-                Some(v) => v.clone(),
-                None => value_at(prop, local, &channel),
-            };
-            let (id, created) =
-                track::set_key_on(prop, local, v, "linear", fps, true, || key_id.to_owned());
-            if created {
-                track::apply_presets(track::keys_mut(prop), &[(id, "linear".into(), None)]);
+            if insert_preserving_segment(prop, snapped, value, key_id).is_none() {
+                let v = match value {
+                    Some(v) => v.clone(),
+                    None => value_at(prop, snapped, &channel),
+                };
+                let (id, created) =
+                    set_snapped_key(prop, snapped, v, "linear", fps, || key_id.to_owned());
+                if created {
+                    track::apply_presets(track::keys_mut(prop), &[(id, "linear".into(), None)]);
+                } else {
+                    track::temporal_keys(track::keys_mut(prop));
+                }
             }
         }
     }
     cx.put_layer(&loc, layer)
+}
+
+/// Delete selected keys; when `time` is given and all keys on a channel are
+/// removed, the channel becomes static at the value evaluated at `time` (the
+/// playhead) rather than snapping back to the first key's value.
+fn delete_keys(cx: &mut Cx<'_>, key_ids: &[String], time: Option<f64>) -> Result<(), CommandError> {
+    let time = match time {
+        Some(t) => Some(values::finite(t, "time")?),
+        None => None,
+    };
+    let ids: HashSet<&str> = key_ids.iter().map(String::as_str).collect();
+    edit_tracks(cx, &ids, |layer, prop, channel| {
+        let all_removed = !track::keys_of(prop).is_empty()
+            && track::keys_of(prop).iter().all(|k| {
+                k.get("i")
+                    .and_then(Value::as_str)
+                    .is_some_and(|i| ids.contains(i))
+            });
+        let kept = if all_removed {
+            time.map(|t| value_at(prop, track::local_time(layer, t), channel))
+        } else {
+            None
+        };
+        if track::remove_keys(prop, &ids)
+            && let Some(v) = kept
+        {
+            values::obj(prop).insert("v", v);
+        }
+        Ok(())
+    })
 }
 
 /// Clear All Keyframes: static at the value shown at `time`.
@@ -1020,13 +1317,14 @@ fn replace_keyframes(cx: &mut Cx<'_>, c: &ReplaceKeyframes) -> Result<(), Comman
             channel,
         });
     }
-    let fps = cx.fps(loc.comp_id.as_deref());
+    let fps = track::safe_fps(cx.fps(loc.comp_id.as_deref()));
+    let min_time = track::local_time(&layer, 0.0).min(0.0);
     let local_now = track::local_time(&layer, c.time);
     let prop = channels::get_mut(&mut layer, &path).expect("resolved");
     let numeric = prop.get("v").and_then(Value::as_f64).is_some();
     let mut next = Vec::with_capacity(c.keyframes.len());
     for (index, key) in c.keyframes.iter().enumerate() {
-        let time = values::finite(key.time, &format!("keyframe {} time", index + 1))?.max(0.0);
+        let time = values::finite(key.time, &format!("keyframe {} time", index + 1))?.max(min_time);
         let value = if numeric {
             Value::Number(values::finite(
                 track::js_number(&key.value),
@@ -1136,7 +1434,9 @@ fn replace_keyframes(cx: &mut Cx<'_>, c: &ReplaceKeyframes) -> Result<(), Comman
         };
         list.extend(out);
         let fallback = prop.get("v").cloned().unwrap_or(Value::Null);
-        let list = normalize_keyframes(list, &fallback);
+        // Treat authored times as-is when merging, including existing keys
+        // before composition start.
+        let list = normalize_keyframes_from(list, &fallback, f64::NEG_INFINITY);
         values::obj(prop).insert("kf", Value::Array(list));
         track::temporal_keys(track::keys_mut(prop));
     } else {
@@ -1153,9 +1453,8 @@ fn replace_keyframes(cx: &mut Cx<'_>, c: &ReplaceKeyframes) -> Result<(), Comman
                 Some(EaseSpec::Preset(p)) => p.clone(),
                 _ => "linear".to_owned(),
             };
-            let (id, _) = track::set_key_on(prop, *time, value.clone(), &ease, fps, false, || {
-                new_id("k")
-            });
+            let time = values::snap(*time, fps).max(min_time);
+            let (id, _) = set_snapped_key(prop, time, value.clone(), &ease, fps, || new_id("k"));
             edits.push((id, ease, Some(key.hold)));
         }
         track::apply_presets(track::keys_mut(prop), &edits);
@@ -1171,6 +1470,10 @@ fn replace_keyframes(cx: &mut Cx<'_>, c: &ReplaceKeyframes) -> Result<(), Comman
 /// time (stable), duplicate ids renewed, keys within 1e-6 s collapsed (the
 /// later wins).
 pub(crate) fn normalize_keyframes(raw: Vec<Value>, fallback: &Value) -> Vec<Value> {
+    normalize_keyframes_from(raw, fallback, 0.0)
+}
+
+fn normalize_keyframes_from(raw: Vec<Value>, fallback: &Value, min_time: f64) -> Vec<Value> {
     let expected = match fallback {
         Value::Number(_) => "number",
         Value::String(_) => "string",
@@ -1201,7 +1504,7 @@ pub(crate) fn normalize_keyframes(raw: Vec<Value>, fallback: &Value) -> Vec<Valu
         .into_iter()
         .filter_map(|key| {
             let t = track::js_number(key.get("t")?);
-            (key.as_object().is_some() && t.is_finite() && t >= 0.0 && valid(key.get("v")))
+            (key.as_object().is_some() && t.is_finite() && t >= min_time && valid(key.get("v")))
                 .then_some((t, key))
         })
         .map(|(t, mut key)| {

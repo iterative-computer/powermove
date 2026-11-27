@@ -240,6 +240,7 @@ pub fn new3d() -> Vec<Item> {
         ("Bulb", "point"),
         ("Sun", "sun"),
         ("Camera", "camera"),
+        ("3D Null", "null"),
         ("", ""),
         // Light presets, placed for the selected model and the shot (the
         // same `light_preset` operation agents use).

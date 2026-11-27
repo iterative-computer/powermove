@@ -27,35 +27,188 @@ pub struct PartHit {
     pub point: Vec3,
     pub distance: f64,
 }
-/// A part is a node in the model, with an optional source material slot.
+/// A part is a node in the model, with hierarchy metadata and an optional
+/// source material slot.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelPart {
     pub key: String,
     pub name: String,
+    pub raw_name: String,
+    pub parent: Option<String>,
+    pub depth: usize,
     pub material: Option<usize>,
+    pub material_name: Option<String>,
+    pub swatch: Option<String>,
+}
+
+fn srgb_channel(linear: f64) -> u8 {
+    let c = linear.clamp(0., 1.);
+    let s = if c <= 0.003_130_8 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1. / 2.4) - 0.055
+    };
+    (s * 255.).round().clamp(0., 255.) as u8
+}
+
+fn material_swatch(model: &gltf::Model, material_index: usize) -> (Option<String>, Option<String>) {
+    let Some(mat) = model.materials.get(material_index) else {
+        return (None, None);
+    };
+    let name = mat.name.trim();
+    let material_name = (!name.is_empty()).then(|| name.to_owned());
+    let [r, g, b] = mat.color;
+    let swatch = Some(format!(
+        "#{:02X}{:02X}{:02X}",
+        srgb_channel(r),
+        srgb_channel(g),
+        srgb_channel(b)
+    ));
+    (material_name, swatch)
+}
+
+fn middle_truncate(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars || max_chars < 6 {
+        return text.to_owned();
+    }
+    let tail = (max_chars / 2).min(18);
+    let head = max_chars.saturating_sub(tail + 1);
+    let mut out = String::with_capacity(text.len());
+    for &c in &chars[..head] {
+        out.push(c);
+    }
+    out.push('…');
+    for &c in &chars[chars.len() - tail..] {
+        out.push(c);
+    }
+    out
+}
+
+/// Finds a common delimiter-ended prefix shared by at least `min_matches` names
+/// (e.g. `flow100_obj_JoyConL_00__Mt_JoyconL_` on game/CAD glTF exports).
+fn dominant_token_prefix(names: &[&str]) -> Option<String> {
+    if names.len() < 3 {
+        return None;
+    }
+    let min_matches = ((names.len() * 6) / 10).max(3);
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for &name in names {
+        let mut seen_for_name = std::collections::HashSet::new();
+        for (idx, ch) in name.char_indices() {
+            if matches!(ch, '_' | '-' | '.' | '/' | ':' | ' ') {
+                let end = idx + ch.len_utf8();
+                if end >= 4 && end < name.len() {
+                    let prefix = &name[..end];
+                    if seen_for_name.insert(prefix) {
+                        *counts.entry(prefix).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count >= min_matches)
+        .max_by_key(|(prefix, count)| (prefix.len(), *count))
+        .map(|(prefix, _)| prefix.to_owned())
+}
+
+fn strip_prefix_tokens<'a>(name: &'a str, primary: Option<&str>, secondary: Option<&str>) -> &'a str {
+    for prefix in [primary, secondary].into_iter().flatten() {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            let trimmed = rest.trim_start_matches(['_', '-', '.', '/', ':', ' ']);
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
+        }
+    }
+    name
+}
+
+/// Clean display labels for a model's parts: strip redundant exporter prefixes,
+/// middle-truncate instead of cutting off unique suffixes, and disambiguate
+/// identical labels with `#1`, `#2`, ...
+pub fn clean_part_names(parts: &mut [ModelPart]) {
+    if parts.is_empty() {
+        return;
+    }
+    let raw_names: Vec<&str> = parts
+        .iter()
+        .map(|p| p.raw_name.as_str())
+        .filter(|n| !n.is_empty() && !n.starts_with("Part "))
+        .collect();
+    let primary = dominant_token_prefix(&raw_names);
+    // Also detect a broader root prefix (e.g. `flow100_obj_JoyConL_00__`) that
+    // matches strictly more nodes so outliers like `flow100_obj_JoyConL_00__lamp_mt`
+    // get trimmed cleanly too.
+    let secondary = primary.as_deref().and_then(|p| {
+        let primary_matches = raw_names.iter().filter(|n| n.starts_with(p)).count();
+        let mut cursor = p.trim_end_matches(['_', '-', '.', '/', ':', ' ']);
+        while let Some(cut) = cursor.rfind(['_', '-', '.', '/', ':', ' ']) {
+            let candidate = &p[..=cut];
+            if candidate.len() < 4 {
+                break;
+            }
+            let matches = raw_names.iter().filter(|n| n.starts_with(candidate)).count();
+            if matches > primary_matches {
+                return Some(candidate.to_owned());
+            }
+            cursor = cursor[..cut].trim_end_matches(['_', '-', '.', '/', ':', ' ']);
+        }
+        None
+    });
+
+    for part in parts.iter_mut() {
+        let base = strip_prefix_tokens(&part.raw_name, primary.as_deref(), secondary.as_deref());
+        part.name = middle_truncate(base, 36);
+        if let Some(mat) = part.material_name.as_deref() {
+            let clean_mat = strip_prefix_tokens(mat, primary.as_deref(), secondary.as_deref());
+            part.material_name = Some(middle_truncate(clean_mat, 32));
+        }
+    }
+
+    // Disambiguate duplicates cleanly (#1, #2, ...) without losing order.
+    let mut totals: HashMap<String, usize> = HashMap::new();
+    for part in parts.iter() {
+        *totals.entry(part.name.clone()).or_insert(0) += 1;
+    }
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for part in parts.iter_mut() {
+        if totals.get(&part.name).copied().unwrap_or(0) > 1 {
+            let idx = seen.entry(part.name.clone()).or_insert(0);
+            *idx += 1;
+            part.name = format!("{} #{idx}", part.name);
+        }
+    }
 }
 
 fn part_info(model: &gltf::Model, index: usize) -> Option<ModelPart> {
     let key = pose::part_key(model, index)?;
     let object = &model.objects[index];
-    let material = match &object.kind {
-        gltf::ObjectKind::Drawable(d) => model.material_sources[d.material],
-        _ => None,
-    };
-    let name = if object.name.trim().is_empty() || object.name.starts_with("mesh_") {
-        match &object.kind {
-            gltf::ObjectKind::Drawable(d) => model.materials.get(d.material)
-                .map(|material| material.name.trim()).filter(|name| !name.is_empty()),
-            _ => None,
+    let (material, material_name, swatch) = match &object.kind {
+        gltf::ObjectKind::Drawable(d) => {
+            let (mat_name, swatch) = material_swatch(model, d.material);
+            (model.material_sources[d.material], mat_name, swatch)
         }
+        _ => (None, None, None),
+    };
+    let raw_name = if object.name.trim().is_empty() || object.name.starts_with("mesh_") {
+        material_name.clone()
     } else {
-        Some(object.name.as_str())
-    }.map(|name| name.chars().take(40).collect())
-        .unwrap_or_else(|| format!("Part {}", key.replace('_', ".")));
+        Some(object.name.trim().to_owned())
+    }
+    .unwrap_or_else(|| format!("Part {}", key.replace('_', ".")));
+    let name = middle_truncate(&raw_name, 36);
     Some(ModelPart {
         key,
         name,
+        raw_name,
+        parent: None,
+        depth: 0,
         material,
+        material_name,
+        swatch,
     })
 }
 
@@ -75,12 +228,32 @@ pub fn model_parts(model: &crate::import::Model) -> Vec<ModelPart> {
             has_surface[parent] = true;
         }
     }
-    nodes
-        .into_iter()
-        .filter(|&index| has_surface[index])
-        .filter_map(|index| part_info(model, index))
-        .take(4096)
-        .collect()
+    let mut key_by_index: HashMap<usize, String> = HashMap::new();
+    let mut depth_by_index: HashMap<usize, usize> = HashMap::new();
+    let mut parts = Vec::new();
+    for index in nodes.into_iter().filter(|&index| has_surface[index]) {
+        if parts.len() >= 4096 {
+            break;
+        }
+        let Some(mut part) = part_info(model, index) else {
+            continue;
+        };
+        // Walk up to nearest included ancestor so parent/depth reflect the tree.
+        let mut cursor = model.objects[index].parent;
+        while let Some(parent_idx) = cursor {
+            if let Some(parent_key) = key_by_index.get(&parent_idx) {
+                part.parent = Some(parent_key.clone());
+                part.depth = depth_by_index.get(&parent_idx).copied().unwrap_or(0) + 1;
+                break;
+            }
+            cursor = model.objects[parent_idx].parent;
+        }
+        key_by_index.insert(index, part.key.clone());
+        depth_by_index.insert(index, part.depth);
+        parts.push(part);
+    }
+    clean_part_names(&mut parts);
+    parts
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1008,5 +1181,35 @@ mod part_tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn clean_part_names_strips_exporter_prefix_and_disambiguates_duplicates() {
+        let mk = |key: &str, raw: &str| ModelPart {
+            key: key.into(),
+            name: raw.into(),
+            raw_name: raw.into(),
+            parent: None,
+            depth: 0,
+            material: None,
+            material_name: None,
+            swatch: None,
+        };
+        let mut parts = vec![
+            mk("0", "flow100_obj_JoyConL_00__Mt_JoyconL_AL80"),
+            mk("1", "flow100_obj_JoyConL_00__Mt_JoyconL_BLU"),
+            mk("2", "flow100_obj_JoyConL_00__Mt_JoyconL_GLSMi"),
+            mk("3", "flow100_obj_JoyConL_00__Mt_JoyconL_GLSMi"),
+            mk("4", "flow100_obj_JoyConL_00__Mt_JoyconL_GLSMi"),
+            mk("5", "flow100_obj_JoyConL_00__lamp_mt"),
+        ];
+        clean_part_names(&mut parts);
+        let names: Vec<&str> = parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["AL80", "BLU", "GLSMi #1", "GLSMi #2", "GLSMi #3", "lamp_mt"]
+        );
+        // Original raw glTF names stay intact for search aliases & tooltips.
+        assert_eq!(parts[2].raw_name, "flow100_obj_JoyConL_00__Mt_JoyconL_GLSMi");
     }
 }

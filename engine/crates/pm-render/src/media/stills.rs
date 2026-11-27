@@ -50,6 +50,29 @@ impl StillAsk {
     }
 }
 
+impl StillAsk {
+    pub(super) fn normalized(
+        mut self,
+        facts: Option<&Result<super::StillFacts, super::ProbeIssue>>,
+    ) -> Self {
+        if self.interpreted {
+            self.edge = None;
+        } else if let Some(Ok(facts)) = facts {
+            self.edge = facts.preview_edge(self);
+        }
+        self
+    }
+}
+
+/// A full read or a larger preview can satisfy a preview request.
+pub(super) fn covers_edge(decoded: Option<u32>, requested: Option<u32>) -> bool {
+    match (decoded, requested) {
+        (None, _) => true,
+        (Some(decoded), Some(requested)) => decoded >= requested,
+        (Some(_), None) => false,
+    }
+}
+
 /// Stills queued or waiting for their frame at once (eight UHD 16-bit
 /// frames are 530 MB; more than its workers decode in a second).
 const MAX_READY: usize = 8;
@@ -177,7 +200,8 @@ fn decode(
     // heavy project outgrew the allowance (a few MB while playing), so none
     // was decoded ahead and the frame meeting it decoded it (50-90 ms).
     // Its real size is checked against the allowance again once decoded.
-    let estimate = match key.3.edge {
+    let known = super::still_facts_at(path, (key.1, key.2));
+    let estimate = match key.3.normalized(known.as_ref()).edge {
         Some(edge) => pm_media::image::imageio::preview_bytes_estimate(path, edge),
         None => pm_media::image::imageio::decoded_bytes_estimate(path),
     }
@@ -225,7 +249,7 @@ fn decode(
     // as HDR); a still read for its SDR base is decoded as such.
     let rendition = key.3.rendition;
     let default = rendition == pm_media::image::Rendition::default();
-    let (facts, whole) = match super::known_still_facts(path) {
+    let (facts, whole) = match known {
         Some(facts) => (facts, None),
         None => {
             let whole = pm_media::image::read(path, pool).ok();
@@ -235,10 +259,7 @@ fn decode(
     let whole = whole.filter(|_| default);
     // The facts say whether the frame reads a preview of this still or the
     // whole of it.
-    let edge = key
-        .3
-        .edge
-        .filter(|_| facts.is_ok_and(|f| f.previewed(key.3.interpreted)));
+    let edge = key.3.normalized(Some(&facts)).edge;
     let decoded = match (edge, whole) {
         (Some(edge), whole) => pm_media::image::imageio::read_preview(path, pool, edge)
             .map(|still| (still, Some(edge)))
@@ -470,26 +491,35 @@ impl StillPrefetch {
         }
     }
 
-    /// The still decoded for `path` at `stamp` and `ask`, if the worker has
-    /// it decoded at `edge` (the preview edge the frame is about to read at;
-    /// none: the whole still). One decoded another way is left to expire.
+    /// The smallest ready decode that covers the requested read.
     pub(crate) fn take(
         &mut self,
         path: &Path,
         stamp: (u64, u128),
         ask: StillAsk,
         edge: Option<u32>,
-    ) -> Option<StillImage> {
+    ) -> Option<Decoded> {
         self.drain();
-        let key = (path.to_path_buf(), stamp.0, stamp.1, ask);
-        if self.ready.get(&key)?.0.1 != edge {
-            return None;
-        }
-        let ((still, _), _) = self.ready.remove(&key)?;
+        let key = self
+            .ready
+            .iter()
+            .filter(|(key, ((_, decoded), _))| {
+                Self::same_read(key, path, stamp, ask) && covers_edge(*decoded, edge)
+            })
+            .min_by_key(|(_, ((_, decoded), _))| decoded.unwrap_or(u32::MAX))
+            .map(|(key, _)| key.clone())?;
+        let (decoded, _) = self.ready.remove(&key)?;
         self.shared
             .held
-            .fetch_sub(bytes_of(&still), Ordering::AcqRel);
-        Some(still)
+            .fetch_sub(bytes_of(&decoded.0), Ordering::AcqRel);
+        Some(decoded)
+    }
+
+    fn same_read(key: &StillKey, path: &Path, stamp: (u64, u128), ask: StillAsk) -> bool {
+        key.0 == path
+            && (key.1, key.2) == stamp
+            && key.3.interpreted == ask.interpreted
+            && key.3.rendition == ask.rendition
     }
 
     /// Waits while a worker is decoding `path` at `stamp` as `ask` reads it,
@@ -508,10 +538,18 @@ impl StillPrefetch {
         cancelled: &dyn Fn() -> bool,
     ) -> Waited {
         self.drain();
-        let key = (path.to_path_buf(), stamp.0, stamp.1, ask);
-        if !self.pending.contains(&key) {
+        let facts = super::still_facts_at(path, stamp);
+        let Some(key) = self
+            .pending
+            .iter()
+            .find(|key| {
+                Self::same_read(key, path, stamp, ask)
+                    && covers_edge(key.3.normalized(facts.as_ref()).edge, ask.edge)
+            })
+            .cloned()
+        else {
             return Waited::Done;
-        }
+        };
         {
             let mut claims = self.claims.lock().unwrap();
             if !claims.started.contains(&key) {
@@ -658,7 +696,7 @@ mod tests {
         prefetch.request(&path, stamp, StillAsk::default(), &pool);
         let started = std::time::Instant::now();
         let still = loop {
-            if let Some(still) = prefetch.take(&path, stamp, StillAsk::default(), None) {
+            if let Some((still, _)) = prefetch.take(&path, stamp, StillAsk::default(), None) {
                 break still;
             }
             assert!(started.elapsed().as_secs() < 30, "the worker answers");
@@ -732,7 +770,7 @@ mod tests {
             prefetch.take(&path, stamp, ask, None).is_none(),
             "a frame reading the whole still does not get a preview"
         );
-        let still = prefetch.take(&path, stamp, ask, Some(edge)).unwrap();
+        let (still, _) = prefetch.take(&path, stamp, ask, Some(edge)).unwrap();
         let side = still.frame.format.width.max(still.frame.format.height);
         assert!(side <= edge as usize, "{side} > {edge}");
         let interpreted = StillAsk {
@@ -742,7 +780,7 @@ mod tests {
         };
         prefetch.request(&path, stamp, interpreted, &pool);
         settle(&mut prefetch);
-        let still = prefetch.take(&path, stamp, interpreted, None).unwrap();
+        let (still, _) = prefetch.take(&path, stamp, interpreted, None).unwrap();
         assert_eq!(still.frame.format.width, w);
     }
 

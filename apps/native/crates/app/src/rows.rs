@@ -1,7 +1,7 @@
 //! Layer rows for the temporary panels. Listing every layer is O(layers), so
 //! large compositions build their rows on a worker; the main thread only
 //! swaps in the finished `Arc`. Panels render only visible rows.
-use pm_kernel::{LayerInfo, document::Snapshot};
+use pm_kernel::{LayerInfo, Published, document::Snapshot};
 use std::sync::Arc;
 
 /// Compositions up to this size list their rows inline (about 30 µs a row in
@@ -88,11 +88,25 @@ impl LayerRows {
     pub fn clear(&mut self) {
         *self = Self::default();
     }
-    pub fn plan(&mut self, latest: Key, count: usize) -> Plan {
+    /// Large rows and their key count are installed together by the worker.
+    /// An open gesture that only wrote transform values can keep both.
+    pub fn follow_transform_values(&mut self, publication: &Published) {
+        if publication.entry.is_some()
+            && self.pending.is_none()
+            && self.rows.len() > INLINE_LAYERS
+            && self.key.is_some_and(|(doc, revision)| {
+                publication.only_transform_values_since(doc, revision)
+            })
+        {
+            self.key = Some(key(&publication.snapshot));
+        }
+    }
+
+    pub fn plan(&mut self, latest: Key, count: impl FnOnce() -> usize) -> Plan {
         if self.key == Some(latest) || self.pending.is_some() {
             return Plan::Current;
         }
-        if count <= INLINE_LAYERS {
+        if count() <= INLINE_LAYERS {
             return Plan::Inline;
         }
         self.pending = Some(latest);
@@ -142,17 +156,17 @@ mod tests {
     #[test]
     fn small_compositions_list_inline_and_large_ones_use_one_worker() {
         let mut rows = LayerRows::default();
-        assert!(matches!(rows.plan((1, 1), 10), Plan::Inline));
+        assert!(matches!(rows.plan((1, 1), || 10), Plan::Inline));
         assert!(rows.accept((1, 1), vec![row("a")], Some((1, 1))));
-        assert!(matches!(rows.plan((1, 1), 10), Plan::Current));
-        assert!(matches!(rows.plan((1, 2), 60_001), Plan::Worker));
+        assert!(matches!(rows.plan((1, 1), || panic!("current rows need no layer count")), Plan::Current));
+        assert!(matches!(rows.plan((1, 2), || 60_001), Plan::Worker));
         // A second publication while the worker runs waits for re-planning.
-        assert!(matches!(rows.plan((1, 3), 60_001), Plan::Current));
+        assert!(matches!(rows.plan((1, 3), || 60_001), Plan::Current));
         assert!(rows.finish((1, 2), vec![row("b")], Some((1, 3))));
-        assert!(matches!(rows.plan((1, 3), 60_001), Plan::Worker));
+        assert!(matches!(rows.plan((1, 3), || 60_001), Plan::Worker));
         assert!(rows.finish((1, 3), vec![row("c")], Some((1, 3))));
         assert_eq!(rows.rows[0].id, "c");
-        assert!(matches!(rows.plan((1, 3), 60_001), Plan::Current));
+        assert!(matches!(rows.plan((1, 3), || 60_001), Plan::Current));
     }
     #[test]
     fn stale_or_foreign_rows_never_replace_newer_rows() {

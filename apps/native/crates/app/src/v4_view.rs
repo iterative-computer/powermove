@@ -52,6 +52,7 @@ impl Natives {
 #[derive(Default)]
 pub struct Outline {
     scroll_y: Cell<f32>,
+    recorded_scroll_y: Cell<f32>,
     pub column: Cell<f32>,
     handle: ScrollHandle,
     rows: Cell<(usize, usize)>,
@@ -158,6 +159,26 @@ impl Outline {
             surface.update(cx, |s, cx| s.press_parent(layer.into(), at, cx));
         }
     }
+    fn has_surface(&self) -> bool {
+        self.surface
+            .borrow()
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .is_some()
+    }
+    fn press_switch(
+        &self,
+        switch: pm_panel_timeline::LayerSwitch,
+        layer: &str,
+        at: Point<Pixels>,
+        cx: &mut App,
+    ) -> bool {
+        if let Some(surface) = self.surface.borrow().as_ref().and_then(WeakEntity::upgrade) {
+            surface.update(cx, |s, cx| s.press_switch(switch, layer.into(), at, cx));
+            return true;
+        }
+        false
+    }
     fn toggle_disclosure(&self, row: &str, cx: &mut App) -> bool {
         let Ok(pm_panel_timeline::RowId::Layer(layer)) = pm_panel_timeline::v4::parse_row(row)
         else {
@@ -244,6 +265,10 @@ impl Outline {
     }
     #[cfg(test)]
     pub fn scroll_for_test(&self) -> f32 { self.scroll_y.get() }
+    #[cfg(test)]
+    pub fn scroll_layer_shift_for_test(&self) -> f32 {
+        self.recorded_scroll_y.get() - self.scroll_y.get()
+    }
     /// A row's top in the rows' content, when the timeline's scene has it.
     fn row_top(&self, row: &str) -> Option<f32> {
         self.scene
@@ -286,7 +311,9 @@ impl Outline {
                 let visible = scene.visible_range(scroll_y as f64, height.max(0.));
                 start <= visible.start && end >= visible.end
             });
-            if !covered { return false; }
+            if !covered {
+                return false;
+            }
         }
         let stepped =
             window.step_scroll_layer(&self.handle, point(px(0.), px(-scroll_y)), cx);
@@ -377,6 +404,7 @@ const DEMAND_SETTLE: std::time::Duration = std::time::Duration::from_millis(150)
 /// A press on a grading control (`grade`) drags it through the same gesture.
 struct ScrubDrag {
     id: Id,
+    semantic: Option<SharedString>,
     start: Point<Pixels>,
     number: crate::v4_compile::NumberFacts,
     motion: pm_surface::kit::NumericMotion,
@@ -384,7 +412,8 @@ struct ScrubDrag {
     binding: Option<SharedString>,
     active: bool,
     grade: Option<grade::GradeDrag>,
-    // Local input previews, then one change on release; opt-in controls only.
+    grade_original: Option<crate::v4_compile::Kit>,
+    // Local input previews, then one change on release.
     local_commit: Option<(Value, Value)>,
 }
 struct GainScrub {
@@ -426,6 +455,7 @@ struct Capture {
     /// Where the press was: an item that drags lifts once the pointer has
     /// moved past the drag threshold from here.
     origin: Point<Pixels>,
+    moved: bool,
     /// Native layer reorder owns this captured pointer, including its moves.
     layer_drag: bool,
 }
@@ -531,6 +561,7 @@ pub struct SurfaceView {
     /// The panel item being dragged (its `dragstart` ran): `dragend` goes to
     /// it once the drag is over, wherever it was dropped.
     dragging: Option<Id>,
+    cancelled_press: bool,
     /// Each virtual list's width last told to its panel.
     list_widths: HashMap<Id, (f32, f32)>,
     /// Each virtual list's last `rangechange` (range, width, its geometry):
@@ -549,6 +580,9 @@ pub struct SurfaceView {
     grade_drawn: grade::Drawn,
     /// Each wheel's puck on its way to where its values put it.
     grade_motion: grade::Motion,
+    /// The starting drawing until the cancellation is published. Its
+    /// publication ticket is set once the kernel finishes cancelling.
+    grade_reverted: Option<(Id, crate::v4_compile::Kit, Option<u64>)>,
     /// Each easing curve's preview run and the curve its drag left, until
     /// the panel publishes it.
     ease: grade::EaseState,
@@ -559,9 +593,14 @@ pub struct SurfaceView {
     /// Publications received, and the newest one compiled and shown.
     latest: u64,
     shown: u64,
+    compile_out: bool,
+    compile_wanted: Option<(Publication, Arc<TokenTable>)>,
     /// Events sent to the script and not yet handled; an agent's action
     /// waits for its own (`wake_idle` asks for a notify when they finish).
     handling: usize,
+    /// In-flight `"input"` events per field so a fast click-off / re-publish
+    /// cannot overwrite newly typed text with a pre-input publication.
+    in_flight_inputs: HashMap<Id, usize>,
     pub(crate) wake_idle: bool,
     /// The newest compiled tree, kept when it finished while the view had no
     /// live window (a closed sheet); the next window installs it on attach.
@@ -758,6 +797,7 @@ impl SurfaceView {
             wheel_lifted: false,
             scrub_ops: VecDeque::new(),
             dragging: None,
+            cancelled_press: false,
             list_widths: HashMap::new(),
             sent_ranges: HashMap::new(),
             asked_counts: HashMap::new(),
@@ -769,12 +809,16 @@ impl SurfaceView {
             scrub_settled: None,
             grade_drawn: Default::default(),
             grade_motion: Default::default(),
+            grade_reverted: None,
             ease: Default::default(),
             pointer_move: None,
             statuses: None,
             latest: 0,
             shown: 0,
+            compile_out: false,
+            compile_wanted: None,
             handling: 0,
+            in_flight_inputs: HashMap::new(),
             wake_idle: false,
             parked: None,
             received: None,
@@ -1016,7 +1060,25 @@ impl SurfaceView {
             );
         }
         self.received = Some(publication.clone());
-        self.compile(publication, self.table.clone(), cx);
+        let table = self
+            .compile_wanted
+            .as_ref()
+            .map(|(_, table)| table)
+            .or_else(|| {
+                self.outline_waiting
+                    .as_ref()
+                    .filter(|compiled| compiled.ticket == self.latest)
+                    .map(|compiled| &compiled.table)
+            })
+            .or_else(|| {
+                self.parked
+                    .as_ref()
+                    .filter(|compiled| compiled.ticket == self.latest)
+                    .map(|compiled| &compiled.table)
+            })
+            .unwrap_or(&self.table)
+            .clone();
+        self.compile(publication, table, cx);
     }
     pub fn retheme(&mut self, tokens: pm_design::Tokens, cx: &mut Context<Self>) {
         let table = Arc::new(TokenTable::new(tokens));
@@ -1036,6 +1098,18 @@ impl SurfaceView {
         cx: &mut Context<Self>,
     ) {
         self.latest += 1;
+        self.compile_wanted = Some((publication, table));
+        self.start_compile(cx);
+    }
+
+    fn start_compile(&mut self, cx: &mut Context<Self>) {
+        if self.compile_out {
+            return;
+        }
+        let Some((publication, table)) = self.compile_wanted.clone() else {
+            return;
+        };
+        self.compile_out = true;
         let ticket = self.latest;
         cx.spawn(async move |this, cx| {
             let source = publication.clone();
@@ -1061,7 +1135,15 @@ impl SurfaceView {
                 prepared,
             });
             // The window the view is in now: a reopened sheet has a new one.
-            let Ok(window) = this.update(cx, |v, _| v.window) else {
+            let Ok(Some(window)) = this.update(cx, |v, cx| {
+                v.compile_out = false;
+                if ticket != v.latest {
+                    v.start_compile(cx);
+                    return None;
+                }
+                v.compile_wanted = None;
+                Some(v.window)
+            }) else {
                 return;
             };
             let installed = cx.update_window(window, |_, window, cx| {
@@ -1097,6 +1179,17 @@ impl SurfaceView {
         {
             self.outline_waiting = Some(compiled);
             if let Some(rows) = timeline.read(cx).pending_outline_range() {
+                // Never let a stale `sent_ranges` entry silence the range
+                // request needed to unblock `outline_waiting` / `pending_scene`.
+                if let Some(node) = self
+                    .prepared
+                    .nodes
+                    .values()
+                    .find(|n| n.outline_window.is_some())
+                {
+                    let id = node.id;
+                    self.sent_ranges.remove(&id);
+                }
                 self.outline_rows(rows, cx);
             }
             return;
@@ -1142,6 +1235,12 @@ impl SurfaceView {
         }
         self.publication = compiled.publication;
         self.prepared = Rc::new(compiled.prepared);
+        if self.grade_reverted.as_ref().is_some_and(|(id, _, finished_at)| {
+            finished_at.is_some_and(|ticket| compiled.ticket > ticket)
+                || self.prepared.node(*id).is_none()
+        }) {
+            self.grade_reverted = None;
+        }
         if self.scrub_settled.is_some_and(|(id, value, ticket)| {
             compiled.ticket > ticket || self.prepared.node(id).and_then(|n| n.number)
                 .is_none_or(|n| n.text(n.value) == n.text(value))
@@ -1206,6 +1305,7 @@ impl SurfaceView {
         self.truncated.borrow_mut().clear();
         self.capture = None;
         self.scrub = None;
+        self.grade_reverted = None;
         self.scrub_shown = None;
         self.scrub_settled = None;
         self.pointer_move = None;
@@ -1781,11 +1881,15 @@ impl SurfaceView {
     ) {
         let id = view.id;
         // Number fields read at their display precision, as when scrubbed.
-        let value = match (view.number, node.props.get("value")) {
-            (Some(number), _) => {
+        // Text fields read `node.input.displayed` so controlled inputs that
+        // echo native input without emitting a redundant `setProps` op retain
+        // the user's typed text across blur and re-publications.
+        let value = match (view.number, node.input.as_ref(), node.props.get("value")) {
+            (Some(number), _, _) => {
                 number.text(self.scrub_readout(id).unwrap_or(number.value))
             }
-            (_, value) => value.map(value_text).unwrap_or_default(),
+            (None, Some(input), _) => input.displayed.clone(),
+            (None, None, value) => value.map(value_text).unwrap_or_default(),
         };
         let placeholder = node
             .props
@@ -1815,11 +1919,17 @@ impl SurfaceView {
                 .and_then(|m| m.get("hostValue"))
                 .and_then(Value::as_u64);
             let ink = Self::ink(view);
+            let input_in_flight = self.in_flight_inputs.get(&id).copied().unwrap_or(0) > 0;
             field.update(cx, |f, cx| {
                 f.set_tokens(tokens);
                 f.set_ink(ink);
                 f.set_placeholder(&placeholder);
                 f.set_unit(unit);
+                let epoch_advanced = composer_epoch
+                    .is_some_and(|epoch| f.composer_epoch().is_some_and(|prev| prev < epoch));
+                if input_in_flight && composer_sending.is_none() && host.is_none() && !epoch_advanced {
+                    return;
+                }
                 match (composer_epoch, host) {
                     (Some(epoch), _) => f.set_composer_value(&value, epoch, composer_sending, cx),
                     (None, Some(revision)) => f.set_value_from_host(&value, revision, cx),
@@ -2111,6 +2221,10 @@ impl SurfaceView {
     }
     #[cfg(test)]
     pub fn outline_scroll_for_test(&self) -> f32 { self.natives.outline.scroll_for_test() }
+    #[cfg(test)]
+    pub fn outline_scroll_shift_for_test(&self) -> f32 {
+        self.natives.outline.scroll_layer_shift_for_test()
+    }
     /// A new tree can have a different window even though the scroll hasn't
     /// moved (e.g. expanding properties switches from a retained outline).
     pub(crate) fn sync_outline_window(&mut self, cx: &mut Context<Self>) {
@@ -2756,6 +2870,10 @@ impl SurfaceView {
             detail,
             false,
         );
+        let is_input = event == "input";
+        if is_input {
+            *self.in_flight_inputs.entry(id).or_default() += 1;
+        }
         self.handling += 1;
         cx.spawn(async move |this, cx| {
             let error = match ticket {
@@ -2771,6 +2889,14 @@ impl SurfaceView {
                         serde_json::json!({"ui": "handled", "panel": v.publication.panel,
                         "ms": sent.elapsed().as_secs_f64() * 1000.}),
                     );
+                }
+                if is_input
+                    && let Some(count) = v.in_flight_inputs.get_mut(&id)
+                {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        v.in_flight_inputs.remove(&id);
+                    }
                 }
                 v.handling -= 1;
                 if v.disclosures.contains_key(&id) {
@@ -2952,8 +3078,10 @@ impl SurfaceView {
         let tokens = self.table.tokens.clone();
         let source = self.natives.sample_color.borrow().clone();
         let picker = cx.new(|cx| Picker::new(color, tokens, window, source, cx));
+        let bound_edit = Cell::new(false);
         let subscription = cx.subscribe(&picker, move |v, _, edit, cx| match edit {
             Edit::Begin if binding.is_some() => {
+                bound_edit.set(true);
                 let name = v.undo_name(id);
                 v.scrub_ops.push_back(ScrubOp::Begin(name));
                 v.scrub_pump(cx);
@@ -2964,12 +3092,23 @@ impl SurfaceView {
                         .push_back(ScrubOp::Value(binding.clone(), json!(color)));
                     v.scrub_pump(cx);
                 } else {
-                    v.change(id, json!(color), cx);
+                    v.change_sample(id, json!(color), cx);
+                }
+            }
+            Edit::CancelDrag => {
+                if bound_edit.replace(false) {
+                    while matches!(v.scrub_ops.back(), Some(ScrubOp::Value(..))) {
+                        v.scrub_ops.pop_back();
+                    }
+                    v.scrub_ops.push_back(ScrubOp::Finish(false));
+                    v.scrub_pump(cx);
+                } else if binding.is_none() {
+                    v.change_sample(id, initial.clone(), cx);
                 }
             }
             Edit::Finish(commit) => {
                 if !commit && binding.is_none() {v.change(id,initial.clone(),cx);}
-                if v.scrub_busy || v.scrub_gesture.is_some() || !v.scrub_ops.is_empty() {
+                if bound_edit.replace(false) {
                     v.scrub_ops.push_back(ScrubOp::Finish(*commit));
                     v.scrub_pump(cx);
                 }
@@ -3064,6 +3203,15 @@ impl SurfaceView {
                 .and_then(|node| node.semantic.as_deref())
                 .and_then(|id| id.strip_prefix("timeline:disclosure:"))
             && self.natives.outline.toggle_disclosure(row, cx)
+        {
+            return;
+        }
+        if self.publication.panel == "timeline"
+            && self.natives.outline.has_surface()
+            && self
+                .prepared
+                .node(id)
+                .is_some_and(|node| node.timeline_switch.is_some())
         {
             return;
         }
@@ -3190,6 +3338,7 @@ impl SurfaceView {
             target: id,
             button,
             origin: event.position,
+            moved: false,
             layer_drag: layer.is_some(),
         });
         let detail = self.detail(
@@ -3535,6 +3684,7 @@ impl SurfaceView {
         window.prevent_default();
         self.scrub = Some(ScrubDrag {
             id,
+            semantic: node.semantic.clone(),
             start: event.position,
             number,
             motion: pm_surface::kit::NumericMotion::new(
@@ -3545,6 +3695,7 @@ impl SurfaceView {
             binding: node.binding.clone().filter(|_| !node.local_change),
             active: false,
             grade: None,
+            grade_original: None,
             local_commit: node.commit_on_release.then(|| {
                 let value = json!(number.value);
                 (value.clone(), value)
@@ -3599,16 +3750,33 @@ impl SurfaceView {
             drag.infinite.engage();
         }
         let id = drag.id;
+        let semantic = drag.semantic.clone();
         if !began && self.scrub_shown == Some((id, value)) {
             return;
         }
-        let binding = drag.binding.clone();
+        let cached_binding = drag.binding.clone();
         let deferred = if let Some((_, last)) = &mut drag.local_commit {
             *last = json!(value);
             true
         } else {
             false
         };
+        let live_id = semantic
+            .as_deref()
+            .and_then(|s| self.prepared.semantics.get(s).copied())
+            .unwrap_or(id);
+        let binding = self
+            .prepared
+            .node(live_id)
+            .and_then(|node| node.binding.clone().filter(|_| !node.local_change))
+            .or(cached_binding);
+        if let Some(drag) = &mut self.scrub
+            && binding.is_some()
+        {
+            drag.id = live_id;
+            drag.binding = binding.clone();
+        }
+        let id = live_id;
         let live_gain = (began && self.begin_gain_scrub(binding.as_ref(), n.value, name.as_deref()))
             || self.gain_scrub.is_some();
         self.scrub_shown = Some((id, value));
@@ -3639,6 +3807,12 @@ impl SurfaceView {
             return;
         };
         if self.finish_gain_scrub(drag.id, commit, cx) {
+            if !commit {
+                self.scrub_settled = Some((drag.id, drag.number.value, self.latest));
+                if let Some(field) = self.fields.get(&drag.id) {
+                    field.update(cx, |f, cx| f.set_value(&drag.number.text(drag.number.value), cx));
+                }
+            }
             return;
         }
         if let Some((from, live)) = drag.local_commit {
@@ -3674,15 +3848,9 @@ impl SurfaceView {
                 } else {
                     value
                 };
-                self.pointer(
-                    drag.id,
-                    "input",
-                    EventDetail {
-                        value: Some(observed),
-                        ..Default::default()
-                    },
-                    cx,
-                );
+                self.control_sample(drag.id, "input", observed, cx);
+            } else if changed && drag.grade.is_some() {
+                self.change(drag.id, value, cx);
             } else if changed {
                 self.pointer(
                     drag.id,
@@ -3696,6 +3864,11 @@ impl SurfaceView {
             }
             cx.notify();
             return;
+        }
+        if !commit && drag.active && let Some(kit) = drag.grade_original {
+            self.grade_motion.borrow_mut().remove(&drag.id);
+            self.grade_reverted = Some((drag.id, kit, None));
+            cx.notify();
         }
         if drag.active {
             if !commit && drag.grade.is_none() {
@@ -3762,48 +3935,120 @@ impl SurfaceView {
         let panel = self.publication.panel.clone();
         let gesture = self.scrub_gesture;
         let finishing = matches!(op, ScrubOp::Finish(_));
+        let cancelling = matches!(op, ScrubOp::Finish(false));
         crate::interaction_work::spawn!(cx, async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let pending = match (op, gesture) {
-                        (ScrubOp::Begin(label), _) => runtime.scrub_begin(&panel, label.as_deref()),
+                    match (op, gesture) {
+                        (ScrubOp::Begin(label), _) => {
+                            let pending = runtime
+                                .scrub_begin(&panel, label.as_deref())
+                                .map_err(|e| e.to_string())?;
+                            let ack = pending
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| e.to_string())?;
+                            let started = match ack.reply {
+                                pm_kernel::Reply::Gesture(id) => Some(id),
+                                _ => None,
+                            };
+                            Ok::<(Option<pm_kernel::Ack>, Option<u64>), String>((Some(ack), started))
+                        }
                         (ScrubOp::Value(handle, value), Some(gesture)) => {
-                            runtime.scrub_step(&panel, &handle, gesture, value)
+                            let pending = runtime
+                                .scrub_step(&panel, &handle, gesture, value)
+                                .map_err(|e| e.to_string())?;
+                            let ack = pending
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| e.to_string())?;
+                            Ok((Some(ack), Some(gesture)))
+                        }
+                        (ScrubOp::Value(handle, value), None) => {
+                            // Recover automatically if a prior Begin failed or was dropped
+                            // under lag, rather than silently discarding scrub values.
+                            let begin_ack = runtime
+                                .scrub_begin(&panel, None)
+                                .map_err(|e| e.to_string())?
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| e.to_string())?;
+                            let new_gesture = match begin_ack.reply {
+                                pm_kernel::Reply::Gesture(id) => id,
+                                pm_kernel::Reply::Throw(error) => {
+                                    return Err(error.to_string());
+                                }
+                                _ => return Err("Scrub gesture was refused".to_owned()),
+                            };
+                            let step_ack = runtime
+                                .scrub_step(&panel, &handle, new_gesture, value)
+                                .map_err(|e| e.to_string())?
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| e.to_string())?;
+                            Ok((Some(step_ack), Some(new_gesture)))
                         }
                         (ScrubOp::Finish(commit), Some(gesture)) => {
-                            runtime.scrub_finish(&panel, gesture, commit)
+                            let pending = runtime
+                                .scrub_finish(&panel, gesture, commit)
+                                .map_err(|e| e.to_string())?;
+                            let ack = pending
+                                .await
+                                .ok_or("Kernel closed")?
+                                .map_err(|e| e.to_string())?;
+                            Ok((Some(ack), None))
                         }
-                        _ => return Err("Scrub gesture was refused".to_owned()),
+                        (ScrubOp::Finish(_), None) => Ok((None, None)),
                     }
-                    .map_err(|e| e.to_string())?;
-                    pending
-                        .await
-                        .ok_or("Kernel closed")?
-                        .map_err(|e| e.to_string())
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
                 v.scrub_busy = false;
-                let finished = finishing && result.as_ref().is_ok_and(|ack|
-                    !matches!(ack.reply, pm_kernel::Reply::Throw(_))
-                );
+                let finished = finishing
+                    && result.as_ref().is_ok_and(|(ack, _)| {
+                        ack.as_ref()
+                            .is_none_or(|a| !matches!(a.reply, pm_kernel::Reply::Throw(_)))
+                    });
                 if finishing {
                     v.scrub_gesture = None;
                 }
-                match result {
-                    Ok(ack) => match ack.reply {
-                        pm_kernel::Reply::Gesture(id) => v.scrub_gesture = Some(id),
-                        pm_kernel::Reply::Throw(error) => {
-                            v.error = Some(error.to_string());
+                if cancelling {
+                    if finished {
+                        if let Some((_, _, finished_at)) = &mut v.grade_reverted {
+                            *finished_at = Some(v.latest);
                         }
-                        _ => {}
-                    },
+                    } else {
+                        v.grade_reverted = None;
+                    }
+                }
+                match result {
+                    Ok((ack, opened)) => {
+                        if let Some(id) = opened {
+                            v.scrub_gesture = Some(id);
+                        }
+                        if let Some(ack) = ack {
+                            match ack.reply {
+                                pm_kernel::Reply::Gesture(id) => v.scrub_gesture = Some(id),
+                                pm_kernel::Reply::Throw(error) => {
+                                    v.error = Some(error.to_string());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     Err(error) => v.error = Some(error),
                 }
-                if v.scrub_ops.is_empty() && v.scrub.is_none() && v.wheel_scrub.is_none() && v.colour.is_none() {
-                    v.scrub_gesture = None;
-                    if let Some((id, value)) = v.scrub_shown.take() {
+                if v.scrub_ops.is_empty()
+                    && v.scrub.is_none()
+                    && v.wheel_scrub.is_none()
+                    && v.colour.is_none()
+                {
+                    if v.scrub_gesture.is_some() {
+                        // Never drop a live kernel gesture without committing it,
+                        // or the leaked lease will stall subsequent edits.
+                        v.scrub_ops.push_back(ScrubOp::Finish(true));
+                    } else if let Some((id, value)) = v.scrub_shown.take() {
                         v.scrub_settled = finished.then_some((id, value, v.latest));
                     }
                 }
@@ -3812,6 +4057,32 @@ impl SurfaceView {
         })
         .detach();
     }
+    fn cancel_pointer_drag(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.scrub.as_ref().is_some_and(|d| d.active || d.grade.is_some()) {
+            self.scrub_release(false, cx);
+            self.capture = None;
+        } else if self.dragging.is_some() {
+            cx.stop_active_drag(window);
+            self.end_drag(cx);
+        } else if let Some(capture) = self.capture.filter(|c| !c.layer_drag && c.button == 0 && c.moved)
+            && self.publication.surface.node(capture.target)
+                .is_some_and(|node| node.listeners.contains_key("pointercancel"))
+        {
+            self.capture = None;
+            let detail = self.detail(event.position, Some(capture.button), 0, 0, event.modifiers);
+            self.pointer(capture.target, "pointercancel", detail, cx);
+        } else {
+            return false;
+        }
+        self.cancelled_press = true;
+        true
+    }
+
     /// Capture-phase window listeners: a pressed pointer keeps its target until
     /// release, wherever it travels, like AppKit drag tracking.
     fn tracking(cx: &mut Context<Self>, origin: Rc<Cell<Point<Pixels>>>) -> impl IntoElement {
@@ -3847,6 +4118,10 @@ impl SurfaceView {
                     }
                     let mut row_move = None;
                     let _ = moved.update(cx, |v, cx| {
+                        if v.cancelled_press && event.pressed_button.is_some() {
+                            cx.stop_propagation();
+                            return;
+                        }
                         // The button is up: a release that never reached this
                         // window ends the gesture here, and the window's other
                         // listeners see this move (owner feedback W4, W5).
@@ -3861,9 +4136,12 @@ impl SurfaceView {
                             v.scrub_move(event, cx);
                             return;
                         }
-                        let Some(capture) = v.capture else {
+                        let Some(capture) = v.capture.as_mut() else {
                             return;
                         };
+                        let threshold = v.table.tokens.metrics.drag_threshold;
+                        capture.moved |= (event.position - capture.origin).magnitude() > threshold as f64;
+                        let capture = *capture;
                         // A row reorder is native. Forward its captured moves before
                         // generic panel capture can consume them; native listener
                         // ordering may change when a cached surface is repainted.
@@ -3875,11 +4153,10 @@ impl SurfaceView {
                         // A press on an item that drags (`onDragStart`) gives
                         // the pointer up past the threshold: the move goes on
                         // to the item, which lifts it (GPUI's drag).
-                        let threshold = v.table.tokens.metrics.drag_threshold;
                         if v.prepared
                             .node(capture.target)
                             .is_some_and(|n| n.events.drag_start)
-                            && (event.position - capture.origin).magnitude() > threshold as f64
+                            && capture.moved
                         {
                             v.capture = None;
                             return;
@@ -3909,11 +4186,21 @@ impl SurfaceView {
                 // never came) ends that gesture first, so the press does its
                 // own work and the window's moves are no longer held.
                 let pressed = weak.clone();
-                window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if phase != DispatchPhase::Capture {
                         return;
                     }
                     let _ = pressed.update(cx, |v, cx| {
+                        if event.button == MouseButton::Right {
+                            if v.cancelled_press || v.cancel_pointer_drag(event, window, cx) {
+                                cx.stop_propagation();
+                            }
+                            return;
+                        }
+                        if event.button != MouseButton::Left {
+                            return;
+                        }
+                        v.cancelled_press = false;
                         if v.scrub.is_some() || v.capture.is_some() {
                             v.release_pointer(event.position, 1, event.modifiers, cx);
                         }
@@ -3921,10 +4208,21 @@ impl SurfaceView {
                 });
                 let released = weak.clone();
                 window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                    if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
+                    if phase != DispatchPhase::Capture {
                         return;
                     }
                     let _ = released.update(cx, |v, cx| {
+                        if event.button == MouseButton::Right && v.cancelled_press {
+                            cx.stop_propagation();
+                            return;
+                        }
+                        if event.button != MouseButton::Left {
+                            return;
+                        }
+                        if std::mem::take(&mut v.cancelled_press) {
+                            cx.stop_propagation();
+                            return;
+                        }
                         if v.scrub.as_ref().is_some_and(|drag| drag.grade.is_none()) {
                             v.scrub_at(event.position.x, event.modifiers, cx);
                         }
@@ -4861,6 +5159,12 @@ impl SurfaceView {
             // some rows (`metadata.rowFloor`, Effect Controls' effects): a
             // panel body shorter than those rows scrolls instead.
             let floor = self.row_floor(id);
+            let min_h = match node.style.min_size.height {
+                Some(gpui::Length::Definite(gpui::DefiniteLength::Absolute(
+                    gpui::AbsoluteLength::Pixels(p),
+                ))) => floor.max(f32::from(p)),
+                _ => floor,
+            };
             // A scroll region with a max height (a sheet body) keeps its
             // content height up to that cap; panel scrollers fill their dock.
             element = if node.style.max_size.height.is_some() {
@@ -4868,11 +5172,11 @@ impl SurfaceView {
             } else if self.grows {
                 // In a body that scrolls the panel's height comes from its
                 // content: a scroller adds only its floor, then fills.
-                element.flex_grow(1.).flex_shrink(1.).flex_basis(px(floor))
+                element.flex_grow(1.).flex_shrink(1.).flex_basis(px(min_h))
             } else {
                 element.flex_1()
             };
-            element = element.min_h(px(floor)).track_scroll(scroll);
+            element = element.min_h(px(min_h)).track_scroll(scroll);
             // `metadata.scrollAnchor: "end"` (a conversation): a scroller that
             // was at its end stays there as content grows; once scrolled up,
             // it stays where the person left it.
@@ -4880,7 +5184,12 @@ impl SurfaceView {
             let anchor = metadata.and_then(|m| m["scrollAnchor"].as_str());
             let follows = anchor == Some("end");
             let starts = anchor == Some("start");
-            if follows && scroll.offset().y <= -scroll.max_offset().y + px(1.) {
+            let user_away = self
+                .follow
+                .borrow()
+                .get(&id)
+                .is_some_and(|f| f.away);
+            if follows && !user_away && scroll.offset().y <= -scroll.max_offset().y + px(1.) {
                 scroll.scroll_to_bottom();
             }
             if node.scroll_y {
@@ -5404,7 +5713,7 @@ impl SurfaceView {
         }
         placed
     }
-    /// The timeline outline's rows in a layer the surface scrolls: all
+    /// The timeline outline's scroll area uses the surface's row positions: all
     /// rows' height of content at the surface's offset, JS's window of rows
     /// placed at its first row's top.
     /// Each row of the outline stands at its own row's top in the timeline's
@@ -5448,6 +5757,7 @@ impl SurfaceView {
     }
     fn outline_layer(&self, id: Id, rows: AnyElement) -> AnyElement {
         let outline = &self.natives.outline;
+        outline.recorded_scroll_y.set(outline.scroll_y.get());
         outline
             .handle
             .set_offset(point(px(0.), px(-outline.scroll_y.get())));
@@ -5936,11 +6246,29 @@ impl SurfaceView {
             }
             in_layer
         };
-        if row_control && !events.pointer() && node.timeline_parent_pick.is_none() {
+        if row_control
+            && !events.pointer()
+            && node.timeline_parent_pick.is_none()
+            && node.timeline_switch.is_none()
+        {
             element = element.on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |v, _: &MouseDownEvent, window, cx| {
                     v.focus_pressed(id, window, cx);
+                    cx.stop_propagation();
+                }),
+            );
+        }
+        if let Some((switch, layer)) = node.timeline_switch.clone() {
+            let outline = self.natives.outline.clone();
+            let disabled = node.disabled;
+            element = element.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                    v.focus_pressed(id, window, cx);
+                    if !disabled {
+                        let _ = outline.press_switch(switch, &layer, event.position, cx);
+                    }
                     cx.stop_propagation();
                 }),
             );
@@ -7355,14 +7683,53 @@ impl SurfaceView {
                 .is_some_and(|n| n.component.is_none() && words(n))
         })
     }
+    /// Tool-only headers still need the panel's name when there is no dock tab,
+    /// except for the Viewer and Timeline (whose headers are their own tabs/controls).
+    pub(crate) fn fallback_header_title(
+        &self,
+        title: Option<Id>,
+        tabbed: bool,
+    ) -> Option<&'static str> {
+        let panel = &self.publication.panel;
+        if tabbed || title.is_some() || matches!(panel.as_str(), "viewer" | "timeline") {
+            return None;
+        }
+        pm_builtins::builtin_panel(panel).map(|panel| panel.title.as_str())
+    }
 }
 impl Render for HeaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tabbed = self.tabbed;
         let header = self.view.update(cx, |v, cx| match v.prepared.header {
             Some(id) => {
-                let skip = if tabbed { v.header_title(id) } else { None };
-                v.element(id, window, cx, skip)
+                let title = v.header_title(id);
+                let content = v.element(id, window, cx, if tabbed { title } else { None });
+                if let Some(fallback) = v.fallback_header_title(title, tabbed) {
+                    let t = &v.table.tokens;
+                    return div()
+                        .flex()
+                        .items_center()
+                        .gap(px(t.metrics.gap))
+                        .pl(px(if v.publication.panel == "agent" {
+                            t.metrics.pill_inset
+                        } else {
+                            t.metrics.inset
+                        }))
+                        .w_full()
+                        .h(px(t.metrics.header))
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_family(pm_design::TEXT_FONT)
+                                .text_size(px(t.typography.title))
+                                .font_weight(FontWeight(t.typography.semibold_weight))
+                                .text_color(rgb(t.colors.text))
+                                .child(fallback),
+                        )
+                        .child(div().flex_1().min_w(px(0.)).h_full().child(content))
+                        .into_any_element();
+                }
+                content
             }
             None => div().into_any_element(),
         });

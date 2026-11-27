@@ -77,7 +77,8 @@ pub use native::{
 pub use native::agent_chooser::Spec as ChooserSpec;
 #[cfg(target_os = "macos")]
 pub use native::{
-    bring_forward, install_menus, quit_blocker_window, set_quit_hook, show_in_tab_group,
+    ExtensionMenuItem, ExtensionMenuSection, ExtensionToolbarItem, bring_forward, install_menus,
+    quit_blocker_window, set_extension_menus, set_quit_hook, show_in_tab_group,
 };
 pub(crate) use macos::open_settings;
 #[cfg(target_os = "macos")]

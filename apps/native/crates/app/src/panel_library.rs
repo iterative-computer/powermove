@@ -243,6 +243,14 @@ impl PanelLibrary {
         if let Some(p) = &e.published {
             stamp.push((format!("document-{}", p.snapshot.doc_id), 0));
         }
+        // A theme change redraws the covers in the new appearance (Chike's fix).
+        stamp.push((
+            format!(
+                "theme-{:?}-{}",
+                self.tokens.scheme, self.tokens.accessibility.increase_contrast
+            ),
+            0,
+        ));
         if self.preview_task.is_some() && stamp == self.preview_stamp {
             return;
         }

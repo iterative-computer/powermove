@@ -71,12 +71,14 @@ pub enum HostEffect {
         document: u64,
         composition: Option<String>,
         trim: bool,
+        message: Option<String>,
     },
     TogglePlayback,
     /// Fit Selected Curves: show this span of composition time.
     FitCurves(f64, f64),
     FrameComposition,
     OpenComposition(String),
+    FocusGroup(Option<String>),
     ShowLayerMenu(String),
     EditKeyValues(Vec<String>),
     EditVelocity(Vec<String>),
@@ -374,9 +376,13 @@ impl TimelineModel {
                 let selected: HashSet<_> = layers.iter().collect();
                 let min_duration = 1. / self.index.fps;
                 let mut layer_ids = Vec::new();
+                let mut first_locked: Option<String> = None;
                 for id in self.index.expanded_ids(&layers) {
                     let layer = self.index.layer(&id).unwrap();
                     if layer.effectively_locked {
+                        if first_locked.is_none() {
+                            first_locked = Some(id);
+                        }
                         continue;
                     }
                     let (from, duration) = self.index.strip_span(layer);
@@ -399,15 +405,48 @@ impl TimelineModel {
                         ));
                     }
                 }
-                if layer_ids.is_empty() {
+                let mut plan = if layer_ids.is_empty() {
                     Plan::default()
                 } else if is_in {
                     edit(TimingCommand::TrimIn { layer_ids, time }.into())
                 } else {
                     edit(TimingCommand::TrimOut { layer_ids, time }.into())
+                };
+                if let Some(locked_id) = first_locked {
+                    let owner = self
+                        .index
+                        .locking_layer(&locked_id)
+                        .map(|l| l.id.clone())
+                        .unwrap_or_else(|| locked_id.clone());
+                    let msg = self.index.layer(&locked_id).map(|l| {
+                        let name = l.name.to_string_lossy();
+                        if owner != locked_id {
+                            let group = self
+                                .index
+                                .layer(&owner)
+                                .map(|g| g.name.to_string_lossy())
+                                .unwrap_or_default();
+                            format!("“{name}” is inside locked group “{group}”")
+                        } else {
+                            format!("“{name}” is locked — can't trim")
+                        }
+                    });
+                    plan.effects.push(HostEffect::LockedStrip {
+                        layer: owner,
+                        document: self.index.doc_id,
+                        composition: self.index.comp_id.clone(),
+                        trim: true,
+                        message: msg,
+                    });
                 }
+                plan
             }
             "split" => {
+                let first_locked = layers.iter().find_map(|id| {
+                    let l = self.index.layer(id)?;
+                    (time > l.from && time < l.from + l.duration && l.effectively_locked)
+                        .then(|| id.clone())
+                });
                 let new_ids: Vec<_> = layers.iter().map(|_| new_id("L")).collect();
                 let tails: Vec<_> = layers
                     .iter()
@@ -419,14 +458,18 @@ impl TimelineModel {
                     })
                     .map(|(_, id)| id.clone())
                     .collect();
-                let mut plan = edit(
-                    TimingCommand::Split {
-                        layer_ids: layers,
-                        time,
-                        new_ids,
-                    }
-                    .into(),
-                );
+                let mut plan = if tails.is_empty() && first_locked.is_some() {
+                    Plan::default()
+                } else {
+                    edit(
+                        TimingCommand::Split {
+                            layer_ids: layers,
+                            time,
+                            new_ids,
+                        }
+                        .into(),
+                    )
+                };
                 if !tails.is_empty() {
                     plan.calls.push(
                         SelectionCall::Layers {
@@ -435,6 +478,33 @@ impl TimelineModel {
                         }
                         .into(),
                     );
+                }
+                if let Some(locked_id) = first_locked {
+                    let owner = self
+                        .index
+                        .locking_layer(&locked_id)
+                        .map(|l| l.id.clone())
+                        .unwrap_or_else(|| locked_id.clone());
+                    let msg = self.index.layer(&locked_id).map(|l| {
+                        let name = l.name.to_string_lossy();
+                        if owner != locked_id {
+                            let group = self
+                                .index
+                                .layer(&owner)
+                                .map(|g| g.name.to_string_lossy())
+                                .unwrap_or_default();
+                            format!("“{name}” is inside locked group “{group}”")
+                        } else {
+                            format!("“{name}” is locked — can't split")
+                        }
+                    });
+                    plan.effects.push(HostEffect::LockedStrip {
+                        layer: owner,
+                        document: self.index.doc_id,
+                        composition: self.index.comp_id.clone(),
+                        trim: false,
+                        message: msg,
+                    });
                 }
                 plan
             }
@@ -490,7 +560,13 @@ impl TimelineModel {
                 if keys.is_empty() {
                     return Ok(Plan::default());
                 }
-                edit(KeyframeCommand::Delete { key_ids: keys }.into())
+                edit(
+                    KeyframeCommand::DeleteAt {
+                        key_ids: keys,
+                        time,
+                    }
+                    .into(),
+                )
             }
             "delete" => {
                 let roots: Vec<_> = self
@@ -528,7 +604,13 @@ impl TimelineModel {
                 let locked = skipped.len();
                 let groups = skipped.iter().all(|l| l.kind == "group");
                 let mut plan = if layers.iter().any(|id| self.index.layer(id).is_some()) {
-                    edit(LayerCommand::Delete { layer_ids: layers }.into())
+                    edit(
+                        LayerCommand::DeleteAt {
+                            layer_ids: layers,
+                            time,
+                        }
+                        .into(),
+                    )
                 } else {
                     Plan::default()
                 };
@@ -939,66 +1021,133 @@ impl TimelineModel {
             .ok_or_else(|| ModelError::UnknownId(channel.into()))?;
         Ok(())
     }
-    pub fn switch(&self, layer: &str, switch: LayerSwitch) -> Result<Plan, ModelError> {
-        let l = self
-            .index
-            .layer(layer)
-            .ok_or_else(|| ModelError::UnknownId(layer.into()))?;
-        let patch = match switch {
+    /// Current boolean value of `switch` on `layer`.
+    pub fn switch_value(&self, layer: &str, switch: LayerSwitch) -> Option<bool> {
+        let l = self.index.layer(layer)?;
+        Some(match switch {
+            LayerSwitch::Visible => l.visible,
+            LayerSwitch::Locked => l.locked,
+            LayerSwitch::Solo => l.solo,
+            LayerSwitch::ThreeD => l.three_d,
+            LayerSwitch::Shy => l.shy,
+        })
+    }
+
+    /// Build a patch setting `switch` to `value`.
+    pub fn switch_patch(switch: LayerSwitch, value: bool) -> LayerPatch {
+        match switch {
             LayerSwitch::Visible => LayerPatch {
-                visible: Some(!l.visible),
+                visible: Some(value),
                 ..Default::default()
             },
             LayerSwitch::Locked => LayerPatch {
-                locked: Some(!l.locked),
+                locked: Some(value),
                 ..Default::default()
             },
             LayerSwitch::Solo => LayerPatch {
-                solo: Some(!l.solo),
+                solo: Some(value),
                 ..Default::default()
             },
             LayerSwitch::ThreeD => LayerPatch {
-                three_d: Some(!l.three_d),
+                three_d: Some(value),
                 ..Default::default()
             },
             LayerSwitch::Shy => LayerPatch {
-                shy: Some(!l.shy),
+                shy: Some(value),
                 ..Default::default()
             },
+        }
+    }
+
+    /// Whether `layer` can accept `switch` in a bulk / multi-selection edit.
+    pub fn switch_eligible(&self, layer: &str, switch: LayerSwitch) -> bool {
+        let Some(l) = self.index.layer(layer) else {
+            return false;
         };
-        Ok(Plan::edit(
-            vec![
+        match switch {
+            LayerSwitch::Locked => true,
+            LayerSwitch::ThreeD => !l.effectively_locked && l.can_be_3d(),
+            LayerSwitch::Visible | LayerSwitch::Solo | LayerSwitch::Shy => !l.effectively_locked,
+        }
+    }
+
+    /// Set `switch` to `value` on every eligible layer in `layers` as one undoable edit.
+    pub fn set_switch(
+        &self,
+        layers: &[String],
+        switch: LayerSwitch,
+        value: bool,
+    ) -> Result<Plan, ModelError> {
+        let multi = layers.len() > 1;
+        let patch = Self::switch_patch(switch, value);
+        let mut commands = Vec::new();
+        for id in layers {
+            let l = self
+                .index
+                .layer(id)
+                .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
+            if multi && !self.switch_eligible(id, switch) {
+                continue;
+            }
+            if multi && self.switch_value(id, switch) == Some(value) {
+                continue;
+            }
+            commands.push(
                 LayerCommand::Set {
-                    layer_id: layer.into(),
-                    patch,
+                    layer_id: l.id.clone(),
+                    patch: patch.clone(),
                 }
                 .into(),
-            ],
-            self.index.revision,
-        ))
+            );
+        }
+        if commands.is_empty() {
+            return Ok(Plan::default());
+        }
+        Ok(Plan::edit(commands, self.index.revision))
+    }
+
+    pub fn switch(&self, layer: &str, switch: LayerSwitch) -> Result<Plan, ModelError> {
+        let current = self
+            .switch_value(layer, switch)
+            .ok_or_else(|| ModelError::UnknownId(layer.into()))?;
+        let target = !current;
+        let selected = self.selection.layers();
+        let ids: Vec<String> = if selected.len() > 1 && selected.iter().any(|id| id == layer) {
+            selected.to_vec()
+        } else {
+            vec![layer.to_owned()]
+        };
+        self.set_switch(&ids, switch, target)
     }
     pub fn parent(&self, ids: &[String], parent: Option<String>, time: f64) -> Plan {
-        Plan::edit(
-            ids.iter()
-                .map(|id| {
-                    LayerCommand::Set {
-                        layer_id: id.clone(),
-                        patch: LayerPatch {
-                            parent: Some(ParentChange {
-                                parent: parent.clone(),
-                                time,
-                            }),
-                            ..Default::default()
-                        },
-                    }
-                    .into()
-                })
-                .collect(),
-            self.index.revision,
-        )
+        let commands = ids
+            .iter()
+            .map(|id| {
+                LayerCommand::Set {
+                    layer_id: id.clone(),
+                    patch: LayerPatch {
+                        parent: Some(ParentChange {
+                            parent: parent.clone(),
+                            time,
+                        }),
+                        ..Default::default()
+                    },
+                }
+                .into()
+            })
+            .collect();
+        Plan {
+            calls: vec![Call::Transact {
+                label: Some("Set Parent".into()),
+                body: WriteBody::Commands(commands),
+                expected_revision: None,
+            }],
+            effects: Vec::new(),
+            ..Plan::default()
+        }
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayerSwitch {
     Visible,
     Locked,
@@ -1190,16 +1339,37 @@ pub struct Drag {
     track_snap: Option<bool>,
     pub property_values: std::collections::HashMap<(String, String), f64>,
 
-    /// A key drag in the Speed Graph: each key side's speed and influence at
-    /// the press. A vertical drag there changes speeds (as v1 does), never
-    /// the keys' values.
+    /// True when dragging GraphKeys in the Speed Graph: moving keys shifts time
+    /// only, never rewriting easing handles or corrupting adjacent segments.
+    speed_key_drag: bool,
+    /// Single-axis Speed Graph key eases captured at drag start, used ONLY for
+    /// strictly vertical speed-only drags (`delta == 0`). Never used for time
+    /// moves or multi-axis Combined Position Speed drags.
     speed_eases: Option<Vec<(String, EaseSide, TemporalEase)>>,
-    /// A handle drag: its key's layer-local time and value, and the other
-    /// side's ease, which follows the dragged side unless ⌥ splits them (v1).
-    handle_key: Option<(f64, f64, Option<TemporalEase>)>,
+    /// A handle drag: each target key's metadata captured at drag start.
+    handle_keys: Vec<HandleTarget>,
+    /// True when the active `DragKind::Handle` is in Speed Graph space
+    /// (explicit Speed Graph mode or combined Position Speed curve).
+    handle_speed: bool,
     /// Locked layers a move or trim left where they were (After Effects skips
     /// locked layers in a mixed selection instead of refusing the gesture).
     skipped_locked: usize,
+    trim_limit: f64,
+}
+
+#[derive(Clone, Debug)]
+struct HandleTarget {
+    id: String,
+    key_time: f64,
+    key_value: f64,
+    neighbour_dt: Option<f64>,
+    opposite: Option<TemporalEase>,
+    /// Only mirror speed onto the opposite handle (unless ⌥ splits) when the
+    /// key is continuous / auto-bezier (or a fresh linear key in Value Graph).
+    /// Never overwrite an independent eased opposite segment.
+    should_mirror: bool,
+    side_dir: f64,
+    opp_dir: f64,
 }
 /// Each side's ease of the keys `ids` as the graph shows it: the speed (value
 /// units per second) and influence (percent) of its direction handle, so a
@@ -1404,6 +1574,7 @@ impl Drag {
             _ => {}
         }
         let mut anchors = Vec::new();
+        let mut trim_limit = 0.;
         match &kind {
             DragKind::Layers { ids } | DragKind::DuplicateLayers { ids, .. } => {
                 for id in ids {
@@ -1424,6 +1595,12 @@ impl Drag {
             }
             DragKind::TrimIn { ids } | DragKind::TrimOut { ids } => {
                 let is_in = matches!(kind, DragKind::TrimIn { .. });
+                trim_limit = if is_in {
+                    f64::INFINITY
+                } else {
+                    f64::NEG_INFINITY
+                };
+                let frame = 1. / index.fps;
                 for id in ids {
                     let l = index.layer(id).unwrap();
                     let (from, duration) = index.strip_span(l);
@@ -1431,6 +1608,22 @@ impl Drag {
                         time: if is_in { from } else { from + duration },
                         edge: Some(if is_in { Edge::In } else { Edge::Out }),
                     });
+                    if l.kind == "group" {
+                        // Capture the limit from the starting geometry once.
+                        // Each unlocked member keeps at least one frame.
+                        for member in index.expanded_ids(std::slice::from_ref(id)) {
+                            let child = index.layer(&member).unwrap();
+                            if child.id == *id || child.effectively_locked {
+                                continue;
+                            }
+                            let (start, length) = index.strip_span(child);
+                            trim_limit = if is_in {
+                                trim_limit.min(start + length - frame - from)
+                            } else {
+                                trim_limit.max(start + frame - (from + duration))
+                            };
+                        }
+                    }
                 }
             }
             DragKind::Transition { layer, edge } => {
@@ -1467,27 +1660,114 @@ impl Drag {
         } else {
             None
         };
-        let speed_eases = match &kind {
-            DragKind::GraphKeys { ids } if model.graph_mode == GraphMode::Speed => {
-                Some(key_eases(index, ids))
+        let (speed_key_drag, speed_eases) = match &kind {
+            DragKind::GraphKeys { ids } => {
+                let combined_pos = !ids.is_empty()
+                    && ids.iter().all(|id| {
+                        index.key(id).is_some_and(|(l, c, _)| {
+                            model.is_combined_position_speed(&l.id, &c.path)
+                        })
+                    });
+                let is_speed = model.graph_mode == GraphMode::Speed || combined_pos;
+                let eases = (is_speed && !combined_pos).then(|| key_eases(index, ids));
+                (is_speed, eases)
             }
-            _ => None,
+            _ => (false, None),
         };
-        let handle_key = match &kind {
-            DragKind::Handle { id, side } => index.key(id).and_then(|(_, _, key)| {
-                let value = key.value.as_f64()?;
+        let (handle_keys, handle_speed) = match &kind {
+            DragKind::Handle { id, side } => {
                 let other = if *side == EaseSide::In {
                     EaseSide::Out
                 } else {
                     EaseSide::In
                 };
-                let opposite = key_eases(index, std::slice::from_ref(id))
-                    .into_iter()
-                    .find(|(_, s, _)| *s == other)
-                    .map(|(_, _, e)| e);
-                Some((key.time, value, opposite))
-            }),
-            _ => None,
+                let is_speed = model.graph_mode == GraphMode::Speed
+                    || index.key(id).is_some_and(|(l, c, _)| {
+                        model.is_combined_position_speed(&l.id, &c.path)
+                    });
+                let expanded = model.expand_graph_keys(std::slice::from_ref(id));
+                let mut raw: Vec<HandleTarget> = Vec::new();
+                for target_id in expanded {
+                    let Some((_, channel, key)) = index.key(&target_id) else {
+                        continue;
+                    };
+                    let Some(value) = key.value.as_f64() else {
+                        continue;
+                    };
+                    let Some(idx) = channel.keys.iter().position(|k| k.id == target_id) else {
+                        continue;
+                    };
+                    let neighbour_for = |s: EaseSide| -> Option<(f64, f64)> {
+                        let n = match s {
+                            EaseSide::In => idx.checked_sub(1).map(|i| &channel.keys[i]),
+                            _ => channel.keys.get(idx + 1),
+                        }?;
+                        let dt = (n.time - key.time).abs();
+                        let dv = match s {
+                            EaseSide::In => value - n.value.as_f64()?,
+                            _ => n.value.as_f64()? - value,
+                        };
+                        (dt > 1e-6).then_some((dt, dv / dt))
+                    };
+                    let side_info = neighbour_for(*side);
+                    let opp_info = neighbour_for(other);
+                    let opposite = key_eases(index, std::slice::from_ref(&target_id))
+                        .into_iter()
+                        .find(|(_, s, _)| *s == other)
+                        .map(|(_, _, e)| e);
+                    let stored = key.stored.to_value();
+                    let continuous = stored.get("continuous").and_then(Value::as_bool) == Some(true);
+                    let auto_bezier = stored.get("autoBezier").and_then(Value::as_bool) == Some(true);
+                    let in_interp = stored
+                        .get("inInterp")
+                        .and_then(Value::as_str)
+                        .unwrap_or("linear");
+                    let out_interp = stored
+                        .get("outInterp")
+                        .and_then(Value::as_str)
+                        .unwrap_or("linear");
+                    let both_linear = in_interp == "linear" && out_interp == "linear";
+                    // In Speed Graph, handles on non-continuous keys are independent
+                    // per side so adjusting one segment never corrupts the adjacent
+                    // segment. In Value Graph, mirror continuous/auto keys and fresh
+                    // linear keys, never independent already-eased handles.
+                    let should_mirror = if is_speed {
+                        continuous || auto_bezier
+                    } else {
+                        continuous || auto_bezier || both_linear
+                    };
+                    raw.push(HandleTarget {
+                        id: target_id,
+                        key_time: key.time,
+                        key_value: value,
+                        neighbour_dt: side_info.map(|(dt, _)| dt),
+                        opposite,
+                        should_mirror,
+                        side_dir: side_info.map_or(0., |(_, slope)| slope),
+                        opp_dir: opp_info.map_or(0., |(_, slope)| slope),
+                    });
+                }
+                if is_speed && raw.len() > 1 {
+                    let side_norm = raw.iter().map(|r| r.side_dir * r.side_dir).sum::<f64>().sqrt();
+                    let opp_norm = raw.iter().map(|r| r.opp_dir * r.opp_dir).sum::<f64>().sqrt();
+                    for r in &mut raw {
+                        r.side_dir = if side_norm > 1e-6 {
+                            r.side_dir / side_norm
+                        } else if opp_norm > 1e-6 {
+                            r.opp_dir / opp_norm
+                        } else {
+                            0.
+                        };
+                        r.opp_dir = if opp_norm > 1e-6 {
+                            r.opp_dir / opp_norm
+                        } else {
+                            r.side_dir
+                        };
+                    }
+                }
+                (raw, is_speed)
+            }
+            _ => (Vec::new(), false),
         };
         let lanes = (model.mode == crate::TimelineMode::Tracks
             && matches!(
@@ -1500,8 +1780,11 @@ impl Drag {
         .then(|| crate::tracks::relative_lanes(index, &model.reveal));
         Ok(Self {
             lanes,
-            handle_key,
+            handle_keys,
+            handle_speed,
             skipped_locked,
+            trim_limit,
+            speed_key_drag,
             speed_eases,
             kind,
             start: index.clone(),
@@ -1616,12 +1899,16 @@ impl Drag {
                 is_key,
             ));
         }
-        let mut targets = self.fixed.clone().unwrap_or_default();
-        if is_key {
+        let mut targets = if snapping {
+            self.fixed.clone().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if is_key && snapping {
             // Electron keys prefer the playhead on equal distances. They do not
             // offer the strip-only exclusive out-edge at playhead + one frame.
             targets.insert(0, Target::at(sample.playhead));
-        } else {
+        } else if snapping {
             targets.push(Target {
                 time: sample.playhead,
                 edge: None,
@@ -1739,7 +2026,7 @@ impl Drag {
                 for id in ids {
                     let l = self.start.layer(id).unwrap();
                     let (start, duration) = self.start.strip_span(l);
-                    let from = if self.snap.lock.is_some() {
+                    let moved = if self.snap.lock.is_some() {
                         start + clamp(delta)
                     } else {
                         let rounded = frame(start + sample.time_delta, self.start.fps);
@@ -1748,6 +2035,11 @@ impl Drag {
                         } else {
                             rounded
                         }
+                    };
+                    let from = if l.kind == "group" && l.duration > 0. {
+                        l.from + (moved - start)
+                    } else {
+                        moved
                     };
                     out.push(
                         LayerCommand::Set {
@@ -1799,30 +2091,11 @@ impl Drag {
                 } else {
                     f64::NEG_INFINITY
                 };
-                // A group's edge stops where an unlocked member would have
-                // to stay outside it: each member keeps at least a frame.
-                let mut delta = delta;
-                for id in ids {
-                    let group = self.start.layer(id).unwrap();
-                    if group.kind != "group" {
-                        continue;
-                    }
-                    let (start, duration) = self.start.strip_span(group);
-                    for member in self.start.expanded_ids(std::slice::from_ref(id)) {
-                        let Some(l) = self.start.layer(&member).filter(|l| l.id != *id) else {
-                            continue;
-                        };
-                        if l.effectively_locked {
-                            continue;
-                        }
-                        let (from, length) = self.start.strip_span(l);
-                        delta = if is_in {
-                            delta.min(from + length - min_duration - start)
-                        } else {
-                            delta.max(from + min_duration - (start + duration))
-                        };
-                    }
-                }
+                let delta = if is_in {
+                    delta.min(self.trim_limit)
+                } else {
+                    delta.max(self.trim_limit)
+                };
                 let mut legacy_groups = Vec::new();
                 let mut batch_by_time = HashMap::new();
                 let mut batches: Vec<(f64, Vec<String>)> = Vec::new();
@@ -1839,9 +2112,10 @@ impl Drag {
                     if is_in && time >= end {
                         continue;
                     }
-                    // An untimed group's In/Out comes from its original
-                    // members. Materialize those spans before trimming any member.
-                    if l.kind == "group" && l.duration == 0. {
+                    // A group's In/Out comes from its original members. Run
+                    // group trims before trimming any member so their starting
+                    // span matches `self.start.strip_span`.
+                    if l.kind == "group" {
                         legacy_groups.push((time, vec![id.clone()]));
                         continue;
                     }
@@ -1916,14 +2190,15 @@ impl Drag {
                 .into(),
             ),
             DragKind::GraphKeys { ids } => {
-                // In the Speed Graph the vertical axis is speed: the keys
-                // keep their values and each side's speed moves instead.
-                let speeds = self.speed_eases.as_ref();
+                // In the Speed Graph, moving keyframes in time NEVER mutates
+                // easing handles or corrupts adjacent segments. A strictly
+                // vertical drag on a single-axis Speed key (`delta == 0`) adjusts
+                // its speed without touching its value.
                 out.push(
                     KeyframeCommand::GraphMove {
                         key_ids: ids.clone(),
                         delta,
-                        value_delta: if speeds.is_some() {
+                        value_delta: if self.speed_key_drag {
                             0.
                         } else {
                             sample.value_delta
@@ -1931,19 +2206,25 @@ impl Drag {
                     }
                     .into(),
                 );
-                for (id, side, ease) in speeds.into_iter().flatten() {
-                    out.push(
-                        KeyframeCommand::SetHandle {
-                            key_id: id.clone(),
-                            side: *side,
-                            value: HandleValue::Ease(TemporalEase {
-                                speed: ease.speed + sample.value_delta,
-                                influence: ease.influence,
-                            }),
-                            split: false,
-                        }
-                        .into(),
-                    );
+                if self.speed_key_drag
+                    && delta.abs() < 1e-9
+                    && sample.value_delta.abs() > 1e-9
+                    && let Some(speeds) = self.speed_eases.as_ref()
+                {
+                    for (id, side, ease) in speeds {
+                        out.push(
+                            KeyframeCommand::SetHandle {
+                                key_id: id.clone(),
+                                side: *side,
+                                value: HandleValue::Ease(TemporalEase {
+                                    speed: ease.speed + sample.value_delta,
+                                    influence: ease.influence,
+                                }),
+                                split: false,
+                            }
+                            .into(),
+                        );
+                    }
                 }
             }
             DragKind::StretchKeys {
@@ -1991,45 +2272,147 @@ impl Drag {
             DragKind::Handle { id, side } => {
                 finite(sample.handle_time)?;
                 finite(sample.handle_value)?;
-                let (t, mut v) = (sample.handle_time, sample.handle_value);
-                // ⇧ lays the handle flat (v1's `moveBezierHandle` flat side).
-                if let Some((_, key_value, _)) = self.handle_key
-                    && sample.modifiers.shift
-                {
-                    v = key_value;
-                }
-                out.push(
-                    KeyframeCommand::SetHandle {
-                        key_id: id.clone(),
-                        side: *side,
-                        value: HandleValue::Point { t, v },
-                        split: sample.modifiers.alt,
+                let (t, raw_v) = (sample.handle_time, sample.handle_value);
+                let primary_value = self.handle_keys.first().map(|h| h.key_value);
+                let multi_speed = self.handle_speed && self.handle_keys.len() > 1;
+                let targets: Vec<HandleTarget> = if self.handle_keys.is_empty() {
+                    vec![HandleTarget {
+                        id: id.clone(),
+                        key_time: 0.,
+                        key_value: raw_v,
+                        neighbour_dt: None,
+                        opposite: None,
+                        should_mirror: false,
+                        side_dir: 1.,
+                        opp_dir: 1.,
+                    }]
+                } else {
+                    self.handle_keys.clone()
+                };
+                for target in targets {
+                    let HandleTarget {
+                        id: target_id,
+                        key_time,
+                        key_value,
+                        neighbour_dt,
+                        opposite,
+                        should_mirror,
+                        side_dir,
+                        opp_dir,
+                    } = target;
+                    if self.handle_speed {
+                        let Some(dt) = neighbour_dt.filter(|dt| *dt > 1e-6) else {
+                            continue;
+                        };
+                        let reach = match side {
+                            EaseSide::In => key_time - t,
+                            _ => t - key_time,
+                        };
+                        let influence = (reach.max(0.) / dt * 100.).clamp(0.1, 100.);
+                        let target_speed = if sample.modifiers.shift {
+                            0.
+                        } else if multi_speed {
+                            raw_v.max(0.) * side_dir
+                        } else {
+                            raw_v
+                        };
+                        out.push(
+                            KeyframeCommand::SetHandle {
+                                key_id: target_id.clone(),
+                                side: *side,
+                                value: HandleValue::Ease(TemporalEase {
+                                    speed: target_speed,
+                                    influence,
+                                }),
+                                split: sample.modifiers.alt,
+                            }
+                            .into(),
+                        );
+                        if should_mirror
+                            && let Some(opposite) = opposite
+                            && !sample.modifiers.alt
+                        {
+                            let opp_speed = if sample.modifiers.shift {
+                                0.
+                            } else if multi_speed {
+                                raw_v.max(0.) * opp_dir
+                            } else {
+                                raw_v
+                            };
+                            out.push(
+                                KeyframeCommand::SetHandle {
+                                    key_id: target_id,
+                                    side: if *side == EaseSide::In {
+                                        EaseSide::Out
+                                    } else {
+                                        EaseSide::In
+                                    },
+                                    value: HandleValue::Ease(TemporalEase {
+                                        speed: opp_speed,
+                                        influence: opposite.influence,
+                                    }),
+                                    split: false,
+                                }
+                                .into(),
+                            );
+                        }
+                        continue;
                     }
-                    .into(),
-                );
-                // Unless ⌥ splits them, the other handle stays on the same
-                // tangent through the key, keeping its own length (v1's
-                // `mirroredBezierHandlePoint`).
-                if let Some((key_time, key_value, Some(opposite))) = self.handle_key
-                    && !sample.modifiers.alt
-                    && (t - key_time).abs() > 1e-9
-                {
+                    // For linked scale axes with a different base value, apply
+                    // the same value offset from the key rather than snapping
+                    // both curves to one absolute y.
+                    let mut v = match primary_value {
+                        Some(base) if target_id != *id => key_value + (raw_v - base),
+                        _ => raw_v,
+                    };
+                    // ⇧ lays the handle flat.
+                    if sample.modifiers.shift {
+                        v = key_value;
+                    }
                     out.push(
                         KeyframeCommand::SetHandle {
-                            key_id: id.clone(),
-                            side: if *side == EaseSide::In {
-                                EaseSide::Out
-                            } else {
-                                EaseSide::In
-                            },
-                            value: HandleValue::Ease(TemporalEase {
-                                speed: (v - key_value) / (t - key_time),
-                                influence: opposite.influence,
-                            }),
-                            split: false,
+                            key_id: target_id.clone(),
+                            side: *side,
+                            value: HandleValue::Point { t, v },
+                            split: sample.modifiers.alt,
                         }
                         .into(),
                     );
+                    // Only mirror to the opposite side when the key is continuous
+                    // (or a fresh linear key pulled without ⌥); never corrupt an
+                    // independent eased opposite segment!
+                    if should_mirror
+                        && let (Some(dt), Some(opposite)) = (neighbour_dt, opposite)
+                        && !sample.modifiers.alt
+                        && dt > 1e-6
+                    {
+                        let reach = match side {
+                            EaseSide::In => key_time - t,
+                            _ => t - key_time,
+                        };
+                        let influence = (reach.max(0.) / dt * 100.).clamp(0.1, 100.);
+                        let span = influence / 100. * dt;
+                        let rise = match side {
+                            EaseSide::In => key_value - v,
+                            _ => v - key_value,
+                        };
+                        out.push(
+                            KeyframeCommand::SetHandle {
+                                key_id: target_id,
+                                side: if *side == EaseSide::In {
+                                    EaseSide::Out
+                                } else {
+                                    EaseSide::In
+                                },
+                                value: HandleValue::Ease(TemporalEase {
+                                    speed: rise / span,
+                                    influence: opposite.influence,
+                                }),
+                                split: false,
+                            }
+                            .into(),
+                        );
+                    }
                 }
             }
             DragKind::Property { targets, time } => {
@@ -2607,7 +2990,13 @@ impl TimelineModel {
                 };
                 Plan::default()
             }
-            "keys.delete" => edit(KeyframeCommand::Delete { key_ids: keys }.into()),
+            "keys.delete" => edit(
+                KeyframeCommand::DeleteAt {
+                    key_ids: keys,
+                    time,
+                }
+                .into(),
+            ),
             "keys.hold" => {
                 let hold = !self.all_held(&keys);
                 edit(
@@ -2798,17 +3187,19 @@ pub fn menu_label(id: &str) -> &'static str {
 impl TimelineModel {
     /// Pointer cuts share the playhead split kernel command and one transaction.
     pub fn split_at(&self, hit: &str, time: f64, all: bool) -> Result<Plan, ModelError> {
-        if !time.is_finite() || self.index.layer(hit).is_none() {
+        let Some(hit) = self.index.layer_ordinal(hit).filter(|_| time.is_finite()) else {
             return Ok(Plan::default());
-        }
+        };
+        let candidates = if all {
+            &self.index.layers[..]
+        } else {
+            &self.index.layers[hit..=hit]
+        };
         let margin = 1. / self.index.fps.max(1.);
-        let layers: Vec<_> = self
-            .index
-            .layers
+        let layers: Vec<_> = candidates
             .iter()
             .filter(|l| {
-                (all || l.id == hit)
-                    && !l.effectively_locked
+                !l.effectively_locked
                     && time - l.from > margin + 1e-9
                     && l.from + l.duration - time > margin + 1e-9
             })
@@ -2848,20 +3239,19 @@ impl TimelineModel {
         if self.track_snap_disabled {
             return rounded;
         }
-        let mut times = vec![playhead];
-        times.extend(self.index.markers.iter().map(|m| m.time));
-        for l in &self.index.layers {
-            times.extend([l.from, l.from + l.duration]);
-            times.extend(
-                l.channels
-                    .iter()
-                    .flat_map(|c| c.keys.iter().map(|k| l.from + k.time)),
-            );
-        }
-        times
+        let cuts = self.index.split_targets();
+        let next = cuts.partition_point(|(time, _)| *time < raw);
+        let previous = next.checked_sub(1).and_then(|i| cuts.get(i).copied());
+        [Some((playhead, 0)), previous, cuts.get(next).copied()]
             .into_iter()
-            .filter(|t| t.is_finite() && (*t - raw).abs() <= radius)
-            .min_by(|a, b| (a - raw).abs().total_cmp(&(b - raw).abs()))
-            .unwrap_or(rounded)
+            .flatten()
+            .filter(|(t, _)| t.is_finite() && (*t - raw).abs() <= radius)
+            .min_by(|(a, a_order), (b, b_order)| {
+                (a - raw)
+                    .abs()
+                    .total_cmp(&(b - raw).abs())
+                    .then(a_order.cmp(b_order))
+            })
+            .map_or(rounded, |(time, _)| time)
     }
 }

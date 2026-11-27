@@ -404,3 +404,84 @@ fn breadcrumb_graph_projects_nested_precomp_links() {
     assert_eq!(parents("logo"), Value::Array(vec![Value::from("main")]));
     assert_eq!(parents("spinner"), Value::Array(vec![Value::from("logo")]));
 }
+
+#[test]
+fn focused_group_projects_breadcrumbs_and_drives_focus_action() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let project = parse(r##"{"id":"p","name":"Main","compId":"main","w":100,"h":100,"fps":30,"dur":5,"layers":[{"id":"g1","name":"Outer","type":"group","from":0,"dur":5,"d":{},"p":{}},{"id":"g2","name":"Inner","type":"group","group":"g1","from":0,"dur":5,"d":{},"p":{}},{"id":"l1","name":"Box","type":"solid","group":"g2","from":0,"dur":5,"d":{"w":50,"h":50,"color":"#ff0000"},"p":{}}],"assets":{},"comps":{}}"##).unwrap();
+    actor
+        .handle()
+        .open("p", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let state = actor.handle().state();
+    let mut ui = state.ui.get("p").cloned().unwrap_or_default();
+    let mut native = pm_model::Map::new();
+    native.insert("focusedGroup", Value::from("g2"));
+    let mut tl = pm_model::Map::new();
+    tl.insert("nativeModel", Value::Object(native));
+    ui.timeline = Value::Object(tl);
+    actor
+        .handle()
+        .state_transaction(pm_kernel::state::StateTransaction {
+            expected_revision: Some(state.revision),
+            ops: vec![pm_kernel::state::StateOp::Ui {
+                project: "p".into(),
+                next: ui,
+            }],
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+
+    let controller = Controller::new(actor.handle(), "p");
+    let vm = controller.read().unwrap();
+    let viewport = vm
+        .viewport(
+            Size {
+                width: 300.,
+                height: 200.,
+            },
+            8.,
+        )
+        .unwrap();
+    let mut session = Session::default();
+    let value = session.publish(&vm, viewport).unwrap();
+    let groups = value
+        .get("focusedGroups")
+        .and_then(Value::as_array)
+        .expect("focusedGroups breadcrumb chain");
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].get("id").and_then(Value::as_str), Some("g1"));
+    assert_eq!(groups[0].get("name").and_then(Value::as_str), Some("Outer"));
+    assert_eq!(groups[1].get("id").and_then(Value::as_str), Some("g2"));
+    assert_eq!(groups[1].get("name").and_then(Value::as_str), Some("Inner"));
+
+    let ticket = value.get("ticket").and_then(Value::as_str).unwrap();
+    let plan = session
+        .drive(
+            &vm,
+            &request(ticket, "viewer.group.focus", Value::from("g1")),
+            viewport,
+            Caller::native(),
+        )
+        .unwrap();
+    assert!(matches!(
+        plan.effect,
+        Effect::Host(HostAction::FocusGroup(Some(ref id))) if id == "g1"
+    ));
+
+    let exit_plan = session
+        .drive(
+            &vm,
+            &request(ticket, "viewer.group.focus", Value::Null),
+            viewport,
+            Caller::native(),
+        )
+        .unwrap();
+    assert!(matches!(
+        exit_plan.effect,
+        Effect::Host(HostAction::FocusGroup(None))
+    ));
+}

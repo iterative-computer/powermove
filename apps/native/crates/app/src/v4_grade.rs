@@ -171,6 +171,11 @@ impl SurfaceView {
         kit: &Kit,
         disabled: bool,
     ) -> Option<impl IntoElement> {
+        // Keep the original drawing while the cancellation travels back
+        // through the kernel and the panel publishes the restored value.
+        let kit = self.grade_reverted.as_ref()
+            .filter(|(owner, _, _)| *owner == id)
+            .map_or(kit, |(_, original, _)| original);
         let tokens = self.table.tokens.clone();
         let tokens2 = tokens.clone();
         let drawn = self.grade_drawn.clone();
@@ -402,8 +407,8 @@ impl SurfaceView {
         let Some(node) = self.prepared.node(id) else {
             return;
         };
-        // The panel owns an easing handle: preview locally during opt-in
-        // drags, then send its single document change on release.
+        // The panel owns an easing handle. Preview locally and send its
+        // single document change on release.
         if let Kit::Ease {
             curve,
             thumbnail: false,
@@ -429,11 +434,9 @@ impl SurfaceView {
                 return;
             };
             self.scrub = Some(ScrubDrag {
-                local_commit: node.commit_on_release.then(|| {
-                    let value = json!(shown);
-                    (value.clone(), value)
-                }),
+                local_commit: Some((json!(shown), json!(shown))),
                 id,
+                semantic: node.semantic.clone(),
                 start: event.position,
                 number: Default::default(),
                 motion: pm_surface::kit::NumericMotion::new(0., 0.),
@@ -447,6 +450,7 @@ impl SurfaceView {
                     at: event.position,
                     live: shown,
                 }),
+                grade_original: None,
             });
             cx.notify();
             return;
@@ -461,7 +465,10 @@ impl SurfaceView {
             return;
         };
         let t = self.table.tokens.clone();
-        let kit = node.kit.clone();
+        let kit = self.grade_reverted.take()
+            .filter(|(owner, _, _)| *owner == id)
+            .map_or_else(|| node.kit.clone(), |(_, original, _)| original);
+        let original_kit = kit.clone();
         // A press on a wheel's master strip moves the master.
         if let Kit::Wheel {
             neutral,
@@ -486,6 +493,7 @@ impl SurfaceView {
                 self.scrub = Some(ScrubDrag {
                     local_commit: None,
                     id,
+                    semantic: node.semantic.clone(),
                     start: event.position,
                     number: Default::default(),
                     motion: pm_surface::kit::NumericMotion::new(0., 0.),
@@ -499,6 +507,7 @@ impl SurfaceView {
                         neutral: *neutral,
                         live: *value,
                     }),
+                    grade_original: Some(original_kit),
                 });
                 cx.notify();
                 return;
@@ -560,6 +569,7 @@ impl SurfaceView {
             self.scrub = Some(ScrubDrag {
                 local_commit: None,
                 id,
+                semantic: node.semantic.clone(),
                 start: event.position,
                 number: Default::default(),
                 motion: pm_surface::kit::NumericMotion::new(0., 0.),
@@ -567,6 +577,7 @@ impl SurfaceView {
                 binding: Some(binding),
                 active: true,
                 grade: Some(drag),
+                grade_original: Some(original_kit),
             });
             self.scrub_pump(cx);
             cx.notify();
@@ -650,6 +661,7 @@ impl SurfaceView {
                     self.scrub = Some(ScrubDrag {
                         local_commit: None,
                         id,
+                        semantic: node.semantic.clone(),
                         start: event.position,
                         number: Default::default(),
                         motion: pm_surface::kit::NumericMotion::new(0., 0.),
@@ -657,6 +669,7 @@ impl SurfaceView {
                         binding: Some(binding),
                         active: true,
                         grade: Some(drag),
+                        grade_original: Some(original_kit),
                     });
                     self.scrub_pump(cx);
                     cx.notify();
@@ -669,6 +682,7 @@ impl SurfaceView {
         self.scrub = Some(ScrubDrag {
             local_commit: None,
             id,
+            semantic: node.semantic.clone(),
             start: event.position,
             number: Default::default(),
             motion: pm_surface::kit::NumericMotion::new(0., 0.),
@@ -676,6 +690,7 @@ impl SurfaceView {
             binding: Some(binding),
             active: false,
             grade: Some(drag),
+            grade_original: Some(original_kit),
         });
     }
 
@@ -683,8 +698,8 @@ impl SurfaceView {
     pub(super) fn grade_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         let grade_name = self.scrub.as_ref().and_then(|d| self.undo_name(d.id));
         // An easing handle follows the pointer from where it was grabbed
-        // (finely with Option, on a twentieth grid with Shift). Opt-in local
-        // editors preview each move and commit once when released.
+        // (finely with Option, on a twentieth grid with Shift). The panel
+        // previews each move and commits once when released.
         if let Some(ScrubDrag {
             id,
             local_commit,
@@ -695,6 +710,7 @@ impl SurfaceView {
                     from,
                     at,
                     live,
+                    ..
                 }),
             ..
         }) = self.scrub.as_mut()
@@ -716,22 +732,15 @@ impl SurfaceView {
             live[*knob * 2] = x;
             live[*knob * 2 + 1] = y;
             let value = json!(*live);
-            let deferred = if let Some((_, last)) = local_commit {
+            if let Some((_, last)) = local_commit {
                 *last = value.clone();
-                true
-            } else {
-                false
-            };
+            }
             let (id, live) = (*id, *live);
             self.ease
                 .pending
                 .borrow_mut()
                 .insert(id, (live, std::time::Instant::now()));
-            if deferred {
-                self.control_sample(id, "input", value, cx);
-            } else {
-                self.change_sample(id, value, cx);
-            }
+            self.control_sample(id, "input", value, cx);
             cx.notify();
             return;
         }

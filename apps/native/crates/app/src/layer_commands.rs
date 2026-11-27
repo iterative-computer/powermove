@@ -680,13 +680,20 @@ struct Facts {
 impl Facts {
     fn read(published: &Published, pressed: Option<&str>) -> Option<Self> {
         let layers = list_layers(published.snapshot.root()?, None);
-        let chosen = published.selection.layers();
+        let mut chosen: HashSet<&str> = published
+            .selection
+            .layers()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if let Some(id) = pressed
+            && !chosen.contains(id)
+        {
+            chosen = HashSet::from([id]);
+        }
         let selected = layers
             .iter()
-            .filter(|l| match pressed {
-                Some(id) if !chosen.iter().any(|c| c == id) => l.id == id,
-                _ => chosen.contains(&l.id),
-            })
+            .filter(|l| chosen.contains(l.id.as_str()))
             .cloned()
             .collect();
         Some(Self { layers, selected })
@@ -707,18 +714,22 @@ impl Facts {
     }
     /// The selection with everything inside its groups (`PM.expandGroups`).
     fn expanded(&self) -> HashSet<&str> {
-        let mut ids: HashSet<&str> = self.selected.iter().map(|l| l.id.as_str()).collect();
-        loop {
-            let before = ids.len();
-            for l in &self.layers {
-                if l.group.as_deref().is_some_and(|g| ids.contains(g)) {
-                    ids.insert(&l.id);
-                }
-            }
-            if ids.len() == before {
-                return ids;
+        let mut members: HashMap<&str, Vec<&str>> = HashMap::new();
+        for layer in &self.layers {
+            if let Some(group) = layer.group.as_deref() {
+                members.entry(group).or_default().push(&layer.id);
             }
         }
+        let mut pending: Vec<&str> = self.selected.iter().map(|l| l.id.as_str()).collect();
+        let mut ids = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if ids.insert(id)
+                && let Some(children) = members.get(id)
+            {
+                pending.extend(children);
+            }
+        }
+        ids
     }
     /// Unlocked groups the selection could move into.
     fn groups(&self) -> Vec<&LayerInfo> {
@@ -747,8 +758,7 @@ impl Facts {
 /// The rows a pop-up lists when its menu opens (the kit's `HostRows`):
 /// `layer-parents`, every layer `layer` (with the selection it is part of)
 /// can be parented to, as Properties' Parent offers; `layer-mattes`, every
-/// layer that can be its track matte. `None` first. Read from the layer list
-/// and the kernel's relation queries, each layer resolved once.
+/// layer that can be its track matte. `None` first.
 pub fn host_rows(
     published: &Published,
     source: &serde_json::Value,
@@ -756,68 +766,30 @@ pub fn host_rows(
     use serde_json::json;
     let layer = source.get("layer")?.as_str()?;
     let root = published.snapshot.root()?;
-    let layers = list_layers(root, None);
-    let at = |id: &str| pm_kernel::model::find_layer(root, id);
-    let mut mirror = pm_kernel::QueryMirror::new(published);
-    let mut asks = |loc: &pm_kernel::model::LayerLoc, op: &str, key: &str, other: &str| {
-        let mut request = Map::new();
-        request.insert("op", Value::String(op.into()));
-        request.insert("layer", Value::Number(loc.index as f64));
-        request.insert(
-            "comp",
-            Value::String(loc.comp_id.clone().unwrap_or_default().into()),
-        );
-        request.insert(key, Value::String(other.into()));
-        mirror
-            .queries()
-            .query(&Value::Object(request))
-            .ok()
-            .and_then(|v| v.as_bool())
-            == Some(true)
-    };
     // By stack number and name, as After Effects lists them: two layers
     // named alike ("Rect", "Rect") are told apart (PM-502).
-    let number = |l: &LayerInfo| layers.iter().position(|o| o.id == l.id).map_or(0, |i| i + 1);
     let label = |l: &LayerInfo| {
         let name = if l.name.is_empty() { &l.id } else { &l.name };
-        format!("{}. {name}", number(l))
+        format!("{}. {name}", l.index + 1)
     };
     let mut rows = vec![json!({"v": null, "label": "None"})];
     match source.get("source")?.as_str()? {
         "layer-parents" => {
-            // Parenting acts on the selection the layer belongs to
-            // (LayerOptions), never on audio.
-            let chosen = published.selection.layers();
-            let selected = chosen.iter().any(|c| c == layer);
-            let children: Vec<&LayerInfo> = layers
+            let facts = Facts::read(published, Some(layer))?;
+            let children: Vec<_> = facts
+                .selected
                 .iter()
-                .filter(|l| {
-                    if selected {
-                        chosen.contains(&l.id)
-                    } else {
-                        l.id == layer
-                    }
-                })
                 .filter(|l| l.kind != "audio")
                 .collect();
-            let locs: Vec<_> = children.iter().filter_map(|c| at(&c.id)).collect();
-            for candidate in &layers {
-                if candidate.kind == "audio" || children.iter().any(|c| c.id == candidate.id) {
-                    continue;
-                }
-                if locs
-                    .iter()
-                    .any(|loc| asks(loc, "wouldCycle", "parent", &candidate.id))
-                {
-                    continue;
-                }
+            for candidate in parent_candidates(published, &facts, &children) {
                 rows.push(json!({"v": candidate.id, "label": label(candidate)}));
             }
         }
         "layer-mattes" => {
-            let loc = at(layer)?;
-            for candidate in &layers {
-                if asks(&loc, "validMatteSource", "id", &candidate.id) {
+            let loc = pm_kernel::model::find_layer(root, layer)?;
+            let mut mirror = pm_kernel::QueryMirror::new(published);
+            for candidate in &list_layers(root, None) {
+                if relation_at(&mut mirror, &loc, "validMatteSource", ("id", &candidate.id)) {
                     rows.push(json!({"v": candidate.id, "label": label(candidate)}));
                 }
             }
@@ -841,10 +813,22 @@ fn relation(
     else {
         return false;
     };
+    relation_at(mirror, &at, op, (key, other))
+}
+
+fn relation_at(
+    mirror: &mut pm_kernel::QueryMirror,
+    at: &pm_kernel::model::LayerLoc,
+    op: &str,
+    (key, other): (&str, &str),
+) -> bool {
     let mut request = Map::new();
     request.insert("op", Value::String(op.into()));
     request.insert("layer", Value::Number(at.index as f64));
-    request.insert("comp", Value::String(at.comp_id.unwrap_or_default().into()));
+    request.insert(
+        "comp",
+        Value::String(at.comp_id.as_deref().unwrap_or_default().into()),
+    );
     request.insert(key, Value::String(other.into()));
     mirror
         .queries()
@@ -860,22 +844,119 @@ fn parent_candidates<'a>(
     facts: &'a Facts,
     children: &[&LayerInfo],
 ) -> Vec<&'a LayerInfo> {
-    let mut mirror = pm_kernel::QueryMirror::new(published);
-    facts
-        .layers
+    let layers = &facts.layers;
+    let by_id: HashMap<_, _> = layers
         .iter()
-        .filter(|candidate| {
-            candidate.kind != "audio"
-                && children.iter().all(|child| {
-                    child.id != candidate.id
-                        && !relation(
-                            &mut mirror,
-                            published,
-                            "wouldCycle",
-                            &child.id,
-                            ("parent", &candidate.id),
-                        )
+        .enumerate()
+        .map(|(i, l)| (l.id.as_str(), i))
+        .collect();
+    // Canonical compositions have unique string IDs and relation fields.
+    // Imported legacy data outside that shape keeps the kernel's lookup rules.
+    let plain_relations = published
+        .snapshot
+        .root()
+        .and_then(|root| {
+            pm_kernel::model::comp_node(root, published.snapshot.open_comp().as_deref())
+        })
+        .is_some_and(|comp| {
+            pm_kernel::model::layers_of(comp)
+                .enumerate()
+                .all(|(i, node)| {
+                    layers.get(i).is_some_and(|row| row.index == i)
+                        && ["parent", "group"].iter().all(|key| {
+                            node.get(key).is_none_or(|value| {
+                                matches!(value.kind(), pm_model::NodeKind::Null)
+                                    || crate::node_string(value).is_some()
+                            })
+                        })
                 })
+        });
+    if by_id.len() != layers.len() || !plain_relations {
+        let mut mirror = pm_kernel::QueryMirror::new(published);
+        return layers
+            .iter()
+            .filter(|candidate| {
+                candidate.kind != "audio"
+                    && children.iter().all(|child| {
+                        child.id != candidate.id
+                            && !relation(
+                                &mut mirror,
+                                published,
+                                "wouldCycle",
+                                &child.id,
+                                ("parent", &candidate.id),
+                            )
+                    })
+            })
+            .collect();
+    }
+
+    let mut groups = vec![None; layers.len()];
+    let mut members = vec![Vec::new(); layers.len()];
+    let mut followers = vec![Vec::new(); layers.len()];
+    let lookup = |id: Option<&str>| {
+        id.filter(|id| !id.is_empty())
+            .and_then(|id| by_id.get(id).copied())
+    };
+    for (i, layer) in layers.iter().enumerate() {
+        if let Some(parent) = lookup(layer.parent.as_deref()) {
+            followers[parent].push(i);
+        }
+        if let Some(group) = lookup(layer.group.as_deref()).filter(|&g| layers[g].kind == "group") {
+            groups[i] = Some(group);
+            members[group].push(i);
+        }
+    }
+    // wouldCycle rejects the child's enclosing groups outright. It also
+    // rejects a parent chain reaching a selected child or one of its members.
+    let mut enclosing = vec![false; layers.len()];
+    let mut targets = vec![false; layers.len()];
+    let mut queue = std::collections::VecDeque::new();
+    for child in children {
+        let i = by_id[child.id.as_str()];
+        targets[i] = true;
+        queue.push_back((i, 0));
+        let mut next = groups[i];
+        while let Some(group) = next {
+            if std::mem::replace(&mut enclosing[group], true) {
+                break;
+            }
+            next = groups[group];
+        }
+    }
+    // Take the union of the selected groups' subtrees before walking parents,
+    // so the breadth-first traversal starts with all zero-distance targets.
+    let mut pending: Vec<_> = children
+        .iter()
+        .filter(|l| l.kind == "group")
+        .map(|l| by_id[l.id.as_str()])
+        .collect();
+    let mut visited = vec![false; layers.len()];
+    while let Some(i) = pending.pop() {
+        if std::mem::replace(&mut visited[i], true) {
+            continue;
+        }
+        pending.extend(members[i].iter().copied());
+        if !std::mem::replace(&mut targets[i], true) {
+            queue.push_back((i, 0));
+        }
+    }
+    while let Some((i, depth)) = queue.pop_front() {
+        // The kernel inspects at most 256 nodes including the candidate.
+        if depth == 255 {
+            continue;
+        }
+        for &follower in &followers[i] {
+            if !std::mem::replace(&mut targets[follower], true) {
+                queue.push_back((follower, depth + 1));
+            }
+        }
+    }
+    layers
+        .iter()
+        .enumerate()
+        .filter_map(|(i, layer)| {
+            (layer.kind != "audio" && !targets[i] && !enclosing[i]).then_some(layer)
         })
         .collect()
 }
@@ -999,12 +1080,16 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64, can_paste: bo
         let children: Vec<&LayerInfo> = facts.selected.iter().collect();
         let mut items = vec![json!({"id":"parentLayers","label":"None","args":[null],
             "disabled":!editable,"checked":every(&|l| l.parent.is_none())})];
+        let common_parent = target
+            .parent
+            .as_deref()
+            .filter(|parent| every(&|l| l.parent.as_deref() == Some(*parent)));
         items.extend(
             parent_candidates(published, &facts, &children)
                 .iter()
                 .map(|c| {
                     json!({"id":"parentLayers","label":c.name,"args":[c.id],"disabled":!editable,
-                "checked":every(&|l| l.parent.as_deref() == Some(c.id.as_str()))})
+                "checked":common_parent == Some(c.id.as_str())})
                 }),
         );
         rows.push(submenu("Link Layers", items));
@@ -1240,9 +1325,20 @@ fn new_layer(published: &Published, kind: &str, name: &str, centred: bool, time:
         track: None,
         time,
     };
+    let mut commands: Vec<Command> = vec![LayerCommand::Add(Box::new(add)).into()];
+    if let Some(group) = pm_panel_timeline::focused_group_for_published(published) {
+        commands.push(
+            pm_kernel::GroupCommand::MoveToGroup {
+                layer_ids: vec![id.clone()],
+                group: Some(group),
+                time,
+            }
+            .into(),
+        );
+    }
     Plan {
         select: Some(vec![id]),
-        ..plain(&label, vec![LayerCommand::Add(Box::new(add)).into()])
+        ..plain(&label, commands)
     }
 }
 /// `selectAdjacentLayer`: the stack's neighbour, or the far end with no selection.
@@ -1367,7 +1463,7 @@ fn nudge(
 /// the time they took. A layer moves by the removed spans that end at or
 /// before its start; one that overlaps a removed span stays where it is, and
 /// so does a locked one. A group that moves carries its members.
-fn ripple_delete(layers: &[LayerInfo], selected: &[String]) -> Option<Plan> {
+fn ripple_delete(layers: &[LayerInfo], selected: &[String], time: f64) -> Option<Plan> {
     let chosen: HashSet<&str> = selected.iter().map(String::as_str).collect();
     let info: HashMap<&str, &LayerInfo> = layers.iter().map(|l| (l.id.as_str(), l)).collect();
     let picked: Vec<&LayerInfo> = layers
@@ -1425,8 +1521,9 @@ fn ripple_delete(layers: &[LayerInfo], selected: &[String]) -> Option<Plan> {
         }
     }
     let mut commands: Vec<Command> = vec![
-        LayerCommand::Delete {
+        LayerCommand::DeleteAt {
             layer_ids: picked.iter().map(|l| l.id.clone()).collect(),
+            time,
         }
         .into(),
     ];
@@ -1667,7 +1764,6 @@ pub fn command_plan(
             false,
             time,
         )),
-        // A null is made at the composition's centre, as v1's command did.
         "newNull" => Some(new_layer(published, "null", "Null", true, time)),
         "selectAll" => Some(selection_plan(
             layers.iter().map(|l| l.id.clone()).collect(),
@@ -1775,7 +1871,7 @@ pub fn command_plan(
         | "toggleThreeD"
         | "unlockSelectedLayers"
         | "unlockGroup" => layer_menu_plan(name, args, published, time),
-        "rippleDelete" => ripple_delete(&layers, &selected),
+        "rippleDelete" => ripple_delete(&layers, &selected, time),
         // The Properties alignment strip, for the palette and agents: the
         // selection's anchors meet the target edge or centre.
         "alignLayers" => {
@@ -2289,11 +2385,43 @@ fn lock_patch(locked: bool, time: f64) -> LayerPatch {
         ..Default::default()
     }
 }
+/// Facts rebuilt only when the rows are replaced, including after a worker read.
+#[derive(Default)]
+pub(crate) struct CommandRows {
+    positions: HashMap<String, usize>,
+    has_locked: bool,
+}
+
+impl CommandRows {
+    pub(crate) fn new(layers: &[LayerInfo]) -> Self {
+        Self {
+            positions: layers
+                .iter()
+                .enumerate()
+                .map(|(i, l)| (l.id.clone(), i))
+                .collect(),
+            has_locked: layers.iter().any(|l| l.locked),
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn disabled(published: Option<&Published>, layers: &[LayerInfo]) -> BTreeSet<String> {
+    disabled_indexed(
+        published,
+        layers,
+        &CommandRows::new(layers),
+        published.is_some_and(pm_panel_studio3d::viewport::supports_navigation),
+    )
+}
+
 /// The commands that cannot run in this document state, for menus, the palette
 /// and the toolbar. A row is live only when its command would do something.
-pub fn disabled(
+pub(crate) fn disabled_indexed(
     published: Option<&Published>,
     layers: &[LayerInfo],
+    index: &CommandRows,
+    studio: bool,
 ) -> BTreeSet<String> {
     let mut off: BTreeSet<String> = UNAVAILABLE.iter().map(|c| (*c).to_owned()).collect();
     // The controller enables Paste from the live app and system clipboards.
@@ -2309,16 +2437,13 @@ pub fn disabled(
         off.insert("export".into());
         return off;
     };
-    // Runs on every publication, so the selection is looked up, never scanned for.
-    let ids: HashSet<&str> = published
+    let mut seen = HashSet::new();
+    let selected: Vec<&LayerInfo> = published
         .selection
         .layers()
         .iter()
-        .map(String::as_str)
-        .collect();
-    let selected: Vec<&LayerInfo> = layers
-        .iter()
-        .filter(|l| !ids.is_empty() && ids.contains(l.id.as_str()))
+        .filter(|id| seen.insert(id.as_str()))
+        .filter_map(|id| index.positions.get(id).and_then(|&i| layers.get(i)))
         .collect();
     let keys = !published.selection.keys().is_empty();
     let chosen = !selected.is_empty();
@@ -2334,12 +2459,7 @@ pub fn disabled(
             .iter()
             .any(|clip| clip.kind != "audio" && !clip.effectively_locked),
     );
-    set(
-        "studio.view",
-        layers
-            .iter()
-            .any(|l| crate::gizmo::is_studio(published, &l.id)),
-    );
+    set("studio.view", studio);
     for name in SELECTION {
         set(name, chosen);
     }
@@ -2438,13 +2558,23 @@ pub fn disabled(
     set("fitToComposition", editable && !has("group"));
     // One video layer that still carries its soundtrack.
     let soundtrack = matches!(selected.as_slice(), [l] if l.kind == "video"
-        && layer(published, &l.id).as_ref().and_then(embedded_audio).is_some());
+    && published.snapshot.root().and_then(|root| {
+        let comp = pm_kernel::model::comp_node(root, published.snapshot.open_comp().as_deref())?;
+        comp.get("layers").and_then(|stack| stack.at(l.index))
+            .filter(|node| node.get("id").and_then(crate::node_string) == Some(l.id.as_str()))
+            .or_else(|| pm_kernel::model::find_layer(root, &l.id)
+                .and_then(|loc| pm_kernel::model::layer_at(root, &loc)))
+    }).is_some_and(|node| {
+        node.get("type").and_then(crate::node_string) == Some("video")
+            && matches!(node.get("d").and_then(|d| d.get("embeddedAudio")).map(pm_model::Node::kind),
+                Some(pm_model::NodeKind::Bool(true)))
+    }));
     for name in ["separateAudio", "toggleAudioMute"] {
         set(name, editable && soundtrack);
     }
     set("unlockSelectedLayers", selected.iter().any(|l| l.locked));
     set("lockSelectedLayers", selected.iter().any(|l| !l.locked));
-    set("unlockAllLayers", layers.iter().any(|l| l.locked));
+    set("unlockAllLayers", index.has_locked);
     off
 }
 /// Rows that act on the selected layers.
@@ -2604,6 +2734,106 @@ pub(crate) mod commands_tests;
 #[cfg(test)]
 #[path = "layer_commands_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod parent_filter_tests {
+    use super::*;
+
+    #[test]
+    fn parent_filter_matches_kernel_on_639_layers() {
+        let mut stack = Vec::new();
+        for i in 0..639 {
+            let id = format!("l{i}");
+            let parent = match i {
+                0 | 1 | 2 | 620.. => None,
+                3 => Some("l2".to_owned()),
+                4 => Some("l3".to_owned()),
+                5..=300 => Some(format!("l{}", i - 1)),
+                _ => None,
+            };
+            let group = match i {
+                1 | 2 => Some("l0"),
+                301 => Some("l1"),
+                302 => Some("l301"),
+                _ => None,
+            };
+            let kind = match i {
+                0 | 1 | 301 => "group",
+                305 => "audio",
+                _ => "solid",
+            };
+            stack.push(serde_json::json!({
+                "id": id, "name": id, "type": kind, "parent": parent, "group": group,
+                "from": 0, "dur": 5, "lock": i == 0 || i == 306,
+            }));
+        }
+        use pm_kernel::{KernelActor, KernelConfig, OpenSource};
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let project = pm_model::json::parse(
+            &serde_json::json!({
+                "id": "project", "compId": "c", "w": 64, "h": 64, "fps": 30, "dur": 5,
+                "layers": stack,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        kernel
+            .open("test", OpenSource::Untitled(project))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let published = kernel.published("test").unwrap();
+        let facts = Facts::read(&published, Some("l1")).unwrap();
+        assert_eq!(facts.layers.len(), 639);
+        let children = [facts.info("l1").unwrap(), facts.info("l2").unwrap()];
+        assert!(children.iter().all(|l| l.effectively_locked));
+        let mut mirror = pm_kernel::QueryMirror::new(&published);
+        let expected: Vec<_> = facts
+            .layers
+            .iter()
+            .filter(|candidate| {
+                candidate.kind != "audio"
+                    && children.iter().all(|child| {
+                        candidate.id != child.id
+                            && !relation(
+                                &mut mirror,
+                                &published,
+                                "wouldCycle",
+                                &child.id,
+                                ("parent", &candidate.id),
+                            )
+                    })
+            })
+            .map(|row| row.id.as_str())
+            .collect();
+        assert!(!expected.contains(&"l257"));
+        assert!(expected.contains(&"l258"));
+        assert!(!expected.contains(&"l302"));
+        assert!(expected.contains(&"l306"));
+
+        let mut times = Vec::new();
+        for _ in 0..21 {
+            let start = std::time::Instant::now();
+            let candidates = parent_candidates(&published, &facts, &children);
+            times.push(start.elapsed());
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|row| row.id.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        times.sort_unstable();
+        let median = times[times.len() / 2];
+        eprintln!(
+            "639-layer parent cycle filtering median: {:.3} ms",
+            median.as_secs_f64() * 1e3
+        );
+        assert!(median < std::time::Duration::from_millis(1), "{median:?}");
+    }
+}
 
 /// Palette scope follows the open composition, including nested compositions.
 pub fn palette_layers(published: &Published) -> Vec<(String, String)> {

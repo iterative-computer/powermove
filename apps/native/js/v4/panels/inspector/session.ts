@@ -188,7 +188,8 @@ export class InspectorSession {
     // Stale UI events cannot mutate a newly selected layer through old row IDs.
     if ("row" in intent) {
       const row = this.row(intent.row);
-      if (!row || row.disabled || row.locked) return false;
+      if (row ? row.disabled || row.locked : !this.allowsPartAction(intent))
+        return false;
     }
     if (intent.type === "drop-effect") {
       const target = this.snapshot.target;
@@ -238,6 +239,32 @@ export class InspectorSession {
     }
     return true;
   }
+  private allowsPartAction(intent: Intent) {
+    if (intent.type !== "set-value") return false;
+    const { target, sections } = this.snapshot;
+    if (target.kind !== "layers" || target.count !== 1) return false;
+    const parts = sections.find(
+      (section) => !section.collapsed && section.parts,
+    )?.parts;
+    if (!parts || parts.layer !== target.first.id) return false;
+    if (intent.row === "3d.part.select")
+      return (
+        intent.value === null ||
+        parts.items.some((part) => part.v === intent.value)
+      );
+    if (target.first.locked) return false;
+    if (
+      typeof intent.value === "boolean" &&
+      parts.items.some((part) => intent.row === `3d.part.${part.v}.visible`)
+    )
+      return true;
+    return (
+      parts.active !== null &&
+      parts.activeEdited &&
+      intent.row === `3d.part.${parts.active}.reset` &&
+      (intent.value === null || intent.value === true)
+    );
+  }
   row(id: string): Row | undefined {
     for (const section of this.snapshot.sections) {
       if (!section.collapsed) {
@@ -255,9 +282,10 @@ export class InspectorSession {
     void this.native
       .request(request)
       .then(async (choice) => {
-        if (!this.alive || typeof choice !== "string") return;
+        if (!this.alive) return;
         const current = this.snapshot.target;
         if (!("key" in current) || current.key !== key) return;
+        if (typeof choice !== "string") return;
         if (request.type === "add-effect-menu" && current.kind === "layers") {
           await this.dispatch({
             type: "drop-effect",

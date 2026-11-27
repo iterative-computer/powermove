@@ -143,6 +143,18 @@ impl EvaluatedPath {
                 out_y: get("outY"),
             }
         };
+        let fill_group = match content_get(&self.values, "fillGroup") {
+            JsValue::Undefined | JsValue::Null => None,
+            v => Some(v.to_js_string().to_string_lossy()),
+        };
+        let fill_rule = match content_get(&self.values, "fillRule") {
+            JsValue::String(s) => match s.to_string_lossy().as_str() {
+                "evenodd" => Some(pm_vector::path::FillRule::EvenOdd),
+                "nonzero" => Some(pm_vector::path::FillRule::NonZero),
+                _ => None,
+            },
+            _ => None,
+        };
         PathValues {
             x: n("x"),
             y: n("y"),
@@ -161,6 +173,8 @@ impl EvaluatedPath {
             repeat_x: n("repeatX"),
             repeat_y: n("repeatY"),
             repeat_rotation: n("repeatRotation"),
+            fill_group,
+            fill_rule,
             vertices: self.vertices.iter().map(vertex).collect(),
         }
     }
@@ -397,15 +411,23 @@ impl<'d> Scope<'_, 'd> {
     /// depends on the time (`crate::channel_memo`), and within one frame's
     /// memoized scope for animated paths.
     pub fn path_geometry(&mut self, layer: &'d Node, time: f64) -> JsResult<PathGeometry> {
+        Ok((*self.shared_path_geometry(layer, time)?).clone())
+    }
+
+    /// The evaluated path geometry shared by bounds and render planning.
+    pub fn shared_path_geometry(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+    ) -> JsResult<std::sync::Arc<PathGeometry>> {
         if let Some(kept) = self.ev.kept_path_geometry(self.comp, layer) {
-            return Ok((*kept).clone());
+            return Ok(kept);
         }
-        if let Some(kept) = self
-            .local_memo
-            .as_ref()
-            .and_then(|m| m.path_geom.get(&(crate::scope::address(layer), time.to_bits())))
-        {
-            return Ok((**kept).clone());
+        if let Some(kept) = self.local_memo.as_ref().and_then(|m| {
+            m.path_geom
+                .get(&(crate::scope::address(layer), time.to_bits()))
+        }) {
+            return Ok(kept.clone());
         }
         let mut fixed = true;
         let evaluated = self.layer_paths_noting(layer, time, &mut fixed)?;
@@ -426,14 +448,27 @@ impl<'d> Scope<'_, 'd> {
         let matrices = (0..nodes.len())
             .map(|i| pm_vector::path::group_matrix(&nodes, i).as_coeffs())
             .collect();
-        let geometry = (evaluated, matrices, PathLayer::new(&nodes));
+        let compound = node::truthy(node::member(d, "compound"));
+        let fill_rule = if node::string(node::member(d, "fillRule"))
+            .is_some_and(|s| s.to_string_lossy() == "evenodd")
+        {
+            pm_vector::path::FillRule::EvenOdd
+        } else {
+            pm_vector::path::FillRule::NonZero
+        };
+        let geometry = std::sync::Arc::new((
+            evaluated,
+            matrices,
+            PathLayer::new_with_options(&nodes, compound, fill_rule),
+        ));
         if fixed {
             self.ev
-                .keep_path_geometry(self.comp, layer, std::sync::Arc::new(geometry.clone()));
-        } else if let Some(memo) = self.local_memo.as_mut() {
+                .keep_path_geometry(self.comp, layer, geometry.clone());
+        }
+        if let Some(memo) = self.local_memo.as_mut() {
             memo.path_geom.insert(
                 (crate::scope::address(layer), time.to_bits()),
-                std::sync::Arc::new(geometry.clone()),
+                geometry.clone(),
             );
         }
         Ok(geometry)
@@ -599,7 +634,8 @@ impl<'d> Scope<'_, 'd> {
             return Ok(None);
         }
         if ty == "shape" && has_paths(layer)? {
-            let (_, _, paths) = self.path_geometry(layer, time)?;
+            let geometry = self.shared_path_geometry(layer, time)?;
+            let (_, _, paths) = &*geometry;
             let b = paths.bounds;
             return Ok(Some(Bounds {
                 x0: b.x0,
@@ -697,12 +733,9 @@ impl<'d> Scope<'_, 'd> {
         if self.is_model_group(group)? {
             return self.model_group_bounds3d(group, time, host);
         }
-        let m = self.world_matrix(group, time)?;
-        let Some(inv) = invert(&m) else {
-            return Ok(None);
-        };
         let gid = node::get(group, b"id").to_js();
-        let mut points: Vec<(f64, f64)> = Vec::new();
+        let mut children: Vec<&'d Node> = Vec::new();
+        let mut any_3d = self.is_3d_layer(group)?;
         for child in self.layers() {
             if is_type(child, "group") {
                 continue;
@@ -714,6 +747,71 @@ impl<'d> Scope<'_, 'd> {
             if !inside || !self.active(child, time)? {
                 continue;
             }
+            any_3d |= flag(child, "threeD");
+            children.push(child);
+        }
+        if children.is_empty() {
+            return Ok(None);
+        }
+        if any_3d {
+            let m = self.world3d(group, time, false)?;
+            let Some(inv) = crate::space3d::inverse3d(&m) else {
+                return Ok(None);
+            };
+            let mut points: Vec<[f64; 3]> = Vec::new();
+            for child in children {
+                let bounds = self.bounds_with_measure(child, time, measure, host)?;
+                let world = self.world3d(child, time, false)?;
+                let local = crate::space3d::multiply(&inv, &world);
+                let apply3 = |x: f64, y: f64, z: f64| -> [f64; 3] {
+                    [
+                        local[0] * x + local[4] * y + local[8] * z + local[12],
+                        local[1] * x + local[5] * y + local[9] * z + local[13],
+                        local[2] * x + local[6] * y + local[10] * z + local[14],
+                    ]
+                };
+                if let Some(b) = bounds {
+                    let (z0, z1) = b.z.unwrap_or((0.0, 0.0));
+                    let zs: &[f64] = if (z1 - z0).abs() > 1e-9 {
+                        &[z0, z1]
+                    } else {
+                        &[z0]
+                    };
+                    for &z in zs {
+                        for x in [b.x0, b.x1] {
+                            for y in [b.y0, b.y1] {
+                                points.push(apply3(x, y, z));
+                            }
+                        }
+                    }
+                } else if !is_type(child, "audio") {
+                    points.push([local[12], local[13], local[14]]);
+                }
+            }
+            if points.is_empty() {
+                return Ok(None);
+            }
+            let fold = |f: fn(f64, f64) -> f64, start: f64, idx: usize| {
+                points.iter().map(|p| p[idx]).fold(start, f)
+            };
+            let x0 = fold(js_min, f64::INFINITY, 0);
+            let x1 = fold(js_max, f64::NEG_INFINITY, 0);
+            let y0 = fold(js_min, f64::INFINITY, 1);
+            let y1 = fold(js_max, f64::NEG_INFINITY, 1);
+            let z0 = fold(js_min, f64::INFINITY, 2);
+            let z1 = fold(js_max, f64::NEG_INFINITY, 2);
+            let mut b = Bounds::sized(x0, y0, x1, y1, 0.0, 0.0);
+            if z0.abs() > 1e-9 || z1.abs() > 1e-9 {
+                b.z = Some((z0, z1));
+            }
+            return Ok(Some(b));
+        }
+        let m = self.world_matrix(group, time)?;
+        let Some(inv) = invert(&m) else {
+            return Ok(None);
+        };
+        let mut points: Vec<(f64, f64)> = Vec::new();
+        for child in children {
             let bounds = self.bounds_with_measure(child, time, measure, host)?;
             let world = self.world_matrix(child, time)?;
             let local = mul(&inv, &world);
@@ -796,6 +894,16 @@ impl<'d> Scope<'_, 'd> {
             if !self.active(layer, time)? || unpickable(layer) {
                 continue;
             }
+            if let Some(focus) = options.focus_group {
+                let focus_js = JsValue::String(focus.into());
+                let in_focus = self
+                    .group_ancestors(layer)?
+                    .iter()
+                    .any(|g| crate::js_sem::strict_eq(&node::get(g, b"id").to_js(), &focus_js));
+                if !in_focus {
+                    continue;
+                }
+            }
             if !options.include_locked
                 && (flag(layer, "lock")
                     || self.group_ancestors(layer)?.iter().any(|g| flag(g, "lock")))
@@ -849,6 +957,8 @@ pub struct PickOptions<'a> {
     /// The editor's Local View set: object layers outside it are skipped.
     /// `None` outside Local View.
     pub local_view: Option<&'a [JsValue]>,
+    /// Interactive group focus: only layers descending from this group are pickable.
+    pub focus_group: Option<&'a str>,
 }
 
 fn require_measure<'a>(

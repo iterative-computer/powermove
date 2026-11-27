@@ -408,6 +408,7 @@ pub fn first_line(text: &str) -> String {
 /// The edited layer as the kernel has it, read off the main thread.
 #[derive(Clone, Debug)]
 pub struct TextPose {
+    pub revision: u64,
     pub layout: Layout,
     pub matrix: [f64; 6],
     pub text: String,
@@ -417,16 +418,23 @@ pub struct TextPose {
     pub italic: bool,
     pub name: String,
 }
-/// The layer's stored text (`d.text`).
-/// Whether the layer's text read back is an outside edit (undo, the
-/// inspector) the editor should take. Never while a write is on its way, an
-/// input method composes, or the editor holds keys whose change has not been
-/// handled yet (its text is not what was last written): typing faster than
-/// the kernel answers would lose those keys and move the caret, reordering
-/// the next ones.
-fn outside_text(read: &str, editor: &str, written: &str, pending: bool, composing: bool) -> bool {
-    !pending && !composing && editor == written && read != editor
+/// An outside edit must follow our last write and reach an idle editor.
+fn outside_text(
+    read: &str,
+    editor: &str,
+    written: &str,
+    pending: bool,
+    composing: bool,
+    pose_revision: u64,
+    last_write_revision: Option<u64>,
+) -> bool {
+    !pending
+        && !composing
+        && editor == written
+        && read != editor
+        && last_write_revision.is_none_or(|revision| pose_revision > revision)
 }
+/// The layer's stored text (`d.text`).
 fn model_text(p: &pm_kernel::Published, id: &str) -> String {
     p.snapshot
         .root()
@@ -482,6 +490,7 @@ pub fn read_text(p: &pm_kernel::Published, id: &str, time: f64) -> Option<TextPo
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_default();
     Some(TextPose {
+        revision: p.revision(),
         layout,
         matrix,
         text,
@@ -521,6 +530,7 @@ enum Job {
         text: String,
         fresh: bool,
         rename: bool,
+        time: f64,
     },
 }
 pub struct TextSession {
@@ -536,6 +546,7 @@ pub struct TextSession {
     /// The newest queued or written step is a text step a later one may supersede.
     text_step: bool,
     written: String,
+    last_write_revision: Option<u64>,
     selection: (usize, usize),
     /// Drag-select anchor while the press is held.
     dragging: Option<usize>,
@@ -721,6 +732,7 @@ impl GizmoSurface {
             gesture: None,
             text_step: false,
             written: initial,
+            last_write_revision: None,
             selection: (0, 0),
             dragging: None,
             sticky: None,
@@ -749,7 +761,15 @@ impl GizmoSurface {
         if let Some(input) = s.input.clone() {
             // Outside edits (undo, the inspector) flow back into the editor.
             let pending = s.busy || !s.jobs.is_empty();
-            if outside_text(&pose.text, &input.value(), &s.written, pending, input.composing()) {
+            if outside_text(
+                &pose.text,
+                &input.value(),
+                &s.written,
+                pending,
+                input.composing(),
+                pose.revision,
+                s.last_write_revision,
+            ) {
                 input.replace_value(&pose.text);
                 s.written = pose.text.clone();
             }
@@ -769,11 +789,18 @@ impl GizmoSurface {
     }
     /// Reads the edited layer after a write or a publication.
     pub(super) fn text_reread(&mut self, cx: &mut Context<Self>) {
+        self.text_reading += 1;
+        self.text_read_again = false;
         let Some(s) = self.text.as_mut().filter(|s| s.active()) else {
             return;
         };
-        s.reading += 1;
-        let ticket = s.reading;
+        let ticket = self.text_reading;
+        s.reading = ticket;
+        if self.text_read_out {
+            self.text_read_again = true;
+            return;
+        }
+        self.text_read_out = true;
         let (kernel, project, id, time) = (
             self.kernel.clone(),
             self.project.clone(),
@@ -786,10 +813,14 @@ impl GizmoSurface {
                 .spawn(async move { read_text(kernel.published(&project)?.as_ref(), &id, time) })
                 .await;
             let _ = this.update(cx, |s, cx| {
+                s.text_read_out = false;
                 if let (Some(pose), Some(true)) =
                     (pose, s.text.as_ref().map(|t| t.reading == ticket))
                 {
                     s.adopt_text_pose(pose, cx);
+                }
+                if s.text_read_again {
+                    s.text_reread(cx);
                 }
             });
         })
@@ -934,6 +965,7 @@ impl GizmoSurface {
             text: s.written.clone(),
             fresh: s.fresh,
             rename,
+            time: s.time,
         });
         // Afterwards the tool returns to Select. Asked once the update that
         // ended the edit is over: Escape ends it inside the Controller's own
@@ -1053,8 +1085,9 @@ impl GizmoSurface {
                 let Some(s) = g.text.as_mut() else { return };
                 s.busy = false;
                 match result {
-                    Ok(Some(id)) => s.gesture = Some(id),
-                    Ok(None) => {}
+                    Ok(JobOutcome::Began(id)) => s.gesture = Some(id),
+                    Ok(JobOutcome::Wrote(revision)) => s.last_write_revision = Some(revision),
+                    Ok(JobOutcome::Done) => {}
                     Err(error) => {
                         // A refused step ends the session rather than typing
                         // into nothing.
@@ -1231,6 +1264,13 @@ fn add_text(
     let mut properties = Map::new();
     properties.insert("position.x", Value::Number(at[0]));
     properties.insert("position.y", Value::Number(at[1]));
+    // Paragraph drags keep the top edge pinned at the dragged box's top while
+    // typing; `Job::Finish` vertically centers the anchor on commit without
+    // shifting the text on screen. Point clicks omit `anchor.y` so `add_layer`
+    // vertically centers the anchor immediately.
+    if width.is_some() {
+        properties.insert("anchor.y", Value::Number(0.0));
+    }
     let duration = crate::layer_commands::text_layer_duration(published, time);
     let place = crate::layer_commands::place_on_top(published, "text", time, duration);
     let add = AddLayer {
@@ -1297,25 +1337,29 @@ async fn call(
     kernel: &pm_kernel::KernelHandle,
     project: &str,
     call: Call,
-) -> Result<Reply, String> {
+) -> Result<pm_kernel::Ack, String> {
     let ack = kernel
         .call(project, Request::new(Caller::native(), call))
         .await
         .ok_or("Kernel closed")?
         .map_err(|e| e.to_string())?;
-    match ack.reply {
+    match &ack.reply {
         Reply::Throw(error) => Err(error.to_string()),
-        reply => Ok(reply),
+        _ => Ok(ack),
     }
 }
-/// One job's kernel calls. `Ok(Some(id))` names a gesture it began.
+enum JobOutcome {
+    Began(u64),
+    Wrote(u64),
+    Done,
+}
 async fn run_job(
     kernel: &pm_kernel::KernelHandle,
     project: &str,
     gesture: Option<u64>,
     layer: &str,
     job: Job,
-) -> Result<Option<u64>, String> {
+) -> Result<JobOutcome, String> {
     let step = |gesture: u64, commands: Vec<Command>, replace: bool| -> Call {
         GestureCall::Step {
             gesture,
@@ -1335,8 +1379,9 @@ async fn run_job(
                 .into(),
             )
             .await?
+            .reply
             {
-                Reply::Gesture(id) => Ok(Some(id)),
+                Reply::Gesture(id) => Ok(JobOutcome::Began(id)),
                 _ => Err("The edit could not start".into()),
             }
         }
@@ -1344,15 +1389,15 @@ async fn run_job(
             let gesture = gesture.ok_or("The edit could not start")?;
             let published = kernel.published(project).ok_or("No open project")?;
             let commands = add_text(&published, layer, at, width, time);
-            call(kernel, project, step(gesture, commands, false)).await?;
-            Ok(None)
+            let ack = call(kernel, project, step(gesture, commands, false)).await?;
+            Ok(JobOutcome::Wrote(ack.revision))
         }
         Job::Step {
             commands, replace, ..
         } => {
             let gesture = gesture.ok_or("The edit could not start")?;
-            call(kernel, project, step(gesture, commands, replace)).await?;
-            Ok(None)
+            let ack = call(kernel, project, step(gesture, commands, replace)).await?;
+            Ok(JobOutcome::Wrote(ack.revision))
         }
         Job::Select(id) => {
             let select = SelectionCall::Layers {
@@ -1360,15 +1405,16 @@ async fn run_job(
                 add: false,
             };
             call(kernel, project, select.user().into()).await?;
-            Ok(None)
+            Ok(JobOutcome::Done)
         }
         Job::Finish {
             text,
             fresh,
             rename,
+            time,
         } => {
             let Some(gesture) = gesture else {
-                return Ok(None);
+                return Ok(JobOutcome::Done);
             };
             if text.trim().is_empty() {
                 call(kernel, project, GestureCall::Cancel { gesture }.into()).await?;
@@ -1385,21 +1431,44 @@ async fn run_job(
                     };
                     call(kernel, project, delete).await?;
                 }
-                return Ok(None);
+                return Ok(JobOutcome::Done);
+            }
+            if fresh {
+                // Best-effort exact vertical centering from measured text
+                // bounds; if fonts are unavailable (e.g. headless tests or a
+                // missing font), keep the size/2 anchor set at layer creation
+                // without aborting the commit or rename.
+                let _ = call(
+                    kernel,
+                    project,
+                    step(
+                        gesture,
+                        vec![
+                            pm_kernel::TransformCommand::CenterAnchorVertical {
+                                layer_ids: vec![layer.into()],
+                                time,
+                            }
+                            .into(),
+                        ],
+                        false,
+                    ),
+                )
+                .await;
             }
             if rename {
                 let patch = LayerPatch {
                     name: Some(first_line(&text)),
                     ..Default::default()
                 };
-                let set = LayerCommand::Set {
+                let rename = LayerCommand::Set {
                     layer_id: layer.into(),
                     patch,
-                };
-                call(kernel, project, step(gesture, vec![set.into()], false)).await?;
+                }
+                .into();
+                call(kernel, project, step(gesture, vec![rename], false)).await?;
             }
             call(kernel, project, GestureCall::Commit { gesture }.into()).await?;
-            Ok(None)
+            Ok(JobOutcome::Done)
         }
     }
 }
@@ -1692,20 +1761,22 @@ mod tests {
             box_height: 0.,
         }
     }
-    /// A read-back replaces the editor's text only for an outside edit: not
-    /// over keys typed but not yet handled, nor while a write is on its way.
     #[test]
     fn typed_keys_are_never_replaced_by_an_older_read() {
         // The editor has "Hell" while the change for the last "l" waits.
-        assert!(!super::outside_text("Hel", "Hell", "Hel", false, false));
-        // A write is on its way.
-        assert!(!super::outside_text("Hel", "Hell", "Hell", true, false));
-        // Composing.
-        assert!(!super::outside_text("Hel", "Hell", "Hell", false, true));
-        // Undo changed the layer while nothing was being typed.
-        assert!(super::outside_text("He", "Hell", "Hell", false, false));
-        // The read agrees.
-        assert!(!super::outside_text("Hell", "Hell", "Hell", false, false));
+        assert!(!super::outside_text("Hel", "Hell", "Hel", false, false, 12, Some(10)));
+        // A write is on its way, or the input method is composing.
+        assert!(!super::outside_text("Hel", "Hell", "Hell", true, false, 12, Some(10)));
+        assert!(!super::outside_text("Hel", "Hell", "Hell", false, true, 12, Some(10)));
+        // The write completed while an older publication was being read.
+        assert!(!super::outside_text("Hel", "Hell", "Hell", false, false, 9, Some(10)));
+        assert!(!super::outside_text("Hel", "Hell", "Hell", false, false, 10, Some(10)));
+    }
+    #[test]
+    fn an_outside_edit_can_replace_idle_text() {
+        assert!(super::outside_text("He", "Hell", "Hell", false, false, 11, Some(10)));
+        assert!(super::outside_text("He", "Hell", "Hell", false, false, 10, None));
+        assert!(!super::outside_text("Hell", "Hell", "Hell", false, false, 11, Some(10)));
     }
     #[test]
     fn carets_and_hits_follow_the_engine_lines() {

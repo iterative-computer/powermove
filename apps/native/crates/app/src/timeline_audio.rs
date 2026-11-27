@@ -47,7 +47,9 @@ pub(super) struct AudioState {
     baseline_capture: bool,
     drag: Option<Drag>,
     pub(super) pending_gain: Option<u64>,
-    base: Option<Arc<Frame>>,
+    values: RefCell<Option<AudioValues>>,
+    #[cfg(test)]
+    pub(super) query_builds: std::cell::Cell<usize>,
     ops: Vec<Op>,
     meters: [Meter; 2],
     // Font size and measured text width of the clock in the same header.
@@ -57,25 +59,20 @@ pub(super) struct AudioState {
     painted: Option<Instant>,
     running: bool,
 }
+struct AudioValues {
+    snapshot: pm_kernel::Snapshot,
+    query: pm_kernel::QueryContext,
+    layers: BTreeMap<String, AudioLayerValues>,
+}
+#[derive(Default)]
+struct AudioLayerValues {
+    start: Option<(f64, [f64; 3])>,
+    animated_gain: std::collections::HashMap<u64, f64>,
+}
+
 struct AudioFrame {
     viewport: Viewport,
     ops: Vec<Op>,
-}
-fn audio_geometry(base: &Frame) -> AudioFrame {
-    AudioFrame {
-        viewport: base.viewport,
-        ops: base
-            .ops
-            .iter()
-            .filter(|o| o.id.starts_with("clip:") || o.shape == "waveform")
-            .map(|o| {
-                let mut geometry = op(o.id.clone(), o.bounds, o.color);
-                geometry.shape = o.shape;
-                geometry.clip = o.clip;
-                geometry
-            })
-            .collect(),
-    }
 }
 struct Drag {
     layer: String,
@@ -101,6 +98,7 @@ fn op(id: String, bounds: Rect, color: u32) -> Op {
         text: None,
         font_size: 11.,
         detail: serde_json::Value::Null,
+        waveform: None,
         clip: None,
         covered: false,
         decorative: false,
@@ -182,7 +180,7 @@ fn edit(layer: &str, path: &str, time: f64, value: f64, key: bool, revision: u64
 }
 impl TimelineSurface {
     pub(super) fn invalidate_audio(&mut self) {
-        self.audio.base = None;
+        self.frame = None;
         self.rows = None;
     }
 
@@ -192,7 +190,7 @@ impl TimelineSurface {
         }
         self.release_gain_preview(cx);
         self.audio.drag = None;
-        self.audio.base = None;
+        self.frame = None;
         self.rows = None;
         cx.notify();
         true
@@ -263,58 +261,62 @@ impl TimelineSurface {
         .size_full()
         .into_any_element()
     }
-    pub(super) fn update_audio(&mut self, base: Arc<Frame>, cx: &mut Context<Self>) {
-        // Copy geometry only: never clone waveform JSON or key arrays for meter ticks.
-        let mut frame = audio_geometry(&base);
-        if self
-            .audio
-            .base
-            .as_ref()
-            .is_some_and(|previous| Arc::ptr_eq(previous, &base))
-        {
-            frame
+    pub(super) fn update_audio(&mut self, base: &Frame, cx: &mut Context<Self>) {
+        let mut frame = AudioFrame {
+            viewport: base.viewport,
+            ops: base
                 .ops
-                .extend(self.audio.ops.iter().filter(|o| clip_control(o)).cloned());
-        } else {
-            self.audio_controls(&mut frame);
-        }
+                .iter()
+                .filter(|o| clip_control(o))
+                .cloned()
+                .collect(),
+        };
         self.audio_frame(&mut frame, cx);
         self.audio.ops = frame
             .ops
             .into_iter()
             .filter(|o| o.id.starts_with("audio-"))
             .collect();
-        self.audio.base = Some(base);
     }
-    fn audio_controls(&self, frame: &mut AudioFrame) {
-        if let Some(mut published) = self.kernel.published(&self.project) {
-            if let Some(snapshot) = &self.gain_picture {
-                Arc::make_mut(&mut published).snapshot = snapshot.clone();
-            }
-            let mut mirror = QueryMirror::new(&published);
-            let mut q = mirror.queries();
-            let clips: Vec<_> = frame
-                .ops
-                .iter()
-                .filter(|o| o.id.starts_with("clip:"))
-                .cloned()
-                .collect();
-            for clip in clips {
-                let id = clip.id.trim_start_matches("clip:");
-                let Some(layer) = self.model.index.layers.iter().find(|l| l.id == id) else {
+    fn audio_controls(&self, base: &Frame) -> Vec<Op> {
+        let mut ops = Vec::new();
+        let view = base.viewport;
+        if let Some(published) = self.kernel.published(&self.project) {
+            let snapshot = self.gain_picture.as_ref().unwrap_or(&published.snapshot);
+            let mut cache = self.audio.values.borrow_mut();
+            for clip in &base.ops {
+                let Some(id) = clip.id.strip_prefix("clip:") else {
+                    continue;
+                };
+                let Some(layer) = self.model.index.layer(id) else {
                     continue;
                 };
                 if !matches!(layer.kind.as_str(), "audio" | "video") {
                     continue;
                 }
                 if layer.kind == "video"
-                    && !frame
-                        .ops
+                    && !base.ops
                         .iter()
                         .any(|o| o.id == format!("clip-content:{id}") && o.shape == "waveform")
                 {
                     continue;
                 }
+                if cache.as_ref().is_none_or(|values| {
+                    values.snapshot.doc_id != snapshot.doc_id
+                        || values.snapshot.revision != snapshot.revision
+                        || !Arc::ptr_eq(&values.snapshot.document, &snapshot.document)
+                }) {
+                    #[cfg(test)]
+                    self.audio
+                        .query_builds
+                        .set(self.audio.query_builds.get() + 1);
+                    *cache = Some(AudioValues {
+                        snapshot: snapshot.clone(),
+                        query: pm_kernel::QueryContext::new(&snapshot.document),
+                        layers: BTreeMap::new(),
+                    });
+                }
+                let AudioValues { query, layers, .. } = cache.as_mut().unwrap();
                 let r = clip.bounds;
                 let gain_path = if layer.kind == "audio" {
                     "c.gain"
@@ -334,7 +336,31 @@ impl TimelineSurface {
                 let animated_gain = gain_channel.is_some_and(|channel| {
                     !channel.keys.is_empty() || channel.expression.is_some()
                 });
-                let base_gain = value(&mut q, gain_path, layer.from, 1.);
+                let layer_values = layers.entry(id.to_owned()).or_default();
+                if layer_values.start.is_none_or(|(at, _)| at != layer.from) {
+                    layer_values.start = Some((
+                        layer.from,
+                        [
+                            value(query, gain_path, layer.from, 1.),
+                            value(query, "c.fadeIn", layer.from, 0.),
+                            value(query, "c.fadeOut", layer.from, 0.),
+                        ],
+                    ));
+                    layer_values.animated_gain.clear();
+                }
+                let (_, [base_gain, fade_in, fade_out]) = layer_values.start.unwrap();
+                let mut gain_at = |time: f64| {
+                    if !animated_gain {
+                        return base_gain;
+                    }
+                    if layer_values.animated_gain.len() >= 8192 {
+                        layer_values.animated_gain.clear();
+                    }
+                    *layer_values
+                        .animated_gain
+                        .entry(time.to_bits())
+                        .or_insert_with(|| value(query, gain_path, time, base_gain))
+                };
                 let interactive = self.hover_clip.as_ref().is_some_and(|(clip, _)| clip == id)
                     || self
                         .model
@@ -354,8 +380,8 @@ impl TimelineSurface {
                     .as_ref()
                     .filter(|d| d.layer == id && d.path == gain_path)
                     .map(|d| d.value);
-                let fade_in = value(&mut q, "c.fadeIn", layer.from, 0.).clamp(0., layer.duration);
-                let fade_out = value(&mut q, "c.fadeOut", layer.from, 0.).clamp(0., layer.duration);
+                let fade_in = fade_in.clamp(0., layer.duration);
+                let fade_out = fade_out.clamp(0., layer.duration);
                 let fade_in = self
                     .audio
                     .drag
@@ -368,49 +394,135 @@ impl TimelineSurface {
                     .as_ref()
                     .filter(|d| d.layer == id && d.path == "c.fadeOut")
                     .map_or(fade_out, |d| d.value);
-                let x0 = r.x.max(frame.viewport.layer_column);
-                let x1 = (r.x + r.width).min(frame.viewport.width);
-                for x in (x0.ceil() as i64)..(x1.ceil() as i64) {
-                    let local = ((x as f64 - frame.viewport.layer_column) / frame.viewport.pps
-                        + frame.viewport.scroll_time
-                        - layer.from)
-                        .clamp(0., layer.duration);
-                    let gain = dragged.unwrap_or_else(|| {
-                        if animated_gain {
-                            value(&mut q, gain_path, layer.from + local, base_gain)
-                        } else {
-                            base_gain
-                        }
-                    });
-                    let fade = if fade_in > 0. {
-                        (local / fade_in).min(1.)
-                    } else {
-                        1.
-                    };
-                    let fade = fade.min(if fade_out > 0. {
-                        ((layer.duration - local) / fade_out).min(1.)
-                    } else {
-                        1.
-                    });
-                    let Some(opacity) = resting.or_else(|| (fade < 1.).then_some(0.38)) else {
-                        continue;
-                    };
-                    let y = gain_y(gain * fade.max(0.), r);
+                let x0 = r.x.max(view.layer_column);
+                let x1 = (r.x + r.width).min(view.width);
+                let mut level = |x: f64, width: f64, gain: f64, fade: f64, opacity: f64| {
                     let mut line = op(
                         format!("audio-level:{id}"),
-                        Rect::new(x as f64, y, 1., 1.),
+                        Rect::new(x, gain_y(gain * fade.max(0.), r), width, 1.),
                         self.tokens.colors.text,
                     );
                     line.opacity = opacity;
                     line.detail = serde_json::json!({"layer":id,"path":gain_path,"gain":gain,"interactive":interactive});
                     line.clip = clip.clip;
-                    frame.ops.push(line);
+                    ops.push(line);
+                };
+                if fade_in == 0. && fade_out == 0. && (!animated_gain || dragged.is_some()) {
+                    if let Some(opacity) = resting
+                        && x1.ceil() > x0.ceil()
+                    {
+                        level(
+                            x0.ceil(),
+                            x1.ceil() - x0.ceil(),
+                            dragged.unwrap_or(base_gain),
+                            1.,
+                            opacity,
+                        );
+                    }
+                } else {
+                    // Coalesce consecutive pixels with the same drawn height
+                    // and opacity into horizontal runs instead of emitting one
+                    // `Op` + JSON map + query evaluation per pixel.
+                    let key_span = gain_channel
+                        .filter(|c| c.expression.is_none() && !c.keys.is_empty())
+                        .map(|c| {
+                            let mut lo = f64::INFINITY;
+                            let mut hi = f64::NEG_INFINITY;
+                            for k in &c.keys {
+                                lo = lo.min(k.time);
+                                hi = hi.max(k.time);
+                            }
+                            (lo, hi)
+                        });
+                    let mut xi = x0.ceil() as i64;
+                    let x_end = x1.ceil() as i64;
+                    // Run state: (start_x, width, y, gain, fade, opacity)
+                    let mut run: Option<(f64, f64, f64, f64, f64, f64)> = None;
+                    let mut flush = |run: &mut Option<(f64, f64, f64, f64, f64, f64)>| {
+                        if let Some((rx, rw, _, rg, rf, ro)) = run.take() {
+                            level(rx, rw, rg, rf, ro);
+                        }
+                    };
+                    while xi < x_end {
+                        let local = ((xi as f64 - view.layer_column) / view.pps
+                            + view.scroll_time
+                            - layer.from)
+                            .clamp(0., layer.duration);
+                        // Jump across guaranteed-flat spans (outside fades and
+                        // outside the animated keyframe range) in O(1).
+                        let flat_until = if dragged.is_some()
+                            || !animated_gain
+                            || key_span.is_some_and(|(lo, hi)| local < lo || local > hi)
+                        {
+                            let mut next_break = layer.duration;
+                            if fade_in > 0. && local < fade_in {
+                                next_break = local;
+                            } else {
+                                if fade_out > 0. {
+                                    let out_start = (layer.duration - fade_out).max(0.);
+                                    if local < out_start {
+                                        next_break = next_break.min(out_start);
+                                    } else {
+                                        next_break = local;
+                                    }
+                                }
+                                if dragged.is_none()
+                                    && animated_gain
+                                    && let Some((lo, _)) = key_span
+                                    && local < lo
+                                {
+                                    next_break = next_break.min(lo);
+                                }
+                            }
+                            (next_break > local + 1. / view.pps).then_some(next_break)
+                        } else {
+                            None
+                        };
+                        let fade_in_k = if fade_in > 0. {
+                            (local / fade_in).min(1.)
+                        } else {
+                            1.
+                        };
+                        let fade_out_k = if fade_out > 0. {
+                            ((layer.duration - local) / fade_out).min(1.)
+                        } else {
+                            1.
+                        };
+                        let fade = fade_in_k.min(fade_out_k);
+                        let step = if let Some(until) = flat_until {
+                            let end_x = (view.layer_column
+                                + (layer.from + until - view.scroll_time) * view.pps)
+                                .floor() as i64;
+                            (end_x.min(x_end) - xi).max(1)
+                        } else {
+                            2.min(x_end - xi).max(1)
+                        };
+                        if let Some(opacity) = resting.or_else(|| (fade < 1.).then_some(0.38)) {
+                            let gain = dragged.unwrap_or_else(|| gain_at(layer.from + local));
+                            let y = gain_y(gain * fade.max(0.), r);
+                            match &mut run {
+                                Some((_, rw, ry, _, _, ro))
+                                    if (*ry - y).abs() < 0.35 && (*ro - opacity).abs() < 1e-6 =>
+                                {
+                                    *rw += step as f64;
+                                }
+                                _ => {
+                                    flush(&mut run);
+                                    run = Some((xi as f64, step as f64, y, gain, fade, opacity));
+                                }
+                            }
+                        } else {
+                            flush(&mut run);
+                        }
+                        xi += step;
+                    }
+                    flush(&mut run);
                 }
                 if interactive && let Some(channel) = gain_channel {
                     for key in &channel.keys {
                         let t = layer.from + key.time;
-                        let x = frame.viewport.layer_column
-                            + (t - frame.viewport.scroll_time) * frame.viewport.pps;
+                        let x = view.layer_column
+                            + (t - view.scroll_time) * view.pps;
                         if x < x0 || x > x1 {
                             continue;
                         }
@@ -424,8 +536,7 @@ impl TimelineSurface {
                         } else {
                             fade
                         };
-                        let gain =
-                            dragged.unwrap_or_else(|| value(&mut q, gain_path, t, base_gain));
+                        let gain = dragged.unwrap_or_else(|| gain_at(t));
                         let y = gain_y(gain * fade.max(0.), r);
                         let mut dot = op(
                             format!("audio-key:{id}:{}", key.id),
@@ -434,24 +545,24 @@ impl TimelineSurface {
                         );
                         dot.shape = "circle";
                         dot.clip = clip.clip;
-                        frame.ops.push(dot);
+                        ops.push(dot);
                     }
                 }
                 if interactive && layer.kind == "audio" {
                     for (path, x) in [
                         (
                             "c.fadeIn",
-                            frame.viewport.layer_column
-                                + (layer.from - frame.viewport.scroll_time + fade_in)
-                                    * frame.viewport.pps
+                            view.layer_column
+                                + (layer.from - view.scroll_time + fade_in)
+                                    * view.pps
                                 + 4.,
                         ),
                         (
                             "c.fadeOut",
-                            frame.viewport.layer_column
-                                + (layer.from - frame.viewport.scroll_time + layer.duration
+                            view.layer_column
+                                + (layer.from - view.scroll_time + layer.duration
                                     - fade_out)
-                                    * frame.viewport.pps
+                                    * view.pps
                                 - 4.,
                         ),
                     ] {
@@ -465,11 +576,12 @@ impl TimelineSurface {
                         );
                         handle.detail = serde_json::json!({"layer":id,"path":path,"gain":if path == "c.fadeIn" {fade_in} else {fade_out},"interactive":true});
                         handle.clip = clip.clip;
-                        frame.ops.push(handle);
+                        ops.push(handle);
                     }
                 }
             }
         }
+        ops
     }
     pub(super) fn audio_rows(&self, frame: &mut Frame) {
         #[cfg(test)]
@@ -477,11 +589,8 @@ impl TimelineSurface {
             self.baseline_waveform_ops(frame);
             return;
         }
-        let mut audio = audio_geometry(frame);
-        self.audio_controls(&mut audio);
-        frame
-            .ops
-            .extend(audio.ops.into_iter().filter(|o| clip_control(o)));
+        let controls = self.audio_controls(frame);
+        frame.ops.extend(controls);
     }
     /// Before-crop replay of cea9fdb46's waveform ops, not a running release screenshot.
     /// The native panel/fixture stay identical; only the original sampler/opacity
@@ -496,7 +605,7 @@ impl TimelineSurface {
             let Some(id) = op.id.strip_prefix("clip-content:") else {
                 continue;
             };
-            let Some(layer) = self.model.index.layers.iter().find(|l| l.id == id) else {
+            let Some(layer) = self.model.index.layer(id) else {
                 continue;
             };
             let Some(asset) = &layer.asset else {
@@ -537,39 +646,33 @@ impl TimelineSurface {
         if !self.audio.running {
             self.audio.running = true;
             cx.spawn(async move |this, cx| {
+                let mut active = true;
                 loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(33))
-                        .await;
-                    let alive = this
+                    let wait = if active {
+                        Duration::from_millis(33)
+                    } else {
+                        Duration::from_millis(120)
+                    };
+                    cx.background_executor().timer(wait).await;
+                    let next = this
                         .update(cx, |s, cx| {
-                            if s.audio
-                                .painted
-                                .is_none_or(|p| p.elapsed() > Duration::from_secs(1))
-                            {
-                                s.audio.running = false;
-                                return false;
-                            }
-                            let active = s.audio.tap.changed(s.delegate.audio_peaks(cx))
+                            let live = s.audio.tap.changed(s.delegate.audio_peaks(cx))
                                 || s.audio.drag.is_some()
                                 || s.audio
                                     .meters
                                     .iter()
                                     .any(|m| m.peak_db > -60. || m.hold_db > -60.);
-                            // Keep live/hold ballistics at 30 Hz. A quiet heartbeat
-                            // discovers a hidden panel without repainting idle graphs.
-                            if active
-                                || s.audio
-                                    .painted
-                                    .is_some_and(|p| p.elapsed() >= Duration::from_millis(500))
-                            {
+                            // Keep live/hold ballistics at 30 Hz, but never
+                            // repaint an idle silent timeline on a heartbeat.
+                            if live {
                                 cx.notify();
                             }
-                            true
+                            live
                         })
-                        .unwrap_or(false);
-                    if !alive {
-                        break;
+                        .ok();
+                    match next {
+                        Some(live) => active = live,
+                        None => break,
                     }
                 }
             })
@@ -602,7 +705,25 @@ impl TimelineSurface {
         }
         let clock_width = self.audio.clock_width.unwrap().1 + m.border;
         let minimum_meter_left = m.inset + 3. * m.control + m.hit + 3. * m.gap + clock_width;
-        let x = frame.viewport.layer_column - 120.;
+        // Account for conditional trailing buttons beside `timeline:graph`:
+        // `timeline:graph-options` (•••) when the Graph Editor is open, and
+        // `timeline:hide-shy` when shy layers exist or Hide Shy is active.
+        let graph_open =
+            self.model.graph_display != pm_panel_timeline::GraphDisplay::DopeSheet;
+        let shy_shown = self.model.hide_shy
+            || self.model.index.layers.iter().any(|layer| layer.shy);
+        let trailing_count = 1 + usize::from(graph_open) + usize::from(shy_shown);
+        let x = if trailing_count > 1 {
+            let buttons_left = frame.viewport.layer_column
+                - f64::from(m.inset)
+                - (trailing_count as f64) * f64::from(m.hit)
+                - ((trailing_count - 1) as f64) * f64::from(m.gap);
+            // Meter panel spans `[x - 4, x + 88]`; leave a full `m.gap` clearance
+            // left of `timeline:graph-options` / `timeline:hide-shy`.
+            (buttons_left - f64::from(m.gap) - 88.).min(frame.viewport.layer_column - 120.)
+        } else {
+            frame.viewport.layer_column - 120.
+        };
         if x - 4. >= f64::from(minimum_meter_left) {
             let top = (self.tokens.metrics.ruler as f64 - 8.) / 2.;
             frame.ops.push(op(
@@ -666,7 +787,11 @@ impl TimelineSurface {
     }
     pub(super) fn audio_hit(&self, x: f64, y: f64) -> Option<&Op> {
         self.audio.ops.iter().rev().find(|o| {
-            ((clip_control(o) && o.detail["interactive"] == true) || o.id == "audio-clip-latch")
+            ((clip_control(o)
+                && y >= self.tokens.metrics.ruler as f64
+                && y < f32::from(self.bounds.size.height) as f64
+                && o.detail["interactive"] == true)
+                || o.id == "audio-clip-latch")
                 && o.clip.is_none_or(|c| {
                     x >= c.x && x <= c.x + c.width && y >= c.y && y <= c.y + c.height
                 })
@@ -708,10 +833,17 @@ impl TimelineSurface {
         let Some(id) = hit.detail["layer"].as_str() else {
             return false;
         };
-        let Some(layer) = self.model.index.layers.iter().find(|l| l.id == id) else {
+        let Some(layer) = self.model.index.layer(id) else {
             return false;
         };
         if layer.effectively_locked {
+            let path = hit.detail["path"].as_str().unwrap_or("c.gain");
+            let action = if path.contains("Fade") || hit.id.starts_with("audio-fade") {
+                "edit fade"
+            } else {
+                "adjust audio level"
+            };
+            self.notify_locked(id, action, false, cx);
             return true;
         }
         let path = hit.detail["path"].as_str().unwrap_or("c.gain");
@@ -789,7 +921,7 @@ impl TimelineSurface {
                 cx,
             );
         }
-        self.audio.base = None;
+        self.frame = None;
         self.rows = None;
         cx.notify();
         true
@@ -816,7 +948,7 @@ impl TimelineSurface {
             });
             self.pump(cx);
         }
-        self.audio.base = None;
+        self.frame = None;
         self.rows = None;
         cx.notify();
         true
@@ -1143,19 +1275,12 @@ mod captures {
                 }
                 cx.update(|cx| {
                     let s = surface.read(cx);
-                    assert!(
-                        s.frame
-                            .as_ref()
-                            .unwrap()
-                            .ops
-                            .iter()
-                            .any(|o| o.shape == "waveform"
-                                && o.detail["peak"].as_str().is_some_and(|peak| {
-                                    pm_panel_timeline::waveform::decode(peak)
-                                        .iter()
-                                        .any(|v| *v > 0.)
-                                }))
-                    );
+                    assert!(s.frame.as_ref().unwrap().ops.iter().any(|o| {
+                        o.shape == "waveform"
+                            && o.waveform
+                                .as_ref()
+                                .is_some_and(|peaks| peaks.iter().flatten().any(|v| *v > 0.))
+                    }));
                     assert!(s.audio.ops.iter().any(|o| o.id == "audio-level:audio"));
                     let gains: Vec<f64> = s
                         .audio
@@ -1481,6 +1606,61 @@ mod gesture_tests {
                 ));
                 assert!(surface.audio.meters.iter().all(|m| !m.clipped));
             }
+        });
+    }
+    #[gpui::test]
+    fn meters_clear_graph_options_and_shy_buttons(cx: &mut TestAppContext) {
+        let mut s = stage_audio(cx);
+        s.surface.update(&mut s.vcx, |surface, cx| {
+            let m = surface.tokens.metrics;
+            let stride = f64::from(m.hit + m.gap);
+            let column = 480.;
+
+            let measure = |surface: &mut TimelineSurface, cx: &mut Context<TimelineSurface>| {
+                let mut frame = AudioFrame {
+                    viewport: surface.frame.as_ref().unwrap().viewport,
+                    ops: Vec::new(),
+                };
+                frame.viewport.layer_column = column;
+                surface.audio_frame(&mut frame, cx);
+                frame
+                    .ops
+                    .into_iter()
+                    .find(|o| o.id == "audio-meter-panel")
+                    .map(|o| o.bounds)
+            };
+
+            let closed = measure(surface, cx).expect("meter visible with graph closed");
+
+            let mut model = (*surface.model).clone();
+            model.graph_display = pm_panel_timeline::GraphDisplay::Graph;
+            surface.model = Arc::new(model);
+            let with_graph = measure(surface, cx).expect("meter visible with graph open");
+            assert!(
+                with_graph.x < closed.x,
+                "opening Graph Editor should shift meter left: closed={}, open={}",
+                closed.x,
+                with_graph.x
+            );
+            // The right edge of the meter panel must clear `timeline:graph-options`
+            // (2nd button from right edge) by a full `m.gap`.
+            let graph_options_left =
+                column - f64::from(m.inset) - 2. * f64::from(m.hit) - f64::from(m.gap);
+            assert!(
+                with_graph.x + with_graph.width <= graph_options_left - f64::from(m.gap) + 0.01,
+                "meter right edge {} did not leave gap before Graph Options left {}",
+                with_graph.x + with_graph.width,
+                graph_options_left
+            );
+
+            let mut model = (*surface.model).clone();
+            model.hide_shy = true;
+            surface.model = Arc::new(model);
+            let with_both = measure(surface, cx).expect("meter visible with graph + shy");
+            assert!(
+                (with_graph.x - with_both.x - stride).abs() < 0.01,
+                "showing Hide Shy should shift meter left by another button stride"
+            );
         });
     }
     fn gain_value(s: &crate::timeline_tests::Stage, path: &str) -> f64 {

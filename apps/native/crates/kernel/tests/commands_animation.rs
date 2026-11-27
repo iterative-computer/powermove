@@ -119,6 +119,125 @@ fn a_static_channel_takes_the_value_and_undo_restores_it() {
     assert_eq!(num(&layer(&s, "s1"), &["p", "opacity", "v"]), 100.0);
 }
 
+fn text_store(paragraph: bool, x: f64, y: f64) -> DocumentStore {
+    DocumentStore::new_untitled(
+        parse(&format!(
+            r#"{{
+      "id":"P","compId":"C","w":200,"h":100,"fps":30,"dur":4,
+      "layers":[{{"id":"t","type":"text","from":0,"dur":4,
+        "d":{{"text":"Title","size":80,"paragraph":{paragraph},"boxWidth":200}},
+        "p":{{"position.x":{{"v":100,"kf":[]}},"position.y":{{"v":50,"kf":[]}},
+              "anchor.x":{{"v":{x},"kf":[]}},"anchor.y":{{"v":{y},"kf":[]}}}}
+      }}]
+    }}"#
+        ))
+        .unwrap(),
+    )
+}
+
+#[test]
+fn text_size_resizes_about_the_anchor() {
+    for (paragraph, x, y, expected_x) in [
+        (false, 0., 40., 0.),
+        (false, 30., 60., 60.),
+        (true, 30., 60., 30.),
+    ] {
+        let mut s = text_store(paragraph, x, y);
+        run(&mut s, set("t", "c.size", 160., 0.));
+        let resized = layer(&s, "t");
+        assert_eq!(num(&resized, &["p", "anchor.x", "v"]), expected_x);
+        assert_eq!(num(&resized, &["p", "anchor.y", "v"]), y * 2.);
+        assert_eq!(num(&resized, &["p", "position.x", "v"]), 100.);
+        assert_eq!(num(&resized, &["p", "position.y", "v"]), 50.);
+    }
+}
+
+#[test]
+fn text_size_keys_only_change_the_anchor_at_the_edited_time() {
+    let mut s = text_store(false, 0., 40.);
+    let key = |channel, value, time| {
+        PropertyCommand::Set(SetProperty {
+            mode: KeyMode::Keyframe,
+            ..SetProperty::new("t", channel, value, time)
+        })
+        .into()
+    };
+
+    // One size key is still a constant size across the layer.
+    run(&mut s, key("c.size", 160., 0.));
+    assert_eq!(num(&layer(&s, "t"), &["p", "anchor.y", "v"]), 80.);
+    // Adding and editing another size key must leave the static anchor alone.
+    run(&mut s, key("c.size", 80., 1.));
+    run(&mut s, set("t", "c.size", 120., 1.));
+    assert_eq!(num(&layer(&s, "t"), &["p", "anchor.y", "v"]), 80.);
+
+    run(&mut s, key("anchor.y", 80., 0.));
+    run(&mut s, key("anchor.y", 60., 1.));
+    let before = keys(&s, "t", "anchor.y");
+    run(&mut s, set("t", "c.size", 240., 1.));
+    let after = keys(&s, "t", "anchor.y");
+    assert_eq!(after[0], before[0]);
+    assert_eq!(num(&after[1], &["v"]), 120.);
+}
+
+#[test]
+fn static_text_size_keys_an_animated_anchor_at_the_playhead() {
+    let mut s = text_store(false, 0., 40.);
+    for (time, value) in [(0., 40.), (2., 80.)] {
+        run(
+            &mut s,
+            PropertyCommand::Set(SetProperty {
+                mode: KeyMode::Keyframe,
+                ..SetProperty::new("t", "anchor.y", value, time)
+            })
+            .into(),
+        );
+    }
+    run(&mut s, set("t", "c.size", 160., 1.));
+    let after = keys(&s, "t", "anchor.y");
+    assert_eq!(after.len(), 3);
+    for (key, (t, v)) in after.iter().zip([(0., 40.), (1., 120.), (2., 80.)]) {
+        assert_eq!(num(key, &["t"]), t);
+        assert_eq!(num(key, &["v"]), v);
+    }
+}
+
+#[test]
+fn text_size_preserves_the_legacy_font_bounds_anchor_fraction() {
+    let mut s = text_store(false, 30., 60.);
+    let mut patch = pm_model::Map::new();
+    patch.insert(
+        "fontAnchorBounds",
+        parse(r#"{"x0":-10,"x1":70,"y0":20,"y1":100}"#).unwrap(),
+    );
+    run(
+        &mut s,
+        pm_kernel::ContentCommand::Set {
+            layer_id: "t".into(),
+            patch,
+            time: 0.,
+        }
+        .into(),
+    );
+    let original = layer(&s, "t");
+    run(&mut s, set("t", "c.size", 160., 0.));
+    let resized = layer(&s, "t");
+    for (axis, start, end) in [("anchor.x", "x0", "x1"), ("anchor.y", "y0", "y1")] {
+        let fraction = |layer: &Value| {
+            let lo = num(layer, &["d", "fontAnchorBounds", start]);
+            let hi = num(layer, &["d", "fontAnchorBounds", end]);
+            (num(layer, &["p", axis, "v"]) - lo) / (hi - lo)
+        };
+        assert_eq!(fraction(&resized), fraction(&original));
+        assert_eq!(
+            num(&resized, &["p", axis, "v"]),
+            num(&original, &["p", axis, "v"]) * 2.
+        );
+    }
+    s.undo().unwrap();
+    assert_eq!(layer(&s, "t"), original);
+}
+
 #[test]
 fn an_animated_channel_is_keyed_at_the_playhead_in_layer_time() {
     let mut s = store();
@@ -384,6 +503,58 @@ fn deleting_the_last_key_keeps_its_value() {
     );
     s.undo().unwrap();
     assert_eq!(keys(&s, "anim", "opacity").len(), 2);
+}
+
+#[test]
+fn deleting_all_keys_at_playhead_keeps_the_value_shown_at_the_playhead() {
+    // Playhead ahead of the last keyframe keeps the last keyframe's value.
+    let mut s = store();
+    run(
+        &mut s,
+        kc(KeyframeCommand::DeleteAt {
+            key_ids: vec!["k1".into(), "k2".into()],
+            time: 3.0,
+        }),
+    );
+    assert!(keys(&s, "anim", "opacity").is_empty());
+    assert_eq!(num(&layer(&s, "anim"), &["p", "opacity", "v"]), 100.0);
+
+    // Playhead between keyframes keeps the interpolated value shown in the viewer.
+    s.undo().unwrap();
+    run(
+        &mut s,
+        kc(KeyframeCommand::DeleteAt {
+            key_ids: vec!["k1".into(), "k2".into()],
+            time: 0.75,
+        }),
+    );
+    assert!(keys(&s, "anim", "opacity").is_empty());
+    assert_eq!(num(&layer(&s, "anim"), &["p", "opacity", "v"]), 75.0);
+
+    // Playhead before the first keyframe keeps the first keyframe's value.
+    s.undo().unwrap();
+    run(
+        &mut s,
+        kc(KeyframeCommand::DeleteAt {
+            key_ids: vec!["k1".into(), "k2".into()],
+            time: 0.0,
+        }),
+    );
+    assert!(keys(&s, "anim", "opacity").is_empty());
+    assert_eq!(num(&layer(&s, "anim"), &["p", "opacity", "v"]), 0.0);
+
+    // Deleting only one of two keyframes keeps the remaining keyframe intact.
+    s.undo().unwrap();
+    run(
+        &mut s,
+        kc(KeyframeCommand::DeleteAt {
+            key_ids: vec!["k1".into()],
+            time: 3.0,
+        }),
+    );
+    let remaining = keys(&s, "anim", "opacity");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(at(&remaining[0], &["i"]).as_str(), Some("k2"));
 }
 
 #[test]
@@ -925,4 +1096,185 @@ fn every_menu_preset_reads_back_by_name() {
         .unwrap()
         .insert("outInterp", Value::String("hold".into()));
     assert_eq!(ease_preset(&held, 0), None);
+}
+
+#[test]
+fn placing_a_keyframe_inside_a_curved_segment_preserves_value_and_speed_curve() {
+    let eval_at = |s: &DocumentStore, t: f64| -> f64 {
+        let kfs = keys(s, "anim", "opacity");
+        let node = pm_model::Node::from_value(Value::Array(kfs), 0);
+        let mut springs = pm_eval::easing::SpringTables::new();
+        pm_eval::keyframes::evaluate(Some(&node), t, false, &mut springs)
+            .unwrap()
+            .as_number()
+            .unwrap()
+    };
+
+    for preset in ["easeOut", "expoOut", "easeInOut", "swish"] {
+        let mut s = store();
+        run(
+            &mut s,
+            kc(KeyframeCommand::SetEasing {
+                key_ids: vec!["k1".into(), "k2".into()],
+                curve: EaseSpec::Preset(preset.into()),
+            }),
+        );
+
+        let samples: Vec<(f64, f64)> = (0..=100)
+            .map(|i| {
+                let t = i as f64 / 100.0;
+                (t, eval_at(&s, t))
+            })
+            .collect();
+
+        // Insert a keyframe in the middle of the curved segment (e.g. 0.4s -> 12/30s).
+        let insert_t = 0.4;
+        let eps = 1e-4;
+        let speed_left_before = (eval_at(&s, insert_t) - eval_at(&s, insert_t - eps)) / eps;
+        let speed_right_before = (eval_at(&s, insert_t + eps) - eval_at(&s, insert_t)) / eps;
+        run(
+            &mut s,
+            kc(KeyframeCommand::Add {
+                layer_id: "anim".into(),
+                channel: "opacity".into(),
+                time: insert_t,
+                key_id: "mid".into(),
+                value: None,
+            }),
+        );
+
+        let k = keys(&s, "anim", "opacity");
+        assert_eq!(k.len(), 3, "preset {preset}: key inserted");
+        assert_eq!(at(&k[1], &["i"]).as_str(), Some("mid"));
+        assert_eq!(
+            at(&k[1], &["continuous"]).as_bool(),
+            Some(true),
+            "preset {preset}: inserted key is continuous bezier"
+        );
+
+        // Every sampled point along the curve must match before and after.
+        for &(t, before) in &samples {
+            let after = eval_at(&s, t);
+            assert!(
+                (after - before).abs() < 1e-4,
+                "preset {preset} at t={t}: value diverged before={before} after={after}"
+            );
+        }
+
+        // Numerical speed right across the newly placed key must match the original curve!
+        let speed_left_after = (eval_at(&s, insert_t) - eval_at(&s, insert_t - eps)) / eps;
+        let speed_right_after = (eval_at(&s, insert_t + eps) - eval_at(&s, insert_t)) / eps;
+        assert!(
+            (speed_left_after - speed_left_before).abs() < 0.05
+                && (speed_right_after - speed_right_before).abs() < 0.05,
+            "preset {preset}: speed changed across inserted key before=({speed_left_before}, {speed_right_before}) after=({speed_left_after}, {speed_right_after})"
+        );
+    }
+}
+
+#[test]
+fn placing_a_keyframe_inside_a_hold_segment_keeps_it_held() {
+    let mut s = store();
+    run(
+        &mut s,
+        kc(KeyframeCommand::SetHold {
+            key_ids: vec!["k1".into()],
+            hold: true,
+        }),
+    );
+    run(
+        &mut s,
+        kc(KeyframeCommand::Add {
+            layer_id: "anim".into(),
+            channel: "opacity".into(),
+            time: 0.5,
+            key_id: "mid".into(),
+            value: None,
+        }),
+    );
+    let k = keys(&s, "anim", "opacity");
+    assert_eq!(k.len(), 3);
+    assert_eq!(num(&k[1], &["v"]), 0.0);
+    assert_eq!(at(&k[1], &["outInterp"]).as_str(), Some("hold"));
+}
+
+#[test]
+fn set_easing_on_consecutive_keys_preserves_outer_unselected_segments() {
+    let mut s = store();
+    // Create 4 keyframes: k1 (t=0, v=0), k2 (t=1, v=100), k3 (t=2, v=200), k4 (t=3, v=300)
+    run(
+        &mut s,
+        kc(KeyframeCommand::Add {
+            layer_id: "anim".into(),
+            channel: "opacity".into(),
+            time: 2.0,
+            key_id: "k3".into(),
+            value: Some(Value::Number(200.0)),
+        }),
+    );
+    run(
+        &mut s,
+        kc(KeyframeCommand::Add {
+            layer_id: "anim".into(),
+            channel: "opacity".into(),
+            time: 3.0,
+            key_id: "k4".into(),
+            value: Some(Value::Number(300.0)),
+        }),
+    );
+    // Ease k1 -> k2 with easeIn, and k3 -> k4 with snap.
+    run(
+        &mut s,
+        kc(KeyframeCommand::SetEasing {
+            key_ids: vec!["k1".into(), "k2".into()],
+            curve: EaseSpec::Preset("easeIn".into()),
+        }),
+    );
+    run(
+        &mut s,
+        kc(KeyframeCommand::SetEasing {
+            key_ids: vec!["k3".into(), "k4".into()],
+            curve: EaseSpec::Preset("snap".into()),
+        }),
+    );
+    let before = keys(&s, "anim", "opacity");
+    let k2_in_before = before[1].get("inEase").unwrap().clone();
+    let k2_in_interp_before = before[1].get("inInterp").unwrap().clone();
+    let k3_out_before = before[2].get("outEase").unwrap().clone();
+    let k3_out_interp_before = before[2].get("outInterp").unwrap().clone();
+
+    // Now select k2 and k3 and adjust easing between them to easeOut.
+    run(
+        &mut s,
+        kc(KeyframeCommand::SetEasing {
+            key_ids: vec!["k2".into(), "k3".into()],
+            curve: EaseSpec::Preset("easeOut".into()),
+        }),
+    );
+    let after = keys(&s, "anim", "opacity");
+    // Outer segments k1 -> k2 (k2.inEase) and k3 -> k4 (k3.outEase) MUST be untouched!
+    assert_eq!(after[1].get("inEase").unwrap(), &k2_in_before);
+    assert_eq!(after[1].get("inInterp").unwrap(), &k2_in_interp_before);
+    assert_eq!(after[2].get("outEase").unwrap(), &k3_out_before);
+    assert_eq!(after[2].get("outInterp").unwrap(), &k3_out_interp_before);
+    // Interior segment k2 -> k3 received easeOut ([0, 0, 0.58, 1] -> in influence 42%).
+    assert_eq!(at(&after[1], &["outInterp"]).as_str(), Some("bezier"));
+    assert_eq!(at(&after[2], &["inInterp"]).as_str(), Some("bezier"));
+    assert!((num(&after[2], &["inEase", "influence"]) - 42.0).abs() < 1e-6);
+
+    // Selecting 3 keys [k2, k3, k4] eases both k2->k3 and k3->k4 while still
+    // leaving k1->k2 (k2.inEase) completely untouched!
+    run(
+        &mut s,
+        kc(KeyframeCommand::SetEasing {
+            key_ids: vec!["k2".into(), "k3".into(), "k4".into()],
+            curve: EaseSpec::Curve([0.8, 0.0, 0.2, 1.0]),
+        }),
+    );
+    let multi = keys(&s, "anim", "opacity");
+    assert_eq!(multi[1].get("inEase").unwrap(), &k2_in_before);
+    assert!((num(&multi[1], &["outEase", "influence"]) - 80.0).abs() < 1e-6);
+    assert!((num(&multi[2], &["inEase", "influence"]) - 80.0).abs() < 1e-6);
+    assert!((num(&multi[2], &["outEase", "influence"]) - 80.0).abs() < 1e-6);
+    assert!((num(&multi[3], &["inEase", "influence"]) - 80.0).abs() < 1e-6);
 }

@@ -159,6 +159,53 @@ pub(super) fn group(
         &Map::new(),
         &Map::new(),
     )?;
+    // If every selected non-audio layer is already 3D, start the new group in 3D
+    // so its pivot centers in X, Y, and Z over its 3D children.
+    let mut has_transformable = false;
+    let mut all_three_d = true;
+    for r in &roots {
+        if let Ok(loc) = cx.find(r)
+            && let Ok(node) = cx.layer_node(&loc)
+            && node.get("type").and_then(crate::model::str_of) != Some("audio")
+        {
+            has_transformable = true;
+            let is_3d = matches!(
+                node.get("threeD").map(pm_model::Node::kind),
+                Some(pm_model::NodeKind::Bool(true))
+            );
+            if !is_3d {
+                all_three_d = false;
+                break;
+            }
+        }
+    }
+    let group_three_d = has_transformable && all_three_d;
+    let root_set: HashSet<&str> = roots.iter().map(String::as_str).collect();
+    let member_ids = layers::expand_groups(&layers, &root_set);
+    let mut min_from = f64::INFINITY;
+    let mut max_end = f64::NEG_INFINITY;
+    for id in &member_ids {
+        if let Ok(loc) = cx.find(id)
+            && let Ok(node) = cx.layer_node(&loc)
+            && node.get("type").and_then(crate::model::str_of) != Some("group")
+            && let (Some(from), Some(dur)) = (
+                node.get("from").and_then(crate::model::number_of),
+                node.get("dur").and_then(crate::model::number_of),
+            )
+            && from.is_finite()
+            && dur.is_finite()
+            && dur >= 0.0
+        {
+            min_from = min_from.min(from);
+            max_end = max_end.max(from + dur);
+        }
+    }
+    let (group_from, group_dur) = if min_from.is_finite() && max_end.is_finite() {
+        let min_dur = 1.0 / cx.fps(comp.as_deref()).max(1.0);
+        (min_from, (max_end - min_from).max(min_dur))
+    } else {
+        (0.0, cx.duration(comp.as_deref()))
+    };
     {
         let m = values::obj(&mut g);
         m.insert(
@@ -166,8 +213,11 @@ pub(super) fn group(
             parent.as_deref().map(values::s).unwrap_or(Value::Null),
         );
         m.insert("collapsed", Value::Bool(false));
-        m.insert("from", Value::Number(0.0));
-        m.insert("dur", Value::Number(cx.duration(comp.as_deref())));
+        m.insert("from", Value::Number(group_from));
+        m.insert("dur", Value::Number(group_dur));
+        if group_three_d {
+            m.insert("threeD", Value::Bool(true));
+        }
     }
     let at = index_of(&layers, &roots[0]).unwrap_or(0);
     let mut next = layers.clone();

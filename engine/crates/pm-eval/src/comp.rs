@@ -6,6 +6,7 @@
 //! revision.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT_BINDING_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -49,6 +50,12 @@ impl std::error::Error for CompError {}
 /// composition, everything else from the project root. Nested compositions
 /// are plain objects in both forms. The one difference: the legacy `comps`
 /// member omits the open composition, the canonical one includes it.
+#[derive(Debug)]
+struct ExprLayerIndex {
+    first_nullish: Option<bool>,
+    by_id: HashMap<JsString, usize>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Comp<'d> {
     root: &'d Node,
@@ -57,6 +64,7 @@ pub struct Comp<'d> {
     revision: u64,
     rate: std::cell::OnceCell<Option<IngestRate>>,
     expression_fps: std::cell::OnceCell<JsValue>,
+    expr_layer_index: std::cell::OnceCell<Arc<ExprLayerIndex>>,
     layers_node: Option<&'d Node>,
     binding_token: u64,
     /// The open composition of a canonical document (see above).
@@ -133,6 +141,7 @@ impl<'d> Comp<'d> {
             revision,
             rate: std::cell::OnceCell::new(),
             expression_fps: std::cell::OnceCell::new(),
+            expr_layer_index: std::cell::OnceCell::new(),
             layers_node: node::member(Some(node), "layers"),
             binding_token: NEXT_BINDING_TOKEN.fetch_add(1, Ordering::Relaxed),
             open_canonical,
@@ -150,6 +159,7 @@ impl<'d> Comp<'d> {
             revision,
             rate: std::cell::OnceCell::new(),
             expression_fps: std::cell::OnceCell::new(),
+            expr_layer_index: std::cell::OnceCell::new(),
             layers_node: node::member(Some(node), "layers"),
             binding_token: NEXT_BINDING_TOKEN.fetch_add(1, Ordering::Relaxed),
             open_canonical: false,
@@ -207,6 +217,44 @@ impl<'d> Comp<'d> {
     /// The `layers` array node.
     pub fn layers_node(&self) -> Option<&'d Node> {
         self.layers_node
+    }
+
+    /// `comp.layers?.find(item => item.id === layerId)` with lazy O(1) lookup,
+    /// preserving the exact JS error on non-array `layers` or a nullish entry
+    /// encountered before a matching id.
+    pub(crate) fn find_layer_by_id(&self, layer_id: &JsString) -> Result<Option<&'d Node>, String> {
+        let layers = match self.get(b"layers") {
+            Got::Node(n) => n,
+            _ => return Ok(None),
+        };
+        let NodeKind::Array(items) = layers.kind() else {
+            return Err("comp.layers?.find is not a function".into());
+        };
+        let index = self.expr_layer_index.get_or_init(|| {
+            let mut by_id = HashMap::with_capacity(items.len());
+            let mut first_nullish = None;
+            for (idx, item) in items.iter().enumerate() {
+                if node::is_nullish(Some(item)) {
+                    first_nullish = Some(matches!(item.kind(), NodeKind::Null));
+                    break;
+                }
+                if let JsValue::String(s) = node::get(item, b"id").to_js() {
+                    by_id.entry(s).or_insert(idx);
+                }
+            }
+            Arc::new(ExprLayerIndex {
+                first_nullish,
+                by_id,
+            })
+        });
+        if let Some(&idx) = index.by_id.get(layer_id) {
+            return Ok(Some(&items[idx]));
+        }
+        if let Some(is_null) = index.first_nullish {
+            let base = if is_null { "null" } else { "undefined" };
+            return Err(format!("Cannot read properties of {base} (reading 'id')"));
+        }
+        Ok(None)
     }
 
     /// A member of the legacy composition object (see the type
@@ -308,12 +356,23 @@ impl<'d> Comp<'d> {
     /// `indexOfLayer(comp, layer)`: the layer's position in `comp.layers`, by
     /// identity, or 0.
     pub fn index_of_layer(&self, layer: Option<&Node>) -> f64 {
-        let Some(layer) = layer else { return 0.0 };
-        self.layers()
-            .iter()
-            .position(|l| std::ptr::eq(l, layer))
+        layer
+            .and_then(|layer| self.layer_position(layer))
             .map_or(0.0, |i| i as f64)
     }
+
+    /// A layer's position in this immutable layer array, by identity.
+    /// Detached nodes and layers from another composition return `None`.
+    pub fn layer_position(&self, layer: &Node) -> Option<usize> {
+        layer_position(self.layers(), layer)
+    }
+}
+
+pub(crate) fn layer_position(layers: &[Node], layer: &Node) -> Option<usize> {
+    let start = layers.as_ptr() as usize;
+    let offset = (std::ptr::from_ref(layer) as usize).checked_sub(start)?;
+    let size = std::mem::size_of::<Node>();
+    (offset < std::mem::size_of_val(layers) && offset.is_multiple_of(size)).then(|| offset / size)
 }
 
 trait RateSource {

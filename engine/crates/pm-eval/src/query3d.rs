@@ -797,6 +797,9 @@ impl<'d> Scope<'_, 'd> {
             if !s.active(l, time)? {
                 return Ok(true);
             }
+            if is_type(l, "null") || is_type(l, "audio") {
+                return Ok(true);
+            }
             let Some(role) = Role3d::of(l) else {
                 return Ok(false);
             };

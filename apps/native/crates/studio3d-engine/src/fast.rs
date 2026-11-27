@@ -242,11 +242,17 @@ impl Raster {
             test_depth: None,
         }
     }
-    fn mesh(&mut self, i: &MeshInstance, materials: usize) -> Result<usize, String> {
+    fn mesh(&mut self, i: &MeshInstance, materials: usize) -> Result<(usize, u32), String> {
+        let single_material = i.mesh.triangle_materials.is_empty();
+        if single_material && i.material >= materials {
+            return Err("Fast material index".into());
+        }
+        let material_base = if single_material { i.material as u32 } else { 0 };
         if let Some(index) = self.meshes.iter().position(|m| {
             Arc::ptr_eq(&m.identity.mesh, &i.mesh)
-                && m.identity.material == i.material
-                && m.identity.material_palette == i.material_palette
+                && (single_material
+                    || (m.identity.material == i.material
+                        && m.identity.material_palette == i.material_palette))
                 && match (&m.identity.attributes, &i.attributes) {
                     (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                     (None, None) => true,
@@ -254,19 +260,25 @@ impl Raster {
                 }
         }) {
             self.meshes[index].last_used = self.mesh_frame;
-            return Ok(index);
+            return Ok((index, material_base));
         }
         crate::extract::validate_mesh(&i.mesh, i.attributes.as_deref())?;
-        let mut vertices = Vec::new();
+        let mut vertices = Vec::with_capacity(i.mesh.indices.len() * 3);
         let m = &i.mesh;
         for (f, t) in m.indices.iter().enumerate() {
             let slot = m.triangle_materials.get(f).copied();
             let material = match (slot, &i.material_palette) {
-                (None, _) => i.material,
+                (None, _) => {
+                    if single_material {
+                        0
+                    } else {
+                        i.material
+                    }
+                }
                 (Some(n), Some(p)) => *p.get(n).ok_or("Fast material palette index")?,
                 (Some(n), None) => n,
             };
-            if material >= materials {
+            if !single_material && material >= materials {
                 return Err("Fast material index".into());
             }
             let p = t.map(|n| m.positions[n as usize]);
@@ -306,7 +318,7 @@ impl Raster {
             count: vertices.len() as u32,
             last_used: self.mesh_frame,
         });
-        Ok(index)
+        Ok((index, material_base))
     }
     fn maps(&mut self, input: &SceneInput) {
         if self.texture.is_some() && self.maps == input.maps {
@@ -432,14 +444,16 @@ impl Raster {
                     m.policy[1] = (m.policy[1] as u32 | 16) as f32;
                 }
             }
-            let mesh = self.mesh(i, materials.len())?;
+            let (mesh, material_base) = self.mesh(i, materials.len())?;
             let world = glam::Mat4::from_cols_array(&i.world.0);
             let normal = world.inverse().transpose();
             let mut matrices = [[0.; 4]; 8];
             matrices[..4].copy_from_slice(&world.to_cols_array_2d());
             matrices[4..].copy_from_slice(&normal.to_cols_array_2d());
-            // Three/Full preserve authored facing under reflected transforms.
-            // This unused affine-normal element carries orientation to the shader.
+            // Column 3 of the normal matrix is never multiplied (vec4(n, 0)).
+            // Carry per-instance material offset in [7][0] so shared meshes
+            // across layers reuse one GPU vertex buffer, and orientation in [7][3].
+            matrices[7][0] = material_base as f32;
             matrices[7][3] = world.determinant().signum();
             let instance = instances.len() as u32;
             instances.push(matrices);
@@ -649,9 +663,9 @@ impl Raster {
         if scratch.is_some() {
             self.flip_target = scratch;
         }
-        // Keep the previous frame's buffers through a cut. The same geometry
-        // can return immediately with its previous material indices.
-        self.meshes.retain(|mesh| self.mesh_frame.wrapping_sub(mesh.last_used) <= 1);
+        // Keep recent frames' vertex buffers across short cuts/scrubs so
+        // identical imported meshes don't rebuild tens of megabytes per hop.
+        self.meshes.retain(|mesh| self.mesh_frame.wrapping_sub(mesh.last_used) <= 4);
         Ok(RenderedScene {
             request: request.clone(),
             layers: outputs,

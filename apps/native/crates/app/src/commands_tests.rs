@@ -891,7 +891,7 @@ fn the_graph_merges_its_curves_into_one_and_fits_the_time_scale_to_their_keys(
     cx: &mut TestAppContext,
 ) {
     // Position moves 30 across and 40 down between 2 s and 4 s of the layer.
-    let project = r##"{"id":"integration","name":"Curves","compId":"c","w":640,"h":360,"fps":30,"dur":20,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"l0","type":"shape","name":"Box","from":1,"dur":12,"on":true,"separateDimensions":false,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":0,"kf":[{"i":"x1","t":2,"v":0},{"i":"x2","t":4,"v":30}]},"position.y":{"v":0,"kf":[{"i":"y1","t":2,"v":0},{"i":"y2","t":4,"v":40}]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
+    let project = r##"{"id":"integration","name":"Curves","compId":"c","w":640,"h":360,"fps":30,"dur":20,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"l0","type":"shape","name":"Box","from":1,"dur":12,"on":true,"separateDimensions":true,"p":{"opacity":{"v":100,"kf":[]},"position.x":{"v":0,"kf":[{"i":"x1","t":2,"v":0},{"i":"x2","t":4,"v":30}]},"position.y":{"v":0,"kf":[{"i":"y1","t":2,"v":0},{"i":"y2","t":4,"v":40}]},"scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},"rotation":{"v":0,"kf":[]},"anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]}},"d":{"w":100,"h":100},"fx":[]}]}"##;
     let mut s = stage_project(cx, project.into());
     select(&mut s, cx, &["l0"]);
     s.surface.update(&mut s.vcx, |t, cx| {

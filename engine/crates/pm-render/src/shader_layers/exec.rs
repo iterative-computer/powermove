@@ -2,10 +2,11 @@
 //! `clear(0, 0, 0, 0)`, blending off, the quad through `PM.VERT`, and the
 //! uniform calls in issue order, in GL row order.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
+    mpsc,
 };
 
 use pm_glsl::{Failure, Key};
@@ -249,12 +250,260 @@ fn active_bytes(
     key
 }
 
+struct PrewarmJob {
+    key: Key,
+    source: String,
+    line_offset: u32,
+    device: wgpu::Device,
+    format: wgpu::TextureFormat,
+}
+
+struct BuiltShader {
+    key: Key,
+    result: Option<Result<GpuProgram, Failure>>,
+}
+
+/// Background worker that translates and compiles custom `type: "shader"`
+/// layers ahead of their first visible frame (matching `effects::prewarm`).
+#[derive(Default)]
+struct ShaderPrewarm {
+    worker: Option<(mpsc::Sender<PrewarmJob>, Mutex<mpsc::Receiver<BuiltShader>>)>,
+    in_flight: HashSet<Key>,
+    started: Arc<Mutex<HashMap<Key, bool>>>,
+}
+
+impl Drop for ShaderPrewarm {
+    fn drop(&mut self) {
+        self.started
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+}
+
+impl ShaderPrewarm {
+    fn worker(&mut self) -> Option<&mpsc::Sender<PrewarmJob>> {
+        if self.worker.is_none() {
+            let (jobs, rx) = mpsc::channel::<PrewarmJob>();
+            let (tx, done) = mpsc::channel::<BuiltShader>();
+            let claims = self.started.clone();
+            std::thread::Builder::new()
+                .name("pm-shader-prewarm".into())
+                .spawn(move || {
+                    while let Ok(job) = rx.recv() {
+                        let _gate = crate::effects::prewarm::prewarm_gate()
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        {
+                            let mut claims = claims.lock().unwrap_or_else(|e| e.into_inner());
+                            match claims.get_mut(&job.key) {
+                                Some(started) => *started = true,
+                                None => continue,
+                            }
+                        }
+                        let result = match super::translate::verdict(&job.source, job.line_offset).1
+                        {
+                            super::translate::Verdict::Ready(prepared) => Some(
+                                prepared
+                                    .as_ref()
+                                    .as_ref()
+                                    .map_err(|f| f.clone())
+                                    .and_then(|p| p.finish())
+                                    .and_then(|p| {
+                                        GpuProgram::new(&job.device, p, "pm shader layer")
+                                    })
+                                    .and_then(|mut program| {
+                                        program.pipeline(&job.device, job.format)?;
+                                        Ok(program)
+                                    }),
+                            ),
+                            super::translate::Verdict::Refused(_)
+                            | super::translate::Verdict::NeedsFallback(_) => None,
+                        };
+                        drop(_gate);
+                        if tx
+                            .send(BuiltShader {
+                                key: job.key,
+                                result,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+                .ok()?;
+            self.worker = Some((jobs, Mutex::new(done)));
+        }
+        self.worker.as_ref().map(|(jobs, _)| jobs)
+    }
+
+    fn queue(
+        &mut self,
+        key: Key,
+        source: String,
+        line_offset: u32,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> bool {
+        if self.in_flight.contains(&key) {
+            return false;
+        }
+        let Some(jobs) = self.worker() else {
+            return false;
+        };
+        let jobs = jobs.clone();
+        self.started
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, false);
+        let sent = jobs
+            .send(PrewarmJob {
+                key,
+                source,
+                line_offset,
+                device: device.clone(),
+                format,
+            })
+            .is_ok();
+        if sent {
+            self.in_flight.insert(key);
+        } else {
+            self.started
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key);
+        }
+        sent
+    }
+
+    fn in_flight(&self, key: &Key) -> bool {
+        self.in_flight.contains(key)
+    }
+
+    fn reclaim(&mut self, key: &Key) -> bool {
+        let mut claims = self.started.lock().unwrap_or_else(|e| e.into_inner());
+        if claims.get(key) == Some(&false) {
+            claims.remove(key);
+            drop(claims);
+            self.in_flight.remove(key);
+            return true;
+        }
+        false
+    }
+
+    fn take(&mut self) -> Vec<BuiltShader> {
+        let mut out = Vec::new();
+        if let Some((_, done)) = &self.worker {
+            let done = done.lock().unwrap_or_else(|e| e.into_inner());
+            while let Ok(built) = done.try_recv() {
+                out.push(built);
+            }
+        }
+        self.settle(&out);
+        out
+    }
+
+    fn wait_for(&mut self, key: &Key) -> Vec<BuiltShader> {
+        let mut out = Vec::new();
+        if let Some((_, done)) = &self.worker {
+            let done = done.lock().unwrap_or_else(|e| e.into_inner());
+            while self.in_flight.contains(key) {
+                match done.recv() {
+                    Ok(built) => {
+                        self.in_flight.remove(&built.key);
+                        out.push(built);
+                    }
+                    Err(_) => {
+                        self.in_flight.clear();
+                        break;
+                    }
+                }
+            }
+        }
+        self.in_flight.remove(key);
+        self.settle(&out);
+        out
+    }
+
+    fn settle(&mut self, built: &[BuiltShader]) {
+        let mut claims = self.started.lock().unwrap_or_else(|e| e.into_inner());
+        for b in built {
+            self.in_flight.remove(&b.key);
+            claims.remove(&b.key);
+        }
+    }
+
+    fn pending(&self) -> usize {
+        self.in_flight.len()
+    }
+}
+
+/// Unique shader-layer programs in `doc` (root and all precomps), sorted by
+/// earliest appearance (`from`) so playback hits warmed programs first.
+fn document_shader_sources(doc: &pm_model::Document) -> Vec<(Key, String, u32)> {
+    use pm_eval::node;
+    let Some(root) = doc.root() else {
+        return Vec::new();
+    };
+    let mut lists = vec![node::member(Some(root), "layers")];
+    if let Some(comps) = node::member(Some(root), "comps") {
+        lists.extend(
+            node::entries(comps)
+                .into_iter()
+                .map(|(_, comp)| node::member(comp.node(), "layers")),
+        );
+    }
+    let cache = super::translate::cache();
+    let mut by_key: HashMap<Key, (f64, String, u32)> = HashMap::new();
+    for layer in lists.into_iter().filter_map(node::array).flatten() {
+        if !node::is_str(node::member(Some(layer), "type"), "shader") {
+            continue;
+        }
+        if matches!(
+            node::member(Some(layer), "on").map(pm_model::Node::kind),
+            Some(pm_model::NodeKind::Bool(false))
+        ) {
+            continue;
+        }
+        let Some(code) = node::string(node::member(node::member(Some(layer), "d"), "code")) else {
+            continue;
+        };
+        let code = code.to_string_lossy();
+        if code.is_empty() {
+            continue;
+        }
+        let from = node::number(node::member(Some(layer), "from")).unwrap_or(0.0);
+        let (source, line_offset) = super::shader_layer_program(&code);
+        let key = cache.key(&source, line_offset);
+        by_key
+            .entry(key)
+            .and_modify(|entry| {
+                if from < entry.0 {
+                    entry.0 = from;
+                }
+            })
+            .or_insert((from, source, line_offset));
+    }
+    let mut ordered: Vec<(f64, Key, String, u32)> = by_key
+        .into_iter()
+        .map(|(key, (from, source, line_offset))| (from, key, source, line_offset))
+        .collect();
+    ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    ordered.truncate(PROGRAMS);
+    ordered
+        .into_iter()
+        .map(|(_, key, source, line_offset)| (key, source, line_offset))
+        .collect()
+}
+
 /// GPU programs of shader-layer code kept by a renderer (by source key),
 /// and the fallback runner's state.
 #[derive(Default)]
 pub struct ShaderState {
     pub(crate) output: ShaderOutputCache,
     programs: HashMap<Key, (GpuProgram, u64)>,
+    prewarm: ShaderPrewarm,
     /// Sources whose last build failed because of the compiler: built
     /// again after their backoff.
     retry: HashMap<Key, crate::effects::retry::Retry>,
@@ -295,9 +544,98 @@ const PROGRAMS: usize = 256;
 const UPLOADS: usize = 8;
 
 impl ShaderState {
+    pub(crate) fn can_reuse_pixels(
+        &self,
+        key: &Key,
+        watchdog: &crate::effects::watchdog::Watchdog,
+    ) -> bool {
+        use crate::effects::watchdog::Subject;
+        let subject = Subject::Code(*key);
+        self.programs
+            .get(key)
+            .is_some_and(|(program, _)| program.output_cache_safe)
+            && !super::translate::native_failed(key)
+            && !watchdog.is_code_disabled(key)
+            && !watchdog.is_held(&subject)
+            && watchdog.permits_shader_output_reuse(&subject)
+    }
+
     /// Programs built.
     pub fn programs(&self) -> usize {
         self.programs.len()
+    }
+
+    /// Background shader-layer builds still in flight.
+    pub fn prewarm_pending(&self) -> usize {
+        self.prewarm.pending()
+    }
+
+    fn insert_program(&mut self, key: Key, program: GpuProgram) {
+        self.tick += 1;
+        let tick = self.tick;
+        if !self.programs.contains_key(&key) && self.programs.len() >= PROGRAMS {
+            let oldest = self
+                .programs
+                .iter()
+                .min_by_key(|(_, (_, t))| *t)
+                .map(|(k, _)| *k)
+                .expect("not empty");
+            self.programs.remove(&oldest);
+        }
+        self.programs.insert(key, (program, tick));
+    }
+
+    fn absorb(&mut self, built: Vec<BuiltShader>) {
+        for b in built {
+            let Some(result) = b.result else {
+                continue;
+            };
+            if self.programs.contains_key(&b.key) {
+                continue;
+            }
+            match result {
+                Ok(program) => {
+                    self.retry.remove(&b.key);
+                    self.insert_program(b.key, program);
+                }
+                Err(f) if !f.stage.retryable() => {
+                    super::translate::mark_failed(b.key, f);
+                }
+                Err(f) => {
+                    if self.retry.len() >= PROGRAMS {
+                        self.retry.clear();
+                    }
+                    let next = crate::effects::retry::Retry::after(self.retry.get(&b.key), f);
+                    self.retry.insert(b.key, next);
+                }
+            }
+        }
+    }
+
+    /// Queues custom `type: "shader"` layers in `document` for off-thread
+    /// translation and GPU pipeline compilation. Programs already built or in
+    /// flight are skipped. Returns how many were queued.
+    pub fn prewarm(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        document: &pm_model::Document,
+    ) -> usize {
+        let done = self.prewarm.take();
+        self.absorb(done);
+        let mut queued = 0;
+        for (key, source, line_offset) in document_shader_sources(document) {
+            if self.programs.contains_key(&key) || super::translate::native_failed(&key) {
+                continue;
+            }
+            if self
+                .prewarm
+                .queue(key, source, line_offset, device, format)
+            {
+                queued += 1;
+            }
+        }
+        queued
     }
 
     /// Runner pixel uploads made so far (one per request drawn, not per
@@ -357,6 +695,14 @@ impl ShaderState {
         prepared: &super::translate::Translated,
         format: wgpu::TextureFormat,
     ) -> Result<&mut GpuProgram, Failure> {
+        if !self.programs.contains_key(&key) {
+            let done = if self.prewarm.in_flight(&key) && !self.prewarm.reclaim(&key) {
+                self.prewarm.wait_for(&key)
+            } else {
+                self.prewarm.take()
+            };
+            self.absorb(done);
+        }
         self.tick += 1;
         let tick = self.tick;
         if !self.programs.contains_key(&key) {
@@ -1228,5 +1574,30 @@ mod tests {
             ),
             other => panic!("expected routing, got {other:?}"),
         }
+    }
+
+    /// Prewarming a document compiles its custom shader layers off the frame
+    /// thread so their first visible frame hits the cache with zero frame-thread
+    /// shader builds.
+    #[test]
+    fn prewarm_programs_compiles_shader_layers_off_the_frame_thread() {
+        use std::time::{Duration, Instant};
+        let doc = document(
+            "void main(){ fragColor = vec4(0.25, 0.5, 0.75, 1.0) + vec4(uv * 0.0, 0.0, 0.0); } // prewarm probe",
+        );
+        let mut r = Renderer::headless().unwrap();
+        assert!(r.prewarm_programs(&doc) >= 1);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            r.prewarm_programs(&doc);
+            if r.shader_state().programs() >= 1 && r.shader_state().prewarm_pending() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(r.shader_state().programs() >= 1);
+        let frame = render(&mut r, &doc).unwrap();
+        assert!(frame.chunks_exact(4).all(|p| p == [0.25, 0.5, 0.75, 1.0]));
+        assert_eq!(r.shader_state().builds, 0, "built off the frame thread");
     }
 }

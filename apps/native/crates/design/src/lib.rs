@@ -548,9 +548,7 @@ pub struct Metrics {
 /// Transparency makes the window and panels solid.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Translucency {
-    /// Tint over the blur. Darker than `colors.window` in dark, because the
-    /// blur lightens the ground: the composite lands near the solid window and
-    /// the panel material keeps its step above it (language §3, tonal elevation).
+    /// Tint over the behind-window blur, initialized from `colors.window`.
     pub ground: u32,
     pub window: f32,
     pub panel: f32,
@@ -697,20 +695,20 @@ impl Colors {
     /// and the accent. Every other neutral is the ink over a ground at an
     /// alpha step, raised where needed to clear its contrast floor.
     ///
-    /// Dark is warm stone (hue about 55°, chroma under 0.01): the grounds step
-    /// up in lightness toward the viewer's surround, so elevation is tonal.
+    /// Dark grounds and ink have zero chroma. Lightness steps give each
+    /// surface its elevation, from the viewer up to the floating surface.
     /// Light is a cool paper (hue 286°). The accent is Powermove orange; it
     /// marks one action or one state per view and is never a selected fill.
     pub fn of(scheme: Scheme) -> Self {
         let dark = scheme == Scheme::Dark;
         let (ink, window, panel, recess, viewer, floating) = if dark {
             (
-                oklch(0.97, 0.0013, 106.),
-                oklch(0.147, 0.004, 49.),
-                oklch(0.216, 0.006, 56.),
-                oklch(0.188, 0.005, 67.),
-                oklch(0.135, 0.003, 70.),
-                oklch(0.268, 0.006, 34.),
+                oklch(0.97, 0., 0.),
+                oklch(0.147, 0., 0.),
+                oklch(0.216, 0., 0.),
+                oklch(0.188, 0., 0.),
+                oklch(0.135, 0., 0.),
+                oklch(0.268, 0., 0.),
             )
         } else {
             (
@@ -991,7 +989,7 @@ impl Tokens {
                 // v1's row height: the strip is 26 pt, tall enough for its
                 // material to read, with no density lost against v1.
                 track_row: 30.,
-                property_row: 22.,
+                property_row: 28.,
                 ruler: 24.,
                 viewer_ruler: 16.,
                 grade_wheel: 112.,

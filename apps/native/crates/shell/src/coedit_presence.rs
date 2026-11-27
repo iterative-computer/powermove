@@ -58,7 +58,7 @@ pub(super) fn title(text: &str, size: f64, color: &NSColor) -> Retained<NSAttrib
 
 fn copy(status: &AgentStatus) -> &str {
     if !status.working {
-        "Done"
+        status.undo_feedback.unwrap_or("Done")
     } else if status.paused {
         "Paused · ⇧⌘. to resume"
     } else if status.held {
@@ -70,6 +70,7 @@ fn copy(status: &AgentStatus) -> &str {
 
 struct Content {
     text: String,
+    working: bool,
     badge: Option<Retained<NSAttributedString>>,
     undo: Option<Retained<NSAttributedString>>,
 }
@@ -78,19 +79,22 @@ impl Content {
     fn new(status: &AgentStatus, t: &Tokens) -> Self {
         let count = status.additional_runs;
         Self {
+            working: status.working,
             text: copy(status)
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" "),
             badge: (status.working && count > 0)
                 .then(|| title(&format!("+{count}"), 10., &NSColor::secondaryLabelColor())),
-            undo: (!status.working)
+            undo: (!status.working
+                && status.undo_available
+                && status.undo_feedback != Some(AgentStatus::UNDOING))
                 .then(|| title("Undo", 13., &native_color(t.colors.accent_text))),
         }
     }
 
     fn text_x(&self) -> f64 {
-        LEADING + if self.undo.is_some() { 10. } else { 8. } + MARK_GAP
+        LEADING + if self.working { 8. } else { 10. } + MARK_GAP
     }
 
     fn text_width(&self, text: &str) -> f64 {
@@ -136,7 +140,7 @@ impl Content {
     }
 
     fn layout(&self, width: f64, hover: bool) -> Layout {
-        let actions = (hover && self.undo.is_none())
+        let actions = (hover && self.working)
             .then(|| centered(width - TRAILING - ACTIONS_WIDTH, ACTIONS_WIDTH, HEIGHT));
         let text_right = actions.map_or(width - TRAILING, |r| r.origin.x - BADGE_GAP);
         let x = self.text_x();
@@ -227,7 +231,7 @@ impl Layout {
         if let Some((r, undo)) = &self.undo {
             if undo_hot {
                 native_color(t.colors.accent)
-                    .colorWithAlphaComponent(0.12)
+                    .colorWithAlphaComponent(0.16)
                     .setFill();
                 capsule(*r, r.size.height / 2.).fill();
             }
@@ -251,6 +255,7 @@ impl Layout {
 fn marker(status: &AgentStatus, phase: f64, t: &Tokens) -> (NSRect, Retained<NSImage>) {
     let working = status.working;
     let paused = status.paused;
+    let feedback = status.undo_feedback;
     let glow = working && !paused && !status.held && !status.attention;
     let alpha = if t.accessibility.reduce_motion {
         0.35
@@ -284,7 +289,7 @@ fn marker(status: &AgentStatus, phase: f64, t: &Tokens) -> (NSRect, Retained<NSI
             }
             color.setFill();
             NSBezierPath::bezierPathWithOvalInRect(rect(5., 5., 8., 8.)).fill();
-        } else {
+        } else if feedback.is_none() || feedback == Some(AgentStatus::UNDONE) {
             NSColor::secondaryLabelColor().setStroke();
             let check = NSBezierPath::bezierPath();
             check.setLineWidth(1.5);
@@ -294,6 +299,9 @@ fn marker(status: &AgentStatus, phase: f64, t: &Tokens) -> (NSRect, Retained<NSI
             check.lineToPoint(NSPoint::new(7.7, 5.8));
             check.lineToPoint(NSPoint::new(13.25, 11.9));
             check.stroke();
+        } else {
+            NSColor::secondaryLabelColor().setFill();
+            NSBezierPath::bezierPathWithOvalInRect(rect(6., 6., 6., 6.)).fill();
         }
         objc2::runtime::Bool::YES
     });
@@ -325,6 +333,7 @@ struct UndoState {
     hovered: Cell<bool>,
     pressed: Cell<bool>,
     accent: Cell<u32>,
+    reduce_motion: Cell<bool>,
 }
 
 define_class!(
@@ -349,11 +358,49 @@ define_class!(
             self.ivars().hovered.set(false);
             self.update_fill();
         }
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn mouse_down_can_move_window(&self) -> bool { false }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _: Option<&NSEvent>) -> bool { true }
+
         #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, event: &NSEvent) {
+        fn mouse_down(&self, _: &NSEvent) {
+            if !self.isEnabled() {
+                return;
+            }
+            let Some(window) = self.window() else {
+                return;
+            };
             self.ivars().pressed.set(true);
             self.update_fill();
-            unsafe { let _: () = msg_send![super(self), mouseDown: event]; }
+            self.displayIfNeeded();
+            // The entire visible capsule is clickable, including the padding
+            // outside the borderless NSButtonCell's title.
+            let mask = NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp;
+            let deadline = NSDate::distantFuture();
+            while let Some(event) = window.nextEventMatchingMask_untilDate_inMode_dequeue(
+                mask,
+                Some(&deadline),
+                unsafe { NSEventTrackingRunLoopMode },
+                true,
+            ) {
+                let point = self.convertPoint_fromView(event.locationInWindow(), None);
+                let inside = self.mouse_inRect(point, self.bounds());
+                if event.r#type() == NSEventType::LeftMouseUp {
+                    self.ivars().hovered.set(inside);
+                    self.ivars().pressed.set(false);
+                    self.update_fill();
+                    if inside && self.isEnabled() {
+                        unsafe { self.sendAction_to(self.action(), self.target().as_deref()) };
+                    }
+                    return;
+                }
+                self.ivars().hovered.set(inside);
+                self.ivars().pressed.set(inside);
+                self.update_fill();
+                self.displayIfNeeded();
+            }
             self.ivars().pressed.set(false);
             self.update_fill();
         }
@@ -371,14 +418,19 @@ impl Undo {
         if let Some(layer) = self.layer() {
             let state = self.ivars();
             let alpha = if state.pressed.get() {
-                0.22
+                0.28
             } else if state.hovered.get() {
-                0.12
+                0.16
             } else {
                 0.
             };
             let color = native_color(state.accent.get()).colorWithAlphaComponent(alpha);
+            let scale = if state.pressed.get() && !state.reduce_motion.get() { 0.96 } else { 1. };
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
             layer.setBackgroundColor(Some(&color.CGColor()));
+            layer.setTransform(objc2_quartz_core::CATransform3D::new_scale(scale, scale, 1.));
+            CATransaction::commit();
         }
     }
 }
@@ -405,6 +457,9 @@ define_class!(
     #[ivars = Views]
     pub(super) struct CoeditPresence;
     impl CoeditPresence {
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn mouse_down_can_move_window(&self) -> bool { false }
+
         #[unsafe(method(intrinsicContentSize))]
         fn intrinsic(&self) -> NSSize {
             NSSize::new(self.ivars().width.get(), HEIGHT)
@@ -460,9 +515,11 @@ impl CoeditPresence {
         let undo: Retained<Undo> = unsafe {
             msg_send![super(Undo::alloc(mtm).set_ivars(UndoState {
                 hovered: Cell::new(false), pressed: Cell::new(false), accent: Cell::new(t.colors.accent),
+                reduce_motion: Cell::new(t.accessibility.reduce_motion),
             })), initWithFrame: NSRect::ZERO]
         };
         configure(&undo, 1);
+        undo.setButtonType(NSButtonType::MomentaryPushIn);
         undo.setAlignment(NSTextAlignment::Center);
         undo.setWantsLayer(true);
         if let Some(layer) = undo.layer() {
@@ -522,6 +579,7 @@ impl CoeditPresence {
             || old.as_ref().is_none_or(|before| {
                 before.working != status.working
                     || before.additional_runs != status.additional_runs
+                    || before.undo_available != status.undo_available
                     || copy(before) != copy(status)
             });
         *old = Some(status.clone());
@@ -532,6 +590,7 @@ impl CoeditPresence {
         if force {
             *v.tokens.borrow_mut() = t.clone();
             v.undo.ivars().accent.set(t.colors.accent);
+            v.undo.ivars().reduce_motion.set(t.accessibility.reduce_motion);
             v.undo.update_fill();
         }
         let content = Content::new(status, t);
@@ -547,8 +606,9 @@ impl CoeditPresence {
         v.steer
             .setAccessibilityLabel(Some(&NSString::from_str(&label)));
         *v.content.borrow_mut() = content;
-        if !status.working {
+        if v.content.borrow().undo.is_none() {
             v.undo.ivars().hovered.set(false);
+            v.undo.ivars().pressed.set(false);
             v.undo.update_fill();
         }
         self.resize_to(preferred, first || t.accessibility.reduce_motion);
@@ -575,21 +635,26 @@ impl CoeditPresence {
 
     fn refresh(&self, width: f64) {
         let v = self.ivars();
-        let next = v.content.borrow().layout(width, v.hovered.get());
-        let working = next.undo.is_none();
+        let content = v.content.borrow();
+        let next = content.layout(width, v.hovered.get());
+        let working = content.working;
         v.steer.setHidden(!working);
         let end = next.actions.map_or(width, |r| r.origin.x);
         // The native button covers the marker as well as the label (Steer).
         v.steer.setFrame(centered(0., end, HEIGHT));
         v.done.setHidden(working);
-        v.undo.setHidden(working);
-        if let Some((r, title)) = &next.undo {
+        v.undo.setHidden(next.undo.is_none());
+        v.undo.setEnabled(next.undo.is_some());
+        if !working {
+            v.done.setStringValue(&next.title.string());
             // The plain NSTextField label has a 2 pt internal text inset.
             v.done.setFrame(centered(
                 next.text_x - 2.,
                 next.title.size().width + 5.,
                 v.done.fittingSize().height,
             ));
+        }
+        if let Some((r, title)) = &next.undo {
             v.undo.setFrame(*r);
             v.undo.setAttributedTitle(title);
         }

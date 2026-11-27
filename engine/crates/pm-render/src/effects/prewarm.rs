@@ -21,7 +21,7 @@
 //! binary archive on Metal).
 
 use std::collections::HashMap;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Instant;
 
 use pm_glsl::{Failure, Prepared};
@@ -29,6 +29,15 @@ use pm_protocol::common::DefinitionId;
 use pm_protocol::definitions::DefinitionKind;
 
 use super::program::GpuProgram;
+
+/// Process-wide serialization for background shader prewarm workers (effects
+/// and custom GLSL shader layers across viewer and settle renderers). Keeps
+/// background compilation to at most one of the two `pm-glsl-compiler`
+/// process slots so a foreground frame always has a free slot.
+pub(crate) fn prewarm_gate() -> &'static Mutex<()> {
+    static GATE: OnceLock<Mutex<()>> = OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(()))
+}
 
 pub(crate) type Key = (DefinitionKind, DefinitionId);
 
@@ -114,6 +123,7 @@ impl Prewarm {
                 .spawn(move || {
                     // Ends when the renderer drops its sender.
                     while let Ok(job) = rx.recv() {
+                        let _gate = prewarm_gate().lock().unwrap_or_else(|e| e.into_inner());
                         {
                             let mut claims = claims.lock().unwrap_or_else(|e| e.into_inner());
                             match claims.get_mut(&(job.key.clone(), job.source)) {
@@ -125,6 +135,7 @@ impl Prewarm {
                         let started = Instant::now();
                         let result =
                             build(&job.device, &job.prepared, job.key.1.as_str(), job.format);
+                        drop(_gate);
                         let built = Built {
                             key: job.key,
                             source: job.source,

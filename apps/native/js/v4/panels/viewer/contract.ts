@@ -7,6 +7,7 @@ export interface ViewerModel {
   composition: string | null;
   name: string;
   compositions?: Array<{ id: string; name: string; parents: string[] }>;
+  focusedGroups?: Array<{ id: string; name: string }>;
   trail?: { ids: string[]; index: number };
   fit: boolean;
   shownZoom: number;
@@ -16,8 +17,10 @@ export interface ViewerModel {
   showControls: boolean;
   empty: boolean;
   selectionCount: number;
-  /** Present when the composition has Studio 3D layers: the preview tier. */
+  /** Present when the composition supports 3D navigation. */
   studio?: {
+    /** The composition draws Studio objects or extrusions. */
+    hasScene?: boolean;
     /** `fast` the raster preview (default), `live` the path tracer, `refine` Quality. */
     tier: "fast" | "live" | "refine";
     tool?: "move" | "rotate" | "scale" | "orbit" | "pan" | "zoom" | "light";

@@ -630,6 +630,7 @@ impl Kit {
             .text_role(t, Text::Body)
             .text_color(rgb(t.colors.text))
             .occlude()
+            .child(crate::native_control::native_occlusion_backdrop())
     }
     /// A menu's one highlight, the first child of [`Kit::menu`]: `top` is the
     /// lit row's offset from the first row, `None` while nothing is lit (as

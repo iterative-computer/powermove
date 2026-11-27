@@ -367,6 +367,8 @@ fn fill_box(
 }
 impl GizmoSurface {
     pub(super) fn pen_reread(&mut self, cx: &mut Context<Self>) {
+        self.pen_reading += 1;
+        self.pen_read_again = false;
         if self.host.tool(cx) != super::Tool::Pen || self.host.playing(cx) {
             self.pen_ready = false;
             self.pen_active = None;
@@ -376,7 +378,11 @@ impl GizmoSurface {
             }
             return;
         }
-        self.pen_reading += 1;
+        if self.pen_read_out {
+            self.pen_read_again = true;
+            return;
+        }
+        self.pen_read_out = true;
         let ticket = self.pen_reading;
         // A read taken while the Pen's own steps are still queued (a new path
         // layer is selected only after its first vertex lands) may see the
@@ -395,6 +401,7 @@ impl GizmoSurface {
                 .spawn(async move { read_pen(kernel.published(&project)?.as_ref(), time) })
                 .await;
             let _ = this.update(cx, |s, cx| {
+                s.pen_read_out = false;
                 if s.pen_reading == ticket {
                     // The open path lives on while its layer is the one
                     // selected (a new path layer's own selection keeps it).
@@ -412,6 +419,8 @@ impl GizmoSurface {
                     s.pen_ready = !own_work;
                     cx.notify();
                     s.pen_drain(cx);
+                } else if s.pen_read_again {
+                    s.pen_reread(cx);
                 }
             });
         })

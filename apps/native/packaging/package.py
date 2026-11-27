@@ -90,6 +90,7 @@ def info(channel, version, build, sparkle_feed=None, sparkle_key=None):
         "LSApplicationCategoryType": "public.app-category.graphics-design",
         "NSAccentColorName": "AccentColor", "NSHighResolutionCapable": True,
         "NSPrincipalClass": "NSApplication", "CFBundleIconFile": "icon.icns",
+        "CFBundleIconName": "Powermove",
     }
     # Beta/dev remain isolated; only production takes the shipped associations.
     if channel == "cutover":
@@ -202,10 +203,14 @@ def bundle(executable, destination, channel, version, build, update_config,
     # Source catalog is owned by pm-design/Opus; never generate new colour values.
     shutil.copytree(NATIVE / "bundle" / "Assets.xcassets", resources / "Assets.xcassets")
     if compile_assets:
-        run(["xcrun", "actool", "--compile", resources, "--platform", "macosx",
-             "--minimum-deployment-target", "14.0", "--accent-color", "AccentColor",
-             "--output-partial-info-plist", resources / "asset-info.plist",
-             resources / "Assets.xcassets"])
+        command = ["xcrun", "actool", "--compile", resources, "--platform", "macosx",
+                   "--minimum-deployment-target", "14.0", "--accent-color", "AccentColor",
+                   "--output-partial-info-plist", resources / "asset-info.plist",
+                   resources / "Assets.xcassets"]
+        icon_bundle = NATIVE / "bundle" / "Powermove.icon"
+        if icon_bundle.is_dir():
+            command.extend(["--app-icon", "Powermove", icon_bundle])
+        run(command)
     (resources / "update-config.json").write_text(json.dumps(updates, indent=2) + "\n")
     if sparkle_framework:
         (contents / "Frameworks").mkdir()

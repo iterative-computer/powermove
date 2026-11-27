@@ -178,11 +178,15 @@ pub enum LayerCommand {
     /// new layer (the old command did unless `select: false`).
     Add(Box<AddLayer>),
     /// `delete_layers`: the layers and everything inside the groups among
-    /// them; children parented to a deleted layer are unparented. Locked
-    /// layers are skipped (all locked: `All targeted layers are locked`; a
-    /// group with locked contents: `Unlock the group and its contents before
-    /// deleting`). Label "Delete Layers".
+    /// them; children parented to a deleted layer are unparented while
+    /// preserving their world pose. Locked layers are skipped (all locked:
+    /// `All targeted layers are locked`; a group with locked contents:
+    /// `Unlock the group and its contents before deleting`). Label "Delete
+    /// Layers".
     Delete { layer_ids: Vec<String> },
+    /// Same as [`LayerCommand::Delete`], evaluating surviving parented
+    /// children's world pose at `time` (the playhead) before unparenting.
+    DeleteAt { layer_ids: Vec<String>, time: f64 },
     /// Cmd+D (`duplicate`: `pasteLayers` of the selection in place): copies
     /// (`PM.cloneLayer`: numbered names, fresh key ids) inserted above the
     /// topmost one, links between copies remapped. Any locked layer refuses.
@@ -247,7 +251,7 @@ impl LayerCommand {
         match self {
             LayerCommand::Set { patch, .. } => patch_label(patch),
             LayerCommand::Add(_) => "Add Layer",
-            LayerCommand::Delete { .. } => "Delete Layers",
+            LayerCommand::Delete { .. } | LayerCommand::DeleteAt { .. } => "Delete Layers",
             LayerCommand::Duplicate { .. } => "Duplicate",
             LayerCommand::Paste { .. } => "Paste",
             LayerCommand::InsertBlock { label, .. } => return label.clone(),
@@ -267,7 +271,8 @@ impl LayerCommand {
         match self {
             LayerCommand::Set { layer_id, patch } => set_layer(cx, layer_id, patch),
             LayerCommand::Add(c) => add_layer(cx, c),
-            LayerCommand::Delete { layer_ids } => delete_layers(cx, layer_ids),
+            LayerCommand::Delete { layer_ids } => delete_layers(cx, layer_ids, 0.0),
+            LayerCommand::DeleteAt { layer_ids, time } => delete_layers(cx, layer_ids, *time),
             LayerCommand::Duplicate { layer_ids, new_ids } => duplicate(cx, layer_ids, new_ids),
             LayerCommand::Paste {
                 comp,
@@ -1076,6 +1081,78 @@ fn set_layer(cx: &mut Cx<'_>, layer_id: &str, p: &LayerPatch) -> Result<(), Comm
             }
         }
         cx.set(at("threeD"), Value::Bool(three_d))?;
+        // When enabling 3D on a group whose Z pivot is still untouched at 0,
+        // center anchor.z and position.z on its 3D children's depth midpoint
+        // (an exact identity transform when rotation.x/y == 0 and scale.z == 100)
+        // so 3D rotation orbits cleanly around the group's children.
+        if three_d && layer_type == "group" {
+            let static_eq = |l: &Value, key: &str, expected: f64| -> bool {
+                let Some(prop) = l.get("p").and_then(|p| p.get(key)) else {
+                    return true;
+                };
+                if prop.get("expr").is_some_and(Value::is_truthy) {
+                    return false;
+                }
+                if prop
+                    .get("kf")
+                    .and_then(Value::as_array)
+                    .is_some_and(|k| !k.is_empty())
+                {
+                    return false;
+                }
+                prop.get("v")
+                    .and_then(Value::as_f64)
+                    .is_none_or(|v| (v - expected).abs() < 1e-6)
+            };
+            let untouched_z = static_eq(&layer, "anchor.z", 0.0)
+                && static_eq(&layer, "position.z", 0.0)
+                && static_eq(&layer, "rotation.x", 0.0)
+                && static_eq(&layer, "rotation.y", 0.0)
+                && static_eq(&layer, "orientation.x", 0.0)
+                && static_eq(&layer, "orientation.y", 0.0)
+                && static_eq(&layer, "scale.z", 100.0);
+            if untouched_z {
+                let now = cx.layer_stack(comp.as_deref());
+                let members: HashSet<&str> = [layer_id].into_iter().collect();
+                let has_text = expand_groups(&now, &members).iter().any(|id| {
+                    now.iter()
+                        .find(|l| values::text(l, "id") == Some(id.as_str()))
+                        .is_some_and(|l| values::text(l, "type") == Some("text"))
+                });
+                if (!has_text || cx.text.is_some())
+                    && let Ok((loc_now, _)) = cx.layer(layer_id)
+                {
+                    let index = loc_now.index;
+                    let mut measure = cx.measure(false)?;
+                    let z_center = cx.kernel(comp.as_deref(), |edit| {
+                        edit.read(|s| {
+                            let Some(g) = s.layers().get(index) else {
+                                return Ok(None);
+                            };
+                            let b = s.group_bounds(
+                                g,
+                                0.0,
+                                &mut *measure,
+                                &mut pm_eval::bounds::NoHost,
+                            )?;
+                            Ok(b.and_then(|b| b.z).map(|(z0, z1)| (z0 + z1) / 2.0))
+                        })
+                    })?;
+                    cx.check_fonts()?;
+                    if let Some(cz) = z_center
+                        && cz.is_finite()
+                        && cz.abs() > 1e-6
+                    {
+                        for k in ["anchor.z", "position.z"] {
+                            let mut p_path = at("p");
+                            p_path.push(k.into());
+                            p_path.push("v".into());
+                            cx.set(p_path, Value::Number(cz))?;
+                        }
+                    }
+                }
+            }
+        }
     }
     if let Some(c) = p.continuous_raster {
         if layer_type != "precomp" {
@@ -1146,6 +1223,58 @@ fn set_parent(cx: &mut Cx<'_>, layer_id: &str, change: &ParentChange) -> Result<
     if current == change.parent.as_deref() {
         return Ok(());
     }
+    if let Some(pidx) = parent_index
+        && is_studio_3d_layer(&layer)
+        && values::text(&layers[pidx], "type") == Some("null")
+    {
+        let parent_layer = &layers[pidx];
+        let parent_id = values::text(parent_layer, "id").unwrap_or_default();
+        let (ploc, _) = cx.layer(parent_id)?;
+        let mut transform = parent_layer
+            .get("p")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let mut changed_p = false;
+        for (path, default) in CHANNELS_3D.into_iter().chain(PLANAR_CHANNELS) {
+            if !transform.contains_key(path) {
+                transform.insert(path, property(n(default)));
+                changed_p = true;
+            }
+        }
+        let (w, h) = comp_dimensions(cx, comp.as_deref());
+        if !values::flag(parent_layer, "threeD") && is_untouched_2d_null(parent_layer, &layers, w, h)
+        {
+            set_channel_number(&mut transform, "position.x", 0.0);
+            set_channel_number(&mut transform, "position.y", 0.0);
+            set_channel_number(&mut transform, "position.z", 0.0);
+            set_channel_number(&mut transform, "anchor.x", 0.0);
+            set_channel_number(&mut transform, "anchor.y", 0.0);
+            set_channel_number(&mut transform, "anchor.z", 0.0);
+            changed_p = true;
+        }
+        if changed_p {
+            let mut p_path = ploc.path();
+            p_path.push("p".into());
+            cx.replace(p_path, Value::Object(transform))?;
+        }
+        if !values::flag(parent_layer, "threeD") {
+            let mut td_path = ploc.path();
+            td_path.push("threeD".into());
+            cx.set(td_path, Value::Bool(true))?;
+        }
+        if parent_layer
+            .get("d")
+            .and_then(|d| d.get("studio3d"))
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            let mut d_path = ploc.path();
+            d_path.push("d".into());
+            d_path.push("studio3d".into());
+            cx.set(d_path, Value::Bool(true))?;
+        }
+    }
     let time = values::finite(change.time, "time")?;
     let index = loc.index;
     cx.kernel(comp.as_deref(), |edit| {
@@ -1161,6 +1290,77 @@ fn set_parent(cx: &mut Cx<'_>, layer_id: &str, change: &ParentChange) -> Result<
             .map(values::s)
             .unwrap_or(Value::Null),
     )
+}
+
+fn comp_dimensions(cx: &Cx<'_>, comp: Option<&str>) -> (f64, f64) {
+    let Ok(node) = cx.comp_node(comp) else {
+        return (1920.0, 1080.0);
+    };
+    let w = node
+        .get("w")
+        .and_then(|v| v.to_value().as_f64())
+        .unwrap_or(1920.0);
+    let h = node
+        .get("h")
+        .and_then(|v| v.to_value().as_f64())
+        .unwrap_or(1080.0);
+    (w, h)
+}
+
+fn is_studio_3d_layer(layer: &Value) -> bool {
+    layer
+        .get("d")
+        .and_then(|d| d.get("definition"))
+        .and_then(Value::as_str)
+        .is_some_and(|def| def.starts_with("powermove.3d."))
+}
+
+fn set_channel_number(transform: &mut Map, key: &str, value: f64) {
+    if let Some(ch) = transform.get_mut(key).and_then(Value::as_object_mut) {
+        ch.insert("v", n(value));
+    } else {
+        transform.insert(key, property(n(value)));
+    }
+}
+
+/// True when a 2D null still sits at its untouched pixel-space default pose
+/// (`(w/2, h/2, 0)` with anchor `(50, 50, 0)`), has no keyframes or expressions
+/// on position/anchor, and has no parent or children yet.
+fn is_untouched_2d_null(layer: &Value, layers: &[Value], w: f64, h: f64) -> bool {
+    let id = values::text(layer, "id").unwrap_or_default();
+    if values::text(layer, "parent").is_some_and(|p| !p.is_empty()) {
+        return false;
+    }
+    if layers
+        .iter()
+        .any(|other| values::text(other, "parent") == Some(id))
+    {
+        return false;
+    }
+    let Some(p) = layer.get("p") else {
+        return false;
+    };
+    let check = |key: &str, expected: f64| -> bool {
+        let Some(ch) = p.get(key) else {
+            return expected == 0.0;
+        };
+        let val = ch.get("v").and_then(Value::as_f64).unwrap_or(f64::NAN);
+        let has_kf = ch
+            .get("kf")
+            .and_then(Value::as_array)
+            .is_some_and(|kf| !kf.is_empty());
+        let has_expr = ch
+            .get("expr")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        !has_kf && !has_expr && (val - expected).abs() < 1e-6
+    };
+    check("position.x", w / 2.0)
+        && check("position.y", h / 2.0)
+        && check("position.z", 0.0)
+        && check("anchor.x", 50.0)
+        && check("anchor.y", 50.0)
+        && check("anchor.z", 0.0)
 }
 
 /// `addLayer(command)`.
@@ -1184,7 +1384,42 @@ fn add_layer(cx: &mut Cx<'_>, c: &AddLayer) -> Result<(), CommandError> {
         values::obj(&mut layer).insert("track", Value::Number(f64::from(track)));
     }
     let index = c.index.unwrap_or(0).min(layers.len());
-    cx.insert_layer(c.comp.as_deref(), index, layer)
+    let default_text_mid_y = (c.layer_type == "text" && !c.properties.contains_key("anchor.y"))
+        .then(|| {
+            layer
+                .get("d")
+                .and_then(|d| d.get("size"))
+                .and_then(|s| s.as_f64().or_else(|| s.get("v").and_then(Value::as_f64)))
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(128.0)
+                / 2.0
+        });
+    cx.insert_layer(c.comp.as_deref(), index, layer)?;
+    if let Some(fallback_mid_y) = default_text_mid_y {
+        let loc = cx.find(&c.id)?;
+        let idx = loc.index;
+        let measured = if cx.text.is_some() {
+            let mut measure = cx.measure(true)?;
+            let mid = cx.kernel(loc.comp_id.as_deref(), |edit| {
+                edit.read(|s| {
+                    let l = &s.layers()[idx];
+                    Ok(s
+                        .bounds(l, c.time, &mut *measure, &mut pm_eval::bounds::NoHost)?
+                        .map(|b| (b.y0 + b.y1) / 2.0))
+                })
+            })?;
+            mid.filter(|v| v.is_finite())
+        } else {
+            None
+        };
+        let mid_y = measured.unwrap_or(fallback_mid_y);
+        let mut path = loc.path();
+        path.push("p".into());
+        path.push("anchor.y".into());
+        path.push("v".into());
+        cx.set(path, Value::Number(mid_y))?;
+    }
+    Ok(())
 }
 
 /// The block's records at the top of the open composition, as one write.
@@ -1402,7 +1637,8 @@ fn content_audio(layer: &mut Value) -> Result<(), CommandError> {
 
 /// Resolve IDs per composition, expand groups once, then skip locked items.
 /// Unlike Electron's group-wide rejection, editable targets still delete.
-fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandError> {
+fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String], time: f64) -> Result<(), CommandError> {
+    let time = values::finite(time, "time")?;
     let mut by_comp: Vec<(Option<String>, Vec<String>)> = Vec::new();
     for id in layer_ids {
         let Ok(loc) = cx.find(id) else { continue };
@@ -1442,14 +1678,33 @@ fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandErr
         if gone.is_empty() {
             continue;
         }
-        // Survivors parented to a deleted layer are unparented first (their
-        // indexes still hold), then each deleted layer goes by id.
+        // Survivors parented to a deleted layer are unparented first with their
+        // world pose preserved at `time` (their indexes still hold), then each
+        // deleted layer goes by id.
         let path = cx.layers_path(comp.as_deref());
         for (index, l) in layers.iter().enumerate() {
             let id = values::text(l, "id");
             if !id.is_some_and(|i| gone.contains(i))
                 && values::text(l, "parent").is_some_and(|p| gone.contains(p))
             {
+                let has_pose = transformable(values::text(l, "type").unwrap_or_default())
+                    && cx
+                        .layer_node(&crate::model::LayerLoc {
+                            comp_id: comp.clone(),
+                            index,
+                        })
+                        .ok()
+                        .and_then(|node| node.get("p"))
+                        .is_some_and(|p| {
+                            ["position.x", "position.y", "scale.x", "scale.y", "rotation"]
+                                .iter()
+                                .all(|k| p.get(k).is_some())
+                        });
+                if has_pose {
+                    cx.kernel(comp.as_deref(), |edit| {
+                        pm_edit::pose::reparent(edit, index, None, time)
+                    })?;
+                }
                 let mut at = path.clone();
                 at.extend([PathPart::Index(index as f64), "parent".into()]);
                 cx.set(at, Value::Null)?;

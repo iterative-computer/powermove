@@ -351,7 +351,10 @@ impl Wakes {
         let queue = self.0.clone();
         let spawned = std::thread::Builder::new()
             .name("pm-compat-retry".into())
-            .spawn(move || queue.run());
+            .spawn(move || {
+                let _ = crate::qos::set_job_qos(crate::qos::JobQos::Utility);
+                queue.run();
+            });
         if spawned.is_err() {
             self.0.state.lock().unwrap().running = false;
         }

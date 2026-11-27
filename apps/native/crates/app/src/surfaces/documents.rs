@@ -104,6 +104,7 @@ pub enum WriteFailure {
     NotAllowed,
     ReadOnlyDisk,
     Missing,
+    MissingMedia,
     ChangedElsewhere,
     InProgress,
     /// An edit was still open (a drag held, text being typed).
@@ -122,6 +123,8 @@ impl WriteFailure {
             Self::NotAllowed
         } else if has(&["changed outside powermove", "other version was preserved"]) {
             Self::ChangedElsewhere
+        } else if has(&["could not save media"]) {
+            Self::MissingMedia
         } else if has(&[
             "no such file",
             "os error 2)",
@@ -150,6 +153,9 @@ impl WriteFailure {
             Self::ReadOnlyDisk => "The disk can’t be written to.",
             Self::Missing => {
                 "Its file or folder can’t be found. It may have been moved, renamed or deleted, or its disk disconnected."
+            }
+            Self::MissingMedia => {
+                "A media file referenced by this project couldn’t be read from disk."
             }
             Self::ChangedElsewhere => {
                 "The file was moved, deleted or changed by something else since you opened it."

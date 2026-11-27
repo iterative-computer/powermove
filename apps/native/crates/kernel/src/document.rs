@@ -18,7 +18,7 @@
 //! Revisions only increase. Undo and redo publish *new* revisions whose
 //! operations restore old content (boundary doc, section 6 step 7).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 
 use pm_model::ops::diff_node_ops;
@@ -306,7 +306,9 @@ pub struct DocumentStore {
     /// and open composition it was judged with.
     archive_judged: Arc<std::sync::Mutex<Option<ArchiveJudgment>>>,
     selection: Selection,
+    unchecked_key_selection: bool,
     queries: QueryContext,
+    layer_index: model::LayerIndex,
     gesture: Option<Gesture>,
     state_token: u64,
     saved_token: u64,
@@ -435,6 +437,7 @@ impl DocumentStore {
             crate::media_versions::hydrate_embedded(root, &mut file.media);
         }
         let queries = QueryContext::new(&current);
+        let layer_index = model::LayerIndex::new(current.root());
         let token = history.state_token();
         let saved_steps = history.saved_steps();
         let saved_workspace = file.envelope.workspace.clone();
@@ -451,7 +454,9 @@ impl DocumentStore {
             history_owned,
             archive_judged: Default::default(),
             selection: Selection::default(),
+            unchecked_key_selection: false,
             queries,
+            layer_index,
             gesture: None,
             state_token: token,
             saved_token: token,
@@ -677,6 +682,10 @@ impl DocumentStore {
         &self.selection
     }
 
+    pub(crate) fn has_open_layer(&self, id: &str) -> bool {
+        self.layer_index.contains_open(id)
+    }
+
     /// `PM.selectLayers(ids, add)`. Ids not in the open composition are
     /// ignored.
     pub fn select_layers<I, S>(&mut self, ids: I, add: bool)
@@ -684,15 +693,12 @@ impl DocumentStore {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let live = self
-            .root()
-            .map(|r| model::layer_ids(r, None))
-            .unwrap_or_default();
+        let index = &self.layer_index;
         let before = self.selection.clone();
         self.selection.select_layers(
             ids.into_iter()
                 .map(Into::into)
-                .filter(|id| live.contains(id)),
+                .filter(|id| index.contains_open(id)),
             add,
         );
         if self.selection != before {
@@ -702,10 +708,7 @@ impl DocumentStore {
 
     /// Adds or removes one layer (Shift/Cmd-click).
     pub fn toggle_layer(&mut self, id: &str) {
-        let live = self
-            .root()
-            .is_some_and(|r| model::layer_ids(r, None).contains(id));
-        if live || self.selection.contains(id) {
+        if self.has_open_layer(id) || self.selection.contains(id) {
             self.selection.toggle_layer(id);
             self.emit(StoreEvent::SelectionChanged);
         }
@@ -718,12 +721,14 @@ impl DocumentStore {
         S: Into<String>,
     {
         self.selection.set_keys(ids.into_iter().map(Into::into));
+        self.unchecked_key_selection = true;
         self.emit(StoreEvent::SelectionChanged);
     }
 
     /// Selects keyframes as picked on their layers, `(layer, key)`.
     pub fn select_layer_keys(&mut self, pairs: Vec<(String, String)>) {
         self.selection.set_layer_keys(pairs);
+        self.unchecked_key_selection = true;
         self.emit(StoreEvent::SelectionChanged);
     }
 
@@ -742,21 +747,24 @@ impl DocumentStore {
         }
     }
 
-    fn prune_selection(&mut self) -> bool {
+    fn prune_selection(&mut self, check_keys: bool) -> bool {
         let Some(root) = self.current.root() else {
             let had = !self.selection.is_empty();
             self.selection.clear();
             return had;
         };
-        let layers = model::layer_ids(root, None);
-        let keys = (!self.selection.keys().is_empty()).then(|| {
-            let mut keys = HashSet::new();
-            if let Some(comp) = model::comp_node(root, model::open_comp_id(root).as_deref()) {
-                model::keyframe_ids(comp, &mut keys);
-            }
-            keys
-        });
-        self.selection.prune(&layers, keys.as_ref())
+        let keys = ((check_keys || self.unchecked_key_selection)
+            && !self.selection.keys().is_empty())
+            .then(|| {
+                let mut keys = HashSet::new();
+                if let Some(comp) = model::comp_node(root, model::open_comp_id(root).as_deref()) {
+                    model::keyframe_ids(comp, &mut keys);
+                }
+                keys
+            });
+        self.unchecked_key_selection = false;
+        self.selection
+            .prune(|id| self.layer_index.contains_open(id), keys.as_ref())
     }
 
     // ── transactions ───────────────────────────────────────────────────────
@@ -862,6 +870,115 @@ impl DocumentStore {
                 origin,
             },
         ))
+    }
+
+    /// Clears stale persisted `"missing": true` flags on effects and transitions
+    /// whose provider is now registered (and whose saved built-in revision, if
+    /// any, is supported by this build), matching Electron's hydration pass.
+    /// Does not push an undo step or mark an unmodified file dirty.
+    pub fn reconcile_missing_definitions(
+        &mut self,
+        effects: &BTreeSet<String>,
+        builtin_effects: &BTreeSet<String>,
+        transitions: &BTreeSet<String>,
+    ) -> Result<bool, TransactionError> {
+        if self.gesture.is_some() {
+            return Ok(false);
+        }
+        let Some(root) = self.current.root() else {
+            return Ok(false);
+        };
+        let saving_version = self.current.saving_app_version();
+        let mut ops = Vec::new();
+        let mut scan_layers = |comp_id: Option<&str>, layers: &[Node]| {
+            for (layer_index, layer) in layers.iter().enumerate() {
+                if let Some(NodeKind::Array(fxs)) = layer.get("fx").map(Node::kind) {
+                    for (fx_index, fx) in fxs.iter().enumerate() {
+                        if !matches!(fx.get("missing").map(Node::kind), Some(NodeKind::Bool(true))) {
+                            continue;
+                        }
+                        let Some(ty) = fx.get("type").and_then(model::str_of) else {
+                            continue;
+                        };
+                        let available = if effects.contains(ty) {
+                            true
+                        } else if builtin_effects.contains(ty) {
+                            let version = fx.get("version").and_then(|v| {
+                                serde_json::from_str::<serde_json::Value>(
+                                    &pm_model::json::to_canonical_string(&v.to_value()),
+                                )
+                                .ok()
+                            });
+                            pm_fx_defs::catalog::definition_for_file(
+                                ty,
+                                version.as_ref(),
+                                saving_version,
+                            )
+                            .is_ok()
+                        } else {
+                            false
+                        };
+                        if available {
+                            let mut path = model::comp_path(comp_id);
+                            path.push("layers".into());
+                            path.push(layer_index.into());
+                            path.push("fx".into());
+                            path.push(fx_index.into());
+                            path.push("missing".into());
+                            ops.push(Op::Leaf(Patch::delete(path)));
+                        }
+                    }
+                }
+                for field in ["transitionIn", "transitionOut"] {
+                    let Some(tr) = layer.get(field) else {
+                        continue;
+                    };
+                    if !matches!(tr.get("missing").map(Node::kind), Some(NodeKind::Bool(true))) {
+                        continue;
+                    }
+                    let Some(ty) = tr.get("type").and_then(model::str_of) else {
+                        continue;
+                    };
+                    if transitions.contains(ty) {
+                        let mut path = model::comp_path(comp_id);
+                        path.push("layers".into());
+                        path.push(layer_index.into());
+                        path.push(field.into());
+                        path.push("missing".into());
+                        ops.push(Op::Leaf(Patch::delete(path)));
+                    }
+                }
+            }
+        };
+        if let Some(NodeKind::Array(layers)) = root.get("layers").map(Node::kind) {
+            scan_layers(None, layers);
+        }
+        if let Some(NodeKind::Object(comps)) = root.get("comps").map(Node::kind) {
+            for (comp_id, comp) in comps.iter() {
+                if let Some(id) = comp_id.as_str()
+                    && let Some(NodeKind::Array(layers)) = comp.get("layers").map(Node::kind)
+                {
+                    scan_layers(Some(id), layers);
+                }
+            }
+        }
+        if ops.is_empty() {
+            return Ok(false);
+        }
+        let staged = self.stage_ops(&ops, false)?;
+        if !staged.changed {
+            return Ok(false);
+        }
+        self.upgraded_on_open = true;
+        self.publish(
+            staged.document,
+            staged.forward.into(),
+            ChangeCause::Edit {
+                label: "Reconcile effects".into(),
+                origin: Origin::Extension,
+            },
+        );
+        Ok(true)
     }
 
     fn commit_staged(
@@ -1091,7 +1208,7 @@ impl DocumentStore {
             let g = self.gesture_mut(id)?;
             (g.origin, g.base.clone())
         };
-        let staged = self.stage_commands_on(base.root(), commands, origin)?;
+        let staged = self.stage_commands_on(base.root(), commands, origin, None)?;
         let ops = diff_node_ops(self.current.root(), staged.document.root());
         if ops.is_empty() {
             self.gesture_mut(id)?.scopes.extend(staged.scopes);
@@ -1174,7 +1291,12 @@ impl DocumentStore {
         commands: &[Command],
         origin: Origin,
     ) -> Result<Staged, TransactionError> {
-        let staged = self.stage_commands_on(self.current.root(), commands, origin)?;
+        let staged = self.stage_commands_on(
+            self.current.root(),
+            commands,
+            origin,
+            Some(&self.layer_index),
+        )?;
         #[cfg(test)]
         assert_inverse_restores(self.current.root(), staged.document.root(), &staged.inverse);
         Ok(staged)
@@ -1187,6 +1309,7 @@ impl DocumentStore {
         start: Option<&Node>,
         commands: &[Command],
         origin: Origin,
+        mut layer_index: Option<&model::LayerIndex>,
     ) -> Result<Staged, TransactionError> {
         if let Some(tree) = start {
             if let Some(ops) = crate::commands::layers::plan_starts(tree, commands) {
@@ -1213,12 +1336,15 @@ impl DocumentStore {
                 _ => None,
             };
             let mut ops = if property.is_none() {
-                presets.finish(tree, origin)?
+                presets.finish(tree, origin, layer_index)?
             } else {
                 Vec::new()
             };
             // A flush can change the scratch tree. Apply it before planning
             // the following command, using the same inverse/history path.
+            if model::changes_layer_index(&ops, true) {
+                layer_index = None;
+            }
             for op in ops.drain(..) {
                 let (inv, scope) = capture_inverse(root.as_ref(), &op);
                 let (next, did) = apply_one(root, &op, revision)?;
@@ -1238,6 +1364,7 @@ impl DocumentStore {
                     &self.selection,
                     self.runtime_state.as_ref(),
                     self.runtime_project.as_deref(),
+                    layer_index,
                 )?,
                 (Some(c), None) => c.plan_with_state(
                     tree,
@@ -1245,9 +1372,13 @@ impl DocumentStore {
                     self.runtime_state.as_ref(),
                     self.runtime_project.as_deref(),
                     self.text_host.as_ref(),
+                    layer_index,
                 )?,
                 (None, None) => Vec::new(),
             };
+            if model::changes_layer_index(&ops, true) {
+                layer_index = None;
+            }
             for op in ops {
                 let (inv, scope) = capture_inverse(root.as_ref(), &op);
                 let (next, did) = apply_one(root, &op, revision)?;
@@ -1396,6 +1527,7 @@ impl DocumentStore {
         let naming = staged
             .document
             .root()
+            .filter(|_| !preserves_key_ids(self.current.root(), &staged.forward))
             .map(|root| model::naming_ops(root, Some(&staged.forward)))
             .unwrap_or_default();
         if !naming.is_empty() {
@@ -1548,6 +1680,11 @@ impl DocumentStore {
         debug_assert!(revision > base_revision);
         // The mirror follows before anyone hears about the revision.
         self.queries.apply(&ops, base_revision, revision, &document);
+        if model::changes_layer_index(&ops, true) {
+            self.layer_index = model::LayerIndex::new(document.root());
+        }
+        let check_keys =
+            !self.selection.keys().is_empty() && !preserves_key_ids(self.current.root(), &ops);
         self.current = document;
         if let Some(root) = self.current.root() {
             crate::media_versions::retarget(root, &mut self.file.media);
@@ -1573,7 +1710,7 @@ impl DocumentStore {
                 self.log_bytes -= change_bytes(&old.ops);
             }
         }
-        let pruned = self.prune_selection();
+        let pruned = self.prune_selection(check_keys);
         self.emit(StoreEvent::Changed(change));
         if pruned {
             self.emit(StoreEvent::SelectionChanged);
@@ -1608,10 +1745,19 @@ impl DocumentStore {
         target: SaveTarget,
         options: SaveOptions,
     ) -> Result<SavePlan, ProjectIoError> {
+        self.prepare_save_with_document(target, options, None)
+    }
+
+    pub(crate) fn prepare_save_with_document(
+        &mut self,
+        target: SaveTarget,
+        options: SaveOptions,
+        stripped: Option<Arc<Document>>,
+    ) -> Result<SavePlan, ProjectIoError> {
         if self.is_saving() {
             return Err(ProjectIoError::SaveInProgress);
         }
-        let plan = self.freeze_save(target, options)?;
+        let plan = self.freeze_save(target, options, stripped)?;
         self.save_ticket = Arc::downgrade(&plan.ticket);
         self.save_metadata_token = self.metadata_token;
         Ok(plan)
@@ -1632,6 +1778,7 @@ impl DocumentStore {
                 portable: true,
                 ..Default::default()
             },
+            None,
         )
     }
 
@@ -1639,6 +1786,7 @@ impl DocumentStore {
         &self,
         target: SaveTarget,
         options: SaveOptions,
+        stripped: Option<Arc<Document>>,
     ) -> Result<SavePlan, ProjectIoError> {
         // Cmd-S with nothing to save writes nothing: no unsaved change, the
         // undo history (redo steps too) and the workspace are the ones last
@@ -1746,6 +1894,33 @@ impl DocumentStore {
                 options.portable || !self.file.media.is_linked(&m.id) || !retained
             })
             .cloned()
+            .map(|mut m| {
+                // If a retained cache copy in App Support went missing (e.g.
+                // synced project opened on another profile or cleared cache),
+                // fall back to the asset's sourcePath when it exists with the
+                // expected byte length; save.rs still verifies the SHA-256.
+                if let project_io::MediaSource::File {
+                    ref mut path,
+                    length,
+                    ..
+                } = m.source
+                    && !path.exists()
+                    && let Some(reference) = self
+                        .root()
+                        .and_then(|r| r.get("assets"))
+                        .and_then(|a| m.id.as_str().and_then(|id| a.get(id)))
+                        .and_then(|a| a.get("sourcePath"))
+                        .and_then(model::str_of)
+                {
+                    let candidate = std::path::Path::new(reference);
+                    if std::fs::metadata(candidate)
+                        .is_ok_and(|meta| meta.is_file() && meta.len() == length)
+                    {
+                        *path = candidate.to_path_buf();
+                    }
+                }
+                m
+            })
             .collect();
         let live_media = self.reachable_assets();
         let source_links = self
@@ -1805,7 +1980,7 @@ impl DocumentStore {
             document: if unchanged.is_some() {
                 self.current.clone()
             } else {
-                model::without_derived_key_ids(&self.current)
+                stripped.unwrap_or_else(|| model::without_derived_key_ids(&self.current))
             },
             had_comps: self.file.envelope.had_comps,
             history,
@@ -2119,7 +2294,7 @@ impl DocumentStore {
         let mut staged = self.stage_ops(&ops, true)?;
         if !admission.place.is_empty() {
             let placed =
-                self.stage_commands_on(staged.document.root(), &admission.place, origin)?;
+                self.stage_commands_on(staged.document.root(), &admission.place, origin, None)?;
             staged.forward.extend(placed.forward);
             staged.inverse.splice(0..0, placed.inverse);
             staged.scopes.extend(placed.scopes);
@@ -2265,9 +2440,12 @@ impl DocumentStore {
             root = apply_one(root, op, revision)?.0;
         }
         let mut staged = match body {
-            WriteBody::Commands(commands) => {
-                self.stage_commands_on(root.as_ref(), commands, origin)?
-            }
+            WriteBody::Commands(commands) => self.stage_commands_on(
+                root.as_ref(),
+                commands,
+                origin,
+                (!model::changes_layer_index(prev_inverse, true)).then_some(&self.layer_index),
+            )?,
             WriteBody::Ops(ops) => self.stage_ops_from(root, ops, true)?,
         };
         let mut ops = prev_inverse.to_vec();
@@ -2468,12 +2646,9 @@ impl DocumentStore {
 
     // Electron restores keys/channel verbatim and filters only missing layers.
     fn restore_history_selection(&mut self, mut selection: Selection) {
-        let live = self
-            .root()
-            .map(|r| model::layer_ids(r, None))
-            .unwrap_or_default();
-        selection.restore_live_layers(&live);
+        selection.restore_live_layers(|id| self.layer_index.contains_open(id));
         self.selection = selection;
+        self.unchecked_key_selection = true;
         self.emit(StoreEvent::SelectionChanged);
     }
 
@@ -2482,7 +2657,7 @@ impl DocumentStore {
     pub(crate) fn set_selection(&mut self, selection: Selection) {
         if self.selection != selection {
             self.selection = selection;
-            self.prune_selection();
+            self.prune_selection(true);
             self.emit(StoreEvent::SelectionChanged);
         }
     }
@@ -2771,6 +2946,17 @@ pub(crate) fn scoped_patches(
 pub const OPEN_COMP_MISSING: &str = "the composition open in the editor is missing";
 
 /// Whole-transaction validation on the staged result.
+/// Scalar updates preserve keyframe membership except when they write the id.
+fn preserves_key_ids(root: Option<&Node>, ops: &[Op]) -> bool {
+    ops.iter().all(|op| {
+        matches!(op, Op::Leaf(patch)
+            if matches!(patch.value, Some(Value::Number(_) | Value::Bool(_) | Value::Null))
+                && matches!(patch.path.last(), Some(PathPart::Key(key)) if key.as_str() != Some("i"))
+                && root.and_then(|root| root.lookup(&patch.path)).is_some_and(|old|
+                    matches!(old.kind(), NodeKind::Number(_) | NodeKind::Bool(_) | NodeKind::Null)))
+    })
+}
+
 pub(crate) fn validate(document: &Document, ops: &[Op]) -> Result<(), TransactionError> {
     let invalid = |m: String| Err(TransactionError::Invalid(m));
     let Some(root) = document.root() else {
@@ -2785,6 +2971,32 @@ pub(crate) fn validate(document: &Document, ops: &[Op]) -> Result<(), Transactio
             .is_none_or(|c| !matches!(c.kind(), NodeKind::Object(_)))
     {
         return invalid(OPEN_COMP_MISSING.into());
+    }
+    if !model::changes_layer_index(ops, false) {
+        let mut checked = HashSet::new();
+        for op in ops {
+            let Some((comp_id, [PathPart::Key(key), index, ..])) = model::comp_op_path(op.path())
+            else {
+                continue;
+            };
+            if key.as_str() != Some("layers") {
+                continue;
+            }
+            let index = index.property_key();
+            let Some(i) = index.as_str().and_then(|s| s.parse::<usize>().ok()) else {
+                continue;
+            };
+            if checked.insert((comp_id, i))
+                && let Some(layer) = model::comp_node(root, comp_id)
+                    .and_then(|comp| comp.get("layers"))
+                    .and_then(|layers| layers.at(i))
+                && crate::commands::scene3d::is_scene3d_layer(layer)
+            {
+                crate::commands::scene3d::validate_layer(&layer.to_value())
+                    .map_err(|e| TransactionError::Invalid(e.to_string()))?;
+            }
+        }
+        return Ok(());
     }
     // Compositions the transaction touched.
     let mut all = false;
@@ -2868,4 +3080,133 @@ pub(crate) fn assert_inverse_restores(before: Option<&Node>, after: Option<&Node
         before.map(Node::to_value),
         "inverse restores the state"
     );
+}
+
+#[cfg(test)]
+mod reconcile_missing_tests {
+    use super::*;
+    use pm_model::json::parse;
+
+    #[test]
+    fn reconciles_stale_missing_flags_without_dirtying_or_pushing_undo() {
+        let project = parse(
+            r#"{
+                "id": "p1",
+                "name": "Test",
+                "w": 1920,
+                "h": 1080,
+                "fps": 30,
+                "dur": 10,
+                "layers": [{
+                    "id": "L1",
+                    "type": "solid",
+                    "name": "One",
+                    "from": 0,
+                    "dur": 5,
+                    "fx": [
+                        {"id": "f1", "type": "dot-matrix-resolve", "on": true, "missing": true, "p": {}},
+                        {"id": "f2", "type": "blur", "on": true, "missing": true, "p": {}},
+                        {"id": "f3", "type": "invert", "version": 999, "on": true, "missing": true, "p": {}},
+                        {"id": "f4", "type": "uninstalled.fx", "on": true, "missing": true, "p": {}}
+                    ],
+                    "transitionIn": {"type": "crossfade", "dur": 0.5, "missing": true, "p": {}},
+                    "transitionOut": {"type": "unknown.tr", "dur": 0.5, "missing": true, "p": {}}
+                }],
+                "comps": {
+                    "Main": {
+                        "id": "Main",
+                        "name": "Main",
+                        "w": 1920,
+                        "h": 1080,
+                        "fps": 30,
+                        "dur": 10,
+                        "layers": [{
+                            "id": "L2",
+                            "type": "solid",
+                            "name": "Two",
+                            "from": 0,
+                            "dur": 5,
+                            "fx": [
+                                {"id": "f5", "type": "progressive-blur", "on": true, "missing": true, "p": {}}
+                            ]
+                        }]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let mut store = DocumentStore::new_untitled(project);
+        store.mark_library_saved();
+        assert!(!store.is_dirty());
+        let rev0 = store.revision();
+
+        let effects: BTreeSet<String> = ["dot-matrix-resolve", "progressive-blur"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let builtins: BTreeSet<String> = ["blur", "invert"].into_iter().map(str::to_owned).collect();
+        let transitions: BTreeSet<String> = ["crossfade"].into_iter().map(str::to_owned).collect();
+
+        assert!(
+            store
+                .reconcile_missing_definitions(&effects, &builtins, &transitions)
+                .unwrap()
+        );
+        assert_eq!(store.revision(), rev0 + 1);
+        assert!(!store.is_dirty(), "reconciliation must not mark clean files dirty");
+        assert!(!store.as_saved(), "save should persist cleaned missing flags");
+        assert!(!store.can_undo(), "reconciliation must not push an undo step");
+
+        // Second call with same definitions is a no-op.
+        assert!(
+            !store
+                .reconcile_missing_definitions(&effects, &builtins, &transitions)
+                .unwrap()
+        );
+        assert_eq!(store.revision(), rev0 + 1);
+
+        let root = store.root().unwrap();
+        let layer0 = match root.get("layers").unwrap().kind() {
+            NodeKind::Array(a) => &a[0],
+            _ => panic!("layers array"),
+        };
+        let fxs = match layer0.get("fx").unwrap().kind() {
+            NodeKind::Array(a) => a,
+            _ => panic!("fx array"),
+        };
+        assert!(fxs[0].get("missing").is_none(), "registered extension effect cleared");
+        assert!(fxs[1].get("missing").is_none(), "supported builtin effect cleared");
+        assert_eq!(
+            fxs[2].get("missing").map(Node::to_value),
+            Some(Value::Bool(true)),
+            "unsupported future builtin revision stays missing"
+        );
+        assert_eq!(
+            fxs[3].get("missing").map(Node::to_value),
+            Some(Value::Bool(true)),
+            "uninstalled effect stays missing"
+        );
+        assert!(layer0.get("transitionIn").unwrap().get("missing").is_none());
+        assert_eq!(
+            layer0.get("transitionOut").unwrap().get("missing").map(Node::to_value),
+            Some(Value::Bool(true))
+        );
+        let main_layers = match root
+            .get("comps")
+            .unwrap()
+            .get("Main")
+            .unwrap()
+            .get("layers")
+            .unwrap()
+            .kind()
+        {
+            NodeKind::Array(a) => a,
+            _ => panic!("main layers"),
+        };
+        let main_fxs = match main_layers[0].get("fx").unwrap().kind() {
+            NodeKind::Array(a) => a,
+            _ => panic!("main fx"),
+        };
+        assert!(main_fxs[0].get("missing").is_none(), "nested comp effect cleared");
+    }
 }

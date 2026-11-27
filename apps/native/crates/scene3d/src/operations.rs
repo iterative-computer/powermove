@@ -133,6 +133,40 @@ pub fn add(
             };
             let mut c = schema::camera(c)?;
             let p = c["p"].clone();
+            let mut props = transform(&p);
+            // New cameras are rotation-only (no Point of Interest). When a
+            // caller/preset supplies initial aim coordinates without explicit
+            // rotation, bake that aim into initial rotation.x / rotation.y so
+            // framing is preserved without two-node Point of Interest.
+            if c.get("autoOrient").is_none() {
+                c["autoOrient"] = json!("off");
+                let has_rot = props.get("rotation.x").is_some() || props.get("rotation.y").is_some();
+                if !has_rot {
+                    let pos = [
+                        p["x"]["v"].as_f64().unwrap_or(0.),
+                        p["y"]["v"].as_f64().unwrap_or(0.),
+                        p["z"]["v"].as_f64().unwrap_or(6.),
+                    ];
+                    let aim = [
+                        p["targetX"]["v"].as_f64().unwrap_or(0.),
+                        p["targetY"]["v"].as_f64().unwrap_or(0.),
+                        p["targetZ"]["v"].as_f64().unwrap_or(0.),
+                    ];
+                    let d = [aim[0] - pos[0], aim[1] - pos[1], aim[2] - pos[2]];
+                    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                    if len > 1e-6 {
+                        let f = [d[0] / len, d[1] / len, d[2] / len];
+                        let rx = f[1].clamp(-1., 1.).asin().to_degrees();
+                        let ry = (-f[0]).atan2(-f[2]).to_degrees();
+                        if rx.abs() > 1e-6 {
+                            props["rotation.x"] = json!(rx);
+                        }
+                        if ry.abs() > 1e-6 {
+                            props["rotation.y"] = json!(ry);
+                        }
+                    }
+                }
+            }
             for k in ["x", "y", "z"] {
                 c["p"].as_object_mut().unwrap().remove(k);
             }
@@ -141,7 +175,7 @@ pub fn add(
                     role,
                     json!({"camera":c,"environment":node.get("environment").cloned().unwrap_or(json!({}))}),
                 )?,
-                transform(&p),
+                props,
             )
         }
     };

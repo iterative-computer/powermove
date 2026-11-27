@@ -154,9 +154,7 @@ fn a_new_user_gets_onboarding_and_no_migration() {
     flow.action("choose:claude");
     flow.action("continue");
     titled(&flow.frame(), "Speech to text");
-    flow.action("continue");
-    titled(&flow.frame(), "Bring your workspace");
-    let effects = flow.action("fresh");
+    let effects = flow.action("continue");
     let [Effect::Enter(Some(choices))] = &effects[..] else {
         panic!("{effects:?}");
     };
@@ -177,23 +175,16 @@ fn bringing_a_workspace_records_the_opt_in_and_back_reaches_welcome() {
     flow.action("begin");
     flow.action("back");
     titled(&flow.frame(), "Welcome to Powermove");
-    for action in ["begin", "continue", "not_now", "continue", "continue"] {
+    for action in ["begin", "continue", "not_now", "continue"] {
         flow.action(action);
     }
-    let effects = flow.action("import");
+    titled(&flow.frame(), "Speech to text");
+    let effects = flow.action("continue");
     let [Effect::Enter(Some(choices))] = &effects[..] else {
         panic!("{effects:?}");
     };
-    assert_eq!(choices["workspaceImport"], "after-effects");
-    // The choice acts: the next editor takes the request once and starts
-    // the transfer (`firstRunWorkspace`); Start Fresh asks for nothing.
-    assert!(crate::first_run::requests_workspace(choices));
-    assert!(!crate::first_run::requests_workspace(
-        &serde_json::json!({"workspaceImport": null})
-    ));
-    crate::first_run::note_workspace_request(true);
-    assert!(crate::first_run::take_workspace_request());
-    assert!(!crate::first_run::take_workspace_request(), "taken once");
+    assert_eq!(choices["workspaceImport"], serde_json::Value::Null);
+    assert!(!crate::first_run::requests_workspace(choices));
 }
 #[test]
 fn an_existing_user_gets_the_copy_then_the_intro_and_every_step_then_home() {
@@ -240,9 +231,7 @@ fn an_existing_user_gets_the_copy_then_the_intro_and_every_step_then_home() {
     titled(&flow.frame(), "Choose your agent");
     flow.action("continue");
     titled(&flow.frame(), "Speech to text");
-    flow.action("continue");
-    titled(&flow.frame(), "Bring your workspace");
-    let effects = flow.action("fresh");
+    let effects = flow.action("continue");
     assert!(
         matches!(&effects[..], [Effect::Enter(Some(_))]),
         "{effects:?}"
@@ -277,8 +266,7 @@ fn a_quit_in_the_steps_after_the_copy_brings_them_back_until_they_finish() {
     flow.action("continue");
     flow.action("not_now");
     flow.action("continue");
-    flow.action("continue");
-    let effects = flow.action("fresh");
+    let effects = flow.action("continue");
     let [Effect::Enter(Some(choices))] = &effects[..] else {
         panic!("{effects:?}");
     };
@@ -813,8 +801,7 @@ fn a_failed_library_stays_on_a_gate_and_retries_with_the_same_choices() {
     flow.action("not_now");
     flow.action("choose:claude");
     flow.action("continue");
-    flow.action("continue");
-    let effects = flow.action("fresh");
+    let effects = flow.action("continue");
     let [Effect::Enter(Some(chosen))] = &effects[..] else {
         panic!("{effects:?}");
     };
@@ -1607,8 +1594,7 @@ fn chosen_speech_models_download_in_the_order_asked() {
         .map(|c| c.id.clone())
         .collect();
     assert_eq!(queued, [ids[0].clone(), ids[6].clone()]);
-    flow.action("continue");
-    let effects = flow.action("fresh");
+    let effects = flow.action("continue");
     let [Effect::Enter(Some(choices))] = &effects[..] else {
         panic!("{effects:?}");
     };

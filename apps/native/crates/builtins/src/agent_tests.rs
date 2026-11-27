@@ -101,9 +101,9 @@ impl Agent {
         // Fresh-chat Auto defaults are covered by the panel model tests.
         panel.text();
         if panel.surface().surface.nodes().values().any(|node|
-            node.props.get("id").and_then(Value::as_str) == Some("agent-add"))
+            node.props.get("id").and_then(Value::as_str) == Some("agent-access"))
             && { let agent = panel.agent(); let state = agent.lock().unwrap(); state.panel.session(state.panel.active_id()).unwrap().settings.access != pm_agents::Access::Editor } {
-            panel.choose("agent-add", "editor");
+            panel.choose("agent-access", "editor");
         }
         panel
     }
@@ -138,9 +138,9 @@ impl Agent {
         // Fresh-chat Auto defaults are covered by the panel model tests.
         panel.text();
         if panel.surface().surface.nodes().values().any(|node|
-            node.props.get("id").and_then(Value::as_str) == Some("agent-add"))
+            node.props.get("id").and_then(Value::as_str) == Some("agent-access"))
             && { let agent = panel.agent(); let state = agent.lock().unwrap(); state.panel.session(state.panel.active_id()).unwrap().settings.access != pm_agents::Access::Editor } {
-            panel.choose("agent-add", "editor");
+            panel.choose("agent-access", "editor");
         }
         panel
     }
@@ -521,7 +521,7 @@ fn stop_lands_while_a_stream_republishes_the_panel() {
     let mut panel = Agent::mount(&actor, environment(root.path(), "stream"));
     panel.connected(Provider::Chatgpt);
     // This fixture exercises the Editor tool set / App Server protocol.
-    panel.choose("agent-add", "editor");
+    panel.choose("agent-access", "editor");
     panel.send("Go");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !panel.text().contains("token") {
@@ -616,7 +616,7 @@ fn signing_out_during_a_run_keeps_its_conversation_and_stop() {
     let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
     panel.connected(Provider::Chatgpt);
     // This fixture exercises the Editor tool set / App Server protocol.
-    panel.choose("agent-add", "editor");
+    panel.choose("agent-access", "editor");
     panel.send("Wait");
     let agent = panel.agent();
     let thread = thread_id(&agent);
@@ -685,7 +685,7 @@ fn supervised_approval_reaches_the_process_and_deny_too() {
         let mut panel = Agent::mount(&actor, environment(root.path(), "approval"));
         panel.connected(Provider::Claude);
         panel.choose("agent-model", "provider:claude");
-        panel.choose("agent-add", "supervised");
+        panel.choose("agent-access", "supervised");
         panel.connected(Provider::Claude);
         panel.send("Build");
         let agent = panel.agent();
@@ -732,7 +732,7 @@ fn composition_run_gets_session_and_edit_tools_and_the_chosen_model() {
     let mut panel = Agent::mount(&actor, environment);
     panel.connected(Provider::Claude);
     // This fixture exercises the Editor tool set / App Server protocol.
-    panel.choose("agent-add", "editor");
+    panel.choose("agent-access", "editor");
     panel.choose("agent-model", "provider:claude");
     panel.choose("agent-model", "model:fixture");
     panel.choose("agent-effort", "high");
@@ -891,7 +891,13 @@ fn missing_runtime_reports_no_connection_and_keeps_the_draft() {
     let mut environment = environment(root.path(), "reply");
     environment.resources = None;
     let mut panel = Agent::mount(&actor, environment);
-    assert!(panel.text().contains("runtime is missing"));
+    let accounts = panel.panels.broker.agent.clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while accounts.connection(Provider::Chatgpt).0 == "checking" {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(panel.text().contains("Connect ChatGPT"));
     panel.panels.close();
 }
 #[test]
@@ -904,7 +910,12 @@ fn the_thread_picker_lists_switches_and_deletes_after_asking() {
     panel.wait(idle);
     let agent = panel.agent();
     let first = thread_id(&agent);
-    panel.click("agent-new");
+    panel.click("agent-threads");
+    let menu = panel.request("agentMenu");
+    assert_eq!(menu.input["picker"], "threads");
+    assert_eq!(menu.input["search"], true);
+    let (agent_new, first_id) = (agent.clone(), first.clone());
+    panel.pick(&menu, "new", move |_| thread_id(&agent_new) != first_id);
     let second = thread_id(&agent);
     assert_ne!(first, second);
     panel.click("agent-threads");
@@ -927,10 +938,18 @@ fn the_thread_picker_lists_switches_and_deletes_after_asking() {
     panel.pick(&menu, &format!("thread:{first}"), move |_| {
         thread_id(&agent2) == wanted
     });
-    // Delete asks first (the window's alert), then the history goes.
+    // Hover trashcan delete asks first (the window's alert), then the history goes.
     panel.click("agent-threads");
     let menu = panel.request("agentMenu");
-    assert!(Agent::labels(&menu).contains(&"Delete Thread…".to_owned()));
+    assert!(
+        menu.input["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["deleteValue"] == json!(format!("delete:{first}"))),
+        "each thread row carries a hover delete value: {:?}",
+        menu.input["options"]
+    );
     panel
         .panels
         .platform_reply(menu.id, Ok(json!(format!("delete:{first}"))));
@@ -1000,32 +1019,32 @@ fn the_model_access_and_slash_menus_change_the_run_settings() {
     assert_eq!(Agent::labels(&menu), ["Low", "High"]);
     let a = agent.clone();
     panel.pick(&menu, "low", move |_| settings(&a).1 == "low");
-    // Access: v1's four modes, the Approvals section of "+"; Full access
-    // asks first.
+    // "+" carries attachments only; Access modes live on the dedicated access control.
     panel.click("agent-add");
     let menu = panel.request("agentMenu");
     assert_eq!(menu.input["picker"], "add");
     assert_eq!(
         Agent::labels(&menu),
-        [
-            "Add Files…",
-            "Select Part of the Screen",
-            "Composition only",
-            "Supervised",
-            "Auto",
-            "Full access"
-        ]
+        ["Add Files…", "Select Part of the Screen"]
+    );
+    panel.panels.platform_reply(menu.id, Ok(Value::Null));
+    panel.click("agent-access");
+    let menu = panel.request("agentMenu");
+    assert_eq!(menu.input["picker"], "access");
+    assert_eq!(
+        Agent::labels(&menu),
+        ["Composition only", "Supervised", "Auto", "Full access"]
     );
     assert!(
-        menu.input["options"].as_array().unwrap()[2..]
+        menu.input["options"].as_array().unwrap()
             .iter()
-            .all(|o| o["category"] == "Approvals")
+            .all(|o| o["category"] == "Access Mode")
     );
     let a = agent.clone();
     panel.pick(&menu, "auto", move |_| {
         settings(&a).2 == pm_agents::Access::Project
     });
-    panel.click("agent-add");
+    panel.click("agent-access");
     let menu = panel.request("agentMenu");
     panel.panels.platform_reply(menu.id, Ok(json!("full")));
     let ask = panel.request("agent.consent");
@@ -1123,7 +1142,7 @@ fn the_trigger_label_and_menu_tick_follow_a_pick_without_reopening() {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|o| o["checked"] == true)
+            .filter(|o| o["checked"] == true && o["stays"] != true)
             .map(|o| o["label"].as_str().unwrap().to_owned())
             .collect()
     };
@@ -1191,7 +1210,7 @@ fn full_access_runs_once_the_person_consents_and_asks_again_otherwise() {
     let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
     panel.connected(Provider::Chatgpt);
     let agent = panel.agent();
-    panel.click("agent-add");
+    panel.click("agent-access");
     let menu = panel.request("agentMenu");
     panel.panels.platform_reply(menu.id, Ok(json!("full")));
     let ask = panel.request("agent.consent");
@@ -1220,7 +1239,7 @@ fn full_access_runs_once_the_person_consents_and_asks_again_otherwise() {
         "no dead-end refusal: {text}"
     );
     // Leaving Full access drops the consent; choosing it again asks again.
-    panel.choose("agent-add", "auto");
+    panel.choose("agent-access", "auto");
     assert!({
         let state = agent.lock().unwrap();
         !state
@@ -1229,7 +1248,7 @@ fn full_access_runs_once_the_person_consents_and_asks_again_otherwise() {
             .unwrap()
             .computer_consent
     });
-    panel.click("agent-add");
+    panel.click("agent-access");
     let menu = panel.request("agentMenu");
     panel.panels.platform_reply(menu.id, Ok(json!("full")));
     panel.request("agent.consent");
@@ -1242,7 +1261,7 @@ fn an_auto_run_reaches_the_provider_and_shows_what_it_did() {
     let mut panel = Agent::mount(&actor, environment(root.path(), "reply_with_work"));
     panel.connected(Provider::Chatgpt);
     // Project Auto uses the App Server and still shows the work it performed.
-    panel.choose("agent-add", "auto");
+    panel.choose("agent-access", "auto");
     {
         let agent = panel.agent();
         let state = agent.lock().unwrap();
@@ -1302,7 +1321,7 @@ fn a_quiet_run_still_republishes_its_working_time() {
     let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
     panel.connected(Provider::Chatgpt);
     // This fixture exercises the Editor tool set / App Server protocol.
-    panel.choose("agent-add", "editor");
+    panel.choose("agent-access", "editor");
     panel.send("Make the headline");
     panel.wait(|s| !s.runs.is_empty());
     // The original's timer copy: "Working for 0s".
@@ -1650,7 +1669,7 @@ fn a_delegated_task_runs_and_its_result_resumes_the_calling_run() {
     let mut panel = Agent::mount(&actor, environment);
     panel.connected(Provider::Chatgpt);
     // This fixture exercises the Editor tool set / App Server protocol.
-    panel.choose("agent-add", "editor");
+    panel.choose("agent-access", "editor");
     let agent = panel.agent();
     let thread = thread_id(&agent);
     panel.send("Make a title card");
@@ -1748,7 +1767,7 @@ fn wait_mode_status_cancel_and_send_follow_mains_contract() {
     let mut panel = Agent::mount(&actor, slow_environment(root.path(), "0.6"));
     panel.connected(Provider::Chatgpt);
     // This fixture exercises the Editor tool set / App Server protocol.
-    panel.choose("agent-add", "editor");
+    panel.choose("agent-access", "editor");
     let agent = panel.agent();
     let thread = thread_id(&agent);
     // Its turn holds, as a real provider's does while it waits on a tool
@@ -1875,7 +1894,7 @@ fn stopping_a_run_that_waits_for_its_subagent_stops_both() {
     let mut panel = Agent::mount(&actor, slow_environment(root.path(), "0.3"));
     panel.connected(Provider::Chatgpt);
     // This fixture exercises the Editor tool set / App Server protocol.
-    panel.choose("agent-add", "editor");
+    panel.choose("agent-access", "editor");
     let agent = panel.agent();
     let thread = thread_id(&agent);
     panel.send("Go");
@@ -1999,7 +2018,7 @@ fn a_private_answer_reaches_the_subagent_but_never_its_prompt() {
     let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
     panel.connected(Provider::Chatgpt);
     // This fixture exercises the Editor tool set / App Server protocol.
-    panel.choose("agent-add", "editor");
+    panel.choose("agent-access", "editor");
     let agent = panel.agent();
     let thread = thread_id(&agent);
     panel.send("Hold: Coordinate");
@@ -2364,7 +2383,7 @@ fn a_connected_model_runs_with_the_powermove_tools_and_streams_its_reply() {
     panel.choose("agent-model", "provider:compatible");
     panel.connected(Provider::Compatible);
     // This fixture exercises the Editor tool set / App Server protocol.
-    panel.choose("agent-add", "editor");
+    panel.choose("agent-access", "editor");
     assert!(!panel.text().contains("Connect ChatGPT"));
     panel.send("Use a tool please");
     panel.wait(idle);
@@ -2605,7 +2624,7 @@ fn steering_a_held_parent_retains_the_direction_after_child_results() {
         let mut panel = Agent::mount(&actor, environment);
         panel.connected(Provider::Chatgpt);
         // The fixture observes the parent and child through App Server.
-        panel.choose("agent-add", "editor");
+        panel.choose("agent-access", "editor");
         let agent = panel.agent();
         let thread = thread_id(&agent);
         let document = actor
@@ -2621,6 +2640,24 @@ fn steering_a_held_parent_retains_the_direction_after_child_results() {
         })).collect()).unwrap();
         panel.send(original_brief);
         let run = live_run(&agent, &thread);
+        let recorded = || -> Vec<Value> {
+            std::fs::read_to_string(&requests)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect()
+        };
+        let original_request = || {
+            recorded().into_iter().find(|record| {
+                record["request"]["params"]["input"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(expected_original.as_str()))
+            })
+        };
+        // The composer publishes the run before the provider accepts its
+        // request. Delegation is available once the provider is running.
+        panel.wait(|_| original_request().is_some());
+        let original = original_request().expect("original request recorded");
         let task = panel
             .panels
             .agent_orchestrate(
@@ -2629,21 +2666,6 @@ fn steering_a_held_parent_retains_the_direction_after_child_results() {
             )
             .unwrap();
         panel.wait(|state| state.runs.held(&run));
-        let recorded = || -> Vec<Value> {
-            std::fs::read_to_string(&requests)
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|line| serde_json::from_str(line).ok())
-                .collect()
-        };
-        let original = recorded()
-            .into_iter()
-            .find(|record| {
-                record["request"]["params"]["input"][0]["text"]
-                    .as_str()
-                    .is_some_and(|text| text.contains(expected_original.as_str()))
-            })
-            .expect("original request recorded");
         let workspace = original["cwd"].clone();
         panel.panels.agent_attach(vec![json!({
             "id":"latest-pick","name":"latest.png","type":"image/png","size":68,"dataUrl":format!("data:image/png;base64,{png}"),

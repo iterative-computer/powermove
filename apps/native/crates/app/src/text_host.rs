@@ -33,6 +33,16 @@ static MIRRORS: Mutex<BTreeMap<String, QueryMirror>> = Mutex::new(BTreeMap::new(
 pub fn mirror_count() -> Option<usize> {
     MIRRORS.try_lock().ok().map(|mirrors| mirrors.len())
 }
+#[cfg(test)]
+thread_local! {
+    static QUERY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn query_count() -> usize {
+    QUERY_COUNT.get()
+}
+
 /// How long one ask may wait on the registry (it answers from main).
 const ASK: Duration = Duration::from_secs(2);
 
@@ -47,6 +57,8 @@ pub fn query<T>(
     published: &Published,
     mut f: impl FnMut(&mut QueryContext) -> Result<T, QueryError>,
 ) -> Result<T, QueryError> {
+    #[cfg(test)]
+    QUERY_COUNT.set(QUERY_COUNT.get() + 1);
     let mut mirrors = MIRRORS.lock().unwrap_or_else(|e| e.into_inner());
     let mirror = mirrors
         .entry(published.project.clone())

@@ -71,11 +71,12 @@ impl crate::integration::Integration for DockFixture {
         _: &mut Window,
         _: &mut App,
     ) -> Option<AnyElement> {
-        if !tabbed || !self.1 {
+        if !self.1 || (!tabbed && id != "scopes") {
             return None;
         }
         let controls: &[(&str, f32)] = match id {
             "agent" => &[("Threads", 94.), ("+", 26.)],
+            "scopes" => &[("Waveform", 80.), ("More", 24.)],
             "assets" => &[("List", 26.), ("Grid", 26.), ("Search Media", 24.), ("Add", 24.)],
             _ => return None,
         };
@@ -126,6 +127,36 @@ impl crate::integration::Integration for DockFixture {
         String::new()
     }
     fn drop_paths(&self, _: Vec<std::path::PathBuf>, _: &mut App) {}
+}
+
+#[gpui::test]
+fn solo_scopes_header_shows_the_shell_title_and_custom_controls(cx: &mut gpui::TestAppContext) {
+    let probes = Rc::new(RefCell::new(Vec::new()));
+    let recorded = probes.clone();
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+        let mut editor = Editor::new(tokens, None, cx);
+        editor.integration = Some(Rc::new(DockFixture(recorded, true)));
+        let right = editor
+            .layout
+            .docks
+            .iter_mut()
+            .find(|dock| dock.id == "right")
+            .unwrap();
+        right.groups = vec![layout::Group {
+            tabs: vec!["scopes".into()],
+            active: 0,
+            size: None,
+            collapsed: false,
+        }];
+        editor
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |editor, _| {
+        let (dock, group, _) = editor.layout.find("scopes").unwrap();
+        assert_eq!(editor.rendered_tab_labels[&(dock, group)].len(), 1);
+    });
+    assert!(probes.borrow().iter().any(|(label, _, _)| label == "Waveform"));
 }
 
 #[gpui::test]

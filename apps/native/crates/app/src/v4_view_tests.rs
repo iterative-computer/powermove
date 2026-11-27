@@ -292,6 +292,34 @@ fn a_new_generation_drops_what_the_old_tree_held(cx: &mut TestAppContext) {
     );
 }
 #[gpui::test]
+fn a_click_survives_a_burst_of_panel_publications(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let tree = |label: &str| {
+        let mut ops = node_ops(
+            1, 0, "button",
+            json!({"id":"target","style":{"width":100,"height":40}}),
+            &["click"],
+        );
+        ops.push(Op::SetText { id: 1, text: label.into() });
+        synthetic(&rig, ops)
+    };
+    let (view, mut vcx) = window(cx, &rig, tree("Choose Folder"), Default::default());
+    vcx.run_until_parked();
+    let at = bounds(&mut vcx, "target").center();
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    view.update(&mut vcx, |v, cx| {
+        for i in 0..20 {
+            v.publish(tree(&format!("Choose Folder {i}")), cx);
+        }
+        assert!(v.compiling());
+    });
+    vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    settle(cx, |cx| !view.read_with(cx, |v, _| v.compiling()));
+    assert_eq!(events(&view, &mut vcx), vec![(1, "click".to_owned())]);
+}
+
+#[gpui::test]
 fn double_click_right_click_hover_wheel_and_pinch_reach_their_listeners(cx: &mut TestAppContext) {
     let rig = rig("viewer", 1);
     let _ = publication(&rig);
@@ -974,6 +1002,64 @@ fn dragging_a_number_field_scrubs_as_one_undo_step(cx: &mut TestAppContext) {
     assert_ne!(p.snapshot.root().unwrap().to_value(), edited);
     assert!(!p.history.can_undo, "the whole scrub was one undo step");
 }
+#[gpui::test]
+fn right_click_cancels_a_number_scrub_without_undo_or_a_click(cx: &mut TestAppContext) {
+    let rig = rig("inspector", 1);
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in rig.runtime.publish() {
+        let ticket = ticket.unwrap();
+        while ticket.try_take().is_none() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
+    vcx.run_until_parked();
+    let name = view.read_with(&vcx, |v, _| v.first_number()).unwrap();
+    let field = bounds(&mut vcx, &name);
+    let at = field.center();
+    let far = at + point(px(-80.), field.size.height + px(25.));
+    let before = rig.kernel.published(PROJECT).unwrap().snapshot.root().unwrap().to_value();
+    let none = Modifiers::none();
+    vcx.simulate_mouse_down(at, MouseButton::Left, none);
+    vcx.simulate_mouse_move(far, MouseButton::Left, none);
+    let kernel = rig.kernel.clone();
+    let original = before.clone();
+    settle(cx, move |_| {
+        let published = kernel.published(PROJECT).unwrap();
+        published.entry.is_some() && published.snapshot.root().unwrap().to_value() != original
+    });
+    let live = rig.kernel.published(PROJECT).unwrap();
+    assert!(live.snapshot.root().unwrap().to_value() != before);
+    vcx.simulate_mouse_down(far, MouseButton::Right, none);
+    vcx.simulate_mouse_up(far, MouseButton::Right, none);
+    vcx.simulate_mouse_move(at, MouseButton::Left, none);
+    vcx.simulate_mouse_up(at, MouseButton::Left, none);
+    let kernel = rig.kernel.clone();
+    settle(cx, move |_| kernel.published(PROJECT).unwrap().entry.is_none());
+    let after = rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(after.snapshot.root().unwrap().to_value(), before);
+    assert!(after.entry.is_none());
+    assert!(!after.history.can_undo);
+    view.read_with(&vcx, |v, _| {
+        assert!(!v.scrubbing());
+        assert!(!v.number_edit_requested(&name));
+        assert!(!v.log.iter().any(|(_, event, _)| event == "contextmenu" || event == "click"));
+    });
+}
+
 /// Headless input: panel handoff, phase filtering and one kernel undo.
 #[gpui::test]
 fn horizontal_wheel_scrub_is_one_undo_and_ignores_momentum(cx: &mut TestAppContext) {
@@ -1441,6 +1527,35 @@ fn a_scroller_keeps_the_rows_its_panel_asks_for_in_a_short_body(cx: &mut TestApp
     let row = tokens().metrics.row;
     assert_eq!(f32::from(bounds(&mut vcx, "n3").size.height), 3. * row);
     assert!(f32::from(bounds(&mut vcx, "n5").size.height) < row);
+}
+
+#[gpui::test]
+fn scroll_preserves_authored_min_height_above_smaller_row_floor(cx: &mut TestAppContext) {
+    let rig = rig("export", 1);
+    let column = json!({"display":"flex","flexDirection":"column","width":420,"height":420});
+    let mut ops = node_ops(1, 0, "div", json!({ "style": column }), &[]);
+    ops.extend(node_ops(
+        2,
+        1,
+        "div",
+        json!({"style":{"height":315,"minHeight":120,"flexShrink":1}}),
+        &[],
+    ));
+    ops.extend(node_ops(
+        3,
+        1,
+        "scroll",
+        json!({"metadata":{"rowFloor":2},"style":{"minHeight":120,"maxHeight":440,"flexShrink":1}}),
+        &[],
+    ));
+    ops.extend(node_ops(4, 3, "div", json!({"style":{"height":88}}), &[]));
+    let (_view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    assert!(
+        f32::from(bounds(&mut vcx, "n3").size.height) >= 120.,
+        "scroll minHeight must not be shrunk down to rowFloor: {:?}",
+        bounds(&mut vcx, "n3")
+    );
 }
 /// A side panel's body as `panel_body` builds it: a slot that scrolls, the
 /// panel as tall as its content and at least the slot.
@@ -2054,6 +2169,19 @@ fn a_tabbed_panel_header_leaves_out_its_title(cx: &mut TestAppContext) {
     });
     assert_eq!(header, Some(2));
     assert_eq!(title, Some(3), "the title is its first text, not a control");
+    view.read_with(&vcx, |v, _| {
+        assert_eq!(v.fallback_header_title(title, false), None);
+        assert_eq!(v.fallback_header_title(None, false), None);
+        assert_eq!(v.fallback_header_title(None, true), None);
+    });
+    let mut agent_pub = synthetic(&rig, vec![]);
+    agent_pub.panel = "agent".into();
+    let (agent_view, agent_vcx) = window(cx, &rig, agent_pub, Default::default());
+    agent_vcx.run_until_parked();
+    agent_view.read_with(&agent_vcx, |v, _| {
+        assert_eq!(v.fallback_header_title(None, false), Some("Agent"));
+        assert_eq!(v.fallback_header_title(None, true), None);
+    });
 }
 
 /// A tooltip says what is not in view: a row titled with the name it
@@ -2298,7 +2426,7 @@ fn viewer_repaints_through_reveal_without_a_new_panel_publication(cx: &mut TestA
     }
     let rig = rig("viewer", 1);
     let _ = publication(&rig);
-    for panel in ["viewer", "timeline"] {
+    for panel in ["viewer", "agent", "timeline"] {
         let surface = synthetic(&rig, node_ops(
             1, 0, "div", json!({"style":{"width":60,"height":60}}), &[],
         ));
@@ -2319,8 +2447,8 @@ fn viewer_repaints_through_reveal_without_a_new_panel_publication(cx: &mut TestA
             vcx.run_until_parked();
         }
         let after = child.read_with(&vcx, |v, _| v.renders);
-        if panel == "viewer" {
-            assert!(after > first, "the viewer retained its loading-era overlay paint");
+        if matches!(panel, "viewer" | "agent") {
+            assert!(after > first, "{panel} retained stale cached paint");
         } else {
             assert_eq!(after, first, "timeline paint should remain reusable");
         }
@@ -2730,7 +2858,7 @@ fn easing_selection_and_preset_preserve_height_and_body_offset(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn easing_local_scrub_phases_commit_or_cancel_once(cx: &mut TestAppContext) {
+fn easing_local_scrub_commits_or_reverts_on_right_click(cx: &mut TestAppContext) {
     for (curve, commit) in [(false, true), (false, false), (true, true), (true, false)] {
         let r = rig("viewer", 1);
         let _ = publication(&r);
@@ -2764,9 +2892,17 @@ fn easing_local_scrub_phases_commit_or_cancel_once(cx: &mut TestAppContext) {
             props,
             &["input", "change"],
         ));
+        ops.extend(node_ops(
+            3,
+            1,
+            "div",
+            json!({"id":"drag-menu","style":{"width":200,"height":24}}),
+            &["contextmenu"],
+        ));
         let (view, mut vcx) = window(cx, &r, synthetic(&r, ops), Default::default());
         vcx.run_until_parked();
         let b = bounds(&mut vcx, "local-scrub");
+        let menu = bounds(&mut vcx, "drag-menu").center();
         let at = if curve {
             let t = tokens();
             let inset = px(t.metrics.keyframe / 2. + t.metrics.border);
@@ -2797,7 +2933,12 @@ fn easing_local_scrub_phases_commit_or_cancel_once(cx: &mut TestAppContext) {
             "preview must not commit"
         );
         if !commit {
-            assert!(view.update(&mut vcx, |view, cx| view.cancel_gesture(cx)));
+            let outside = menu;
+            assert!(!b.contains(&outside));
+            vcx.simulate_mouse_down(outside, MouseButton::Right, Modifiers::none());
+            vcx.simulate_mouse_up(outside, MouseButton::Right, Modifiers::none());
+            vcx.simulate_mouse_move(outside, MouseButton::Left, Modifiers::none());
+            assert!(!view.read_with(&vcx, |view, _| view.scrubbing()));
         }
         vcx.simulate_mouse_up(
             at + point(px(40.), px(-20.)),
@@ -2813,6 +2954,7 @@ fn easing_local_scrub_phases_commit_or_cancel_once(cx: &mut TestAppContext) {
             if commit { 1 } else { 0 }
         );
         if !commit {
+            assert!(!after.iter().any(|(_, event, _)| event == "contextmenu"));
             let restored = after
                 .iter()
                 .find(|(_, event, _)| event == "input")
@@ -2829,6 +2971,8 @@ fn easing_local_scrub_phases_commit_or_cancel_once(cx: &mut TestAppContext) {
                     json!("10")
                 }
             );
+            vcx.simulate_mouse_down(menu, MouseButton::Right, Modifiers::none());
+            assert!(events(&view, &mut vcx).iter().any(|(_, event)| event == "contextmenu"));
         }
     }
 }
@@ -3809,6 +3953,40 @@ fn a_panel_in_a_scrolling_body_draws_rows_past_its_view_only_while_scrolled(
     vcx.simulate_mouse_move(point(px(60.), px(40.)), None, Modifiers::none());
     vcx.run_until_parked();
     assert!(!layered(&vcx), "a pointer move ends the scroll");
+}
+
+/// PM-732: a list in a scroller of its own panel (`scrollOwner: "parent"`,
+/// Properties' Effects) is no scroller; one that owns its scroll is.
+#[gpui::test]
+fn a_list_whose_parent_scrolls_is_no_scroller(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "scroll",
+        json!({"style":{"width":100,"height":100}}),
+        &[],
+    );
+    ops.extend(node_ops(
+        2,
+        1,
+        "scroll",
+        json!({"metadata":{"scrollOwner":"parent"}}),
+        &[],
+    ));
+    ops.extend(node_ops(
+        3,
+        1,
+        "scroll",
+        json!({"metadata":{"scrollOwner":"self"}}),
+        &[],
+    ));
+    let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    let scrolls = |id: u64| view.read_with(&vcx, |v, _| v.prepared.nodes[&id].scroll_y);
+    assert!(scrolls(1), "the panel's scroller");
+    assert!(!scrolls(2), "a list in it whose parent scrolls");
+    assert!(scrolls(3), "a list that owns its scroll");
 }
 
 /// PM-702: evaluating a transition at rest (the workspace's corner fades)

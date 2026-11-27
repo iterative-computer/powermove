@@ -28,22 +28,14 @@ fn current(p: &Published, time: f64) -> Result<Option<(Value, Snapshot, Kind)>> 
     if p.selection.layers().len() != 1 {
         return Ok(None);
     }
-    let root = p.snapshot.root().ok_or_else(|| invalid("Project closed"))?;
-    let comp = pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())
-        .ok_or_else(|| invalid("Composition closed"))?;
-    let comp = from_model(&comp.to_value())?;
-    let Some((index, l)) = comp["layers"]
-        .as_array()
-        .ok_or_else(|| invalid("No layers"))?
-        .iter()
-        .enumerate()
-        .find(|(_, l)| l["id"] == p.selection.layers()[0])
-    else {
+    let comp = crate::view::composition(p)?;
+    let Some((index, l)) = crate::view::layer_by_id(comp, &p.selection.layers()[0]) else {
         return Ok(None);
     };
-    if pm_scene3d::schema::role(l) != Some(pm_scene3d::schema::Role::Light) {
+    if pm_scene3d::layer_role(l) != Some(pm_scene3d::schema::Role::Light) {
         return Ok(None);
     }
+    let l = crate::view::layer_json(l)?;
     let data = &l["d"]["data"]["light"];
     let kind = match data["type"].as_str() {
         Some("area") => Kind::Area,
@@ -75,24 +67,25 @@ fn current(p: &Published, time: f64) -> Result<Option<(Value, Snapshot, Kind)>> 
         height: n("height")?,
         angle: n("angle")?,
     };
-    Ok(Some((l.clone(), state, kind)))
+    Ok(Some((l, state, kind)))
 }
 /// Imported models a light can be aimed at, in layer order.
 fn models(p: &Published) -> Result<Vec<Value>> {
-    let Some(root) = p.snapshot.root() else {
+    let Ok(comp) = crate::view::composition(p) else {
         return Ok(vec![]);
     };
-    let Some(comp) = pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref()) else {
-        return Ok(vec![]);
-    };
-    let comp = from_model(&comp.to_value())?;
-    Ok(comp["layers"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-        .iter()
-        .filter(|l| pm_scene3d::part_material::is_model(l))
-        .map(|l| json!({"v":l["id"],"label":l["name"]}))
+    Ok(pm_kernel::model::layers_of(comp)
+        .filter(|l| {
+            pm_scene3d::layer_role(l) == Some(pm_scene3d::schema::Role::Object)
+                && l.get("d")
+                    .and_then(|d| d.get("data")?.get("object")?.get("source")?.get("assetId"))
+                    .and_then(crate::view::node_str)
+                    .is_some()
+        })
+        .map(|l| {
+            let text = |key| l.get(key).and_then(crate::view::node_str);
+            json!({"v":text("id"),"label":text("name")})
+        })
         .collect())
 }
 pub(crate) fn projection(p: &Published, time: f64, settings: &Settings) -> Result<Value> {

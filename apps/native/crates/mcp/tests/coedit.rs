@@ -505,6 +505,14 @@ fn non_open_composition_commits_independently_of_user_commit_or_cancel() {
     for cancel in [false, true] {
         let (root, host, actor, mut session, id) = attached_fixture();
         session.finish(true).unwrap();
+        let app = {
+            let mut host = host.lock().unwrap();
+            host.agent_grants = Some(Arc::new(|_| {
+                Some(("separate-composition-run".into(), "project".into()))
+            }));
+            host.coedit_host().unwrap()
+        };
+        app.begin_builtin_turn(&id, "separate-composition-run");
         let kernel = actor.handle();
         kernel
             .call(
@@ -580,8 +588,9 @@ fn non_open_composition_commits_independently_of_user_commit_or_cancel() {
         );
         // Finishing may defer history grouping, but never waits for this drag.
         session.finish(true).unwrap();
-        let app = host.lock().unwrap().coedit_host().unwrap();
-        let (writer, _) = app.latest_turn(&id).unwrap();
+        app.finish_builtin_turn(&id, during.snapshot.doc_id);
+        let turn = app.latest_turn(&id, during.snapshot.doc_id).unwrap();
+        let writers = turn.writers.into_iter().map(|(writer, _)| writer).collect();
         kernel
             .call(
                 &id,
@@ -608,8 +617,8 @@ fn non_open_composition_commits_independently_of_user_commit_or_cancel() {
                 &id,
                 Request::new(
                     Caller::native(),
-                    HistoryCall::UndoWriter {
-                        writer,
+                    HistoryCall::UndoWriters {
+                        writers,
                         keep_mine: false,
                         label: "Undo Agent".into(),
                     },

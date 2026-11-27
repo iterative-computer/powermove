@@ -98,13 +98,8 @@ fn fbm(mut p: [f32; 2]) -> f32 {
     }
     v
 }
-/// Four drifting curtains, visible only through a fixed 3pt dot matrix.
-/// Gold/ember/rose are derived from the theme accent and text, never fixed RGB.
-pub fn aurora(size: [f32; 2], age: f32, accent: u32, text: u32, muted: u32) -> Vec<Dot> {
-    let mut dots = Vec::new();
-    if size.iter().any(|n| !n.is_finite() || *n <= 0.) {
-        return dots;
-    }
+/// The aurora's gold, accent, and rose stops in packed sRGB.
+pub fn aurora_palette(accent: u32, text: u32, muted: u32) -> [u32; 3] {
     let (l, c, h) = super::color::to_oklch(accent);
     let gold = super::mix(
         super::color::oklch_fit((l + 0.16).min(0.92), c, h + 35.),
@@ -112,6 +107,17 @@ pub fn aurora(size: [f32; 2], age: f32, accent: u32, text: u32, muted: u32) -> V
         0.12,
     );
     let rose = super::mix(super::color::oklch_fit(l, c, h - 35.), muted, 0.12);
+    [gold, accent, rose]
+}
+
+/// Four drifting curtains, visible only through a fixed 3pt dot matrix.
+/// Gold/ember/rose are derived from the theme accent and text, never fixed RGB.
+pub fn aurora(size: [f32; 2], age: f32, accent: u32, text: u32, muted: u32) -> Vec<Dot> {
+    let mut dots = Vec::new();
+    if size.iter().any(|n| !n.is_finite() || *n <= 0.) {
+        return dots;
+    }
+    let [gold, accent, rose] = aurora_palette(accent, text, muted);
     for y in (1..size[1].min(4096.) as usize).step_by(3) {
         for x in (1..size[0].min(4096.) as usize).step_by(3) {
             let xn = x as f32 / size[0] * 2.2;

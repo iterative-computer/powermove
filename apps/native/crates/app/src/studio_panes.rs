@@ -15,6 +15,32 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSRect, NSString};
 use pm_engine_service::studio::{Axis, Pane as EnginePane, Preview, ViewCamera};
 use pm_scene3d::navigation::Vec3;
 
+#[derive(Default)]
+pub(crate) struct PaneScenes {
+    owner: Option<(u64, String)>,
+    ready: Option<(u64, Option<PaneScene>)>,
+    pending: bool,
+}
+
+impl PaneScenes {
+    /// Single view never enters the scene worker, including when one is
+    /// still winding down after the user closed the extra panes.
+    pub(crate) fn wants_scene(&mut self, views: usize) -> bool {
+        if views == 1 {
+            self.ready = None;
+            self.owner = None;
+            return false;
+        }
+        true
+    }
+}
+
+#[derive(Clone)]
+struct PaneScene {
+    bounds: [Vec3; 2],
+    flat: pm_kernel::Snapshot,
+}
+
 /// What a pane looks through: the shot, or a flat view along an axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Look {
@@ -54,6 +80,7 @@ pub struct Pane {
     /// What the engine viewer was last given, and for which document.
     applied: Option<(ViewCamera, Preview)>,
     document: Option<String>,
+    menu_label: Option<(Look, Preview)>,
 }
 
 struct TargetIvars {
@@ -122,12 +149,12 @@ fn title(button: &NSPopUpButton, look: Look, tier: Preview) {
     button.sizeToFit();
 }
 
-/// Where a flat view looks and how much it shows: the scene's 3D layers,
-/// with a margin, along the axis.
-fn ortho(axis: Axis, scene: Option<&pm_panel_studio3d::viewport::Scene>) -> ViewCamera {
+const EMPTY_BOUNDS: [Vec3; 2] = [[-1.; 3], [1.; 3]];
+
+fn scene_bounds(scene: &pm_panel_studio3d::viewport::Scene) -> [Vec3; 2] {
     let mut lo: Vec3 = [f64::MAX; 3];
     let mut hi: Vec3 = [f64::MIN; 3];
-    for item in scene.into_iter().flat_map(|s| s.items.iter()) {
+    for item in &scene.items {
         // Skies, terrains and lights don't set the frame.
         if item.role != pm_scene3d::schema::Role::Object {
             continue;
@@ -138,8 +165,14 @@ fn ortho(axis: Axis, scene: Option<&pm_panel_studio3d::viewport::Scene>) -> View
         }
     }
     if lo[0] > hi[0] {
-        (lo, hi) = ([-1.; 3], [1.; 3]);
+        EMPTY_BOUNDS
+    } else {
+        [lo, hi]
     }
+}
+
+/// Where a flat view looks and how much it shows, with a margin.
+fn ortho(axis: Axis, [lo, hi]: [Vec3; 2]) -> ViewCamera {
     let center = std::array::from_fn(|a| (lo[a] + hi[a]) / 2.);
     let size = |a: usize| (hi[a] - lo[a]).abs();
     // Vertical extent on screen: Top and Bottom look down Y, so Z is up.
@@ -154,6 +187,7 @@ fn ortho(axis: Axis, scene: Option<&pm_panel_studio3d::viewport::Scene>) -> View
     ViewCamera::Orthographic { axis, center, span }
 }
 
+
 impl Controller {
     /// Per display tick: panes follow `studioViews`, the shell's tiles, the
     /// document and their own choices.
@@ -162,42 +196,46 @@ impl Controller {
             self.close_studio_panes();
             return;
         };
-        // The scene's 3D layers, read once per revision (this runs per tick).
-        let revision = p.revision();
-        if self.studio_pane_scene.as_ref().map(|(r, _)| *r) != Some(revision) {
-            let scene = pm_panel_studio3d::viewport::scene(&p, 0.)
-                .ok()
-                .filter(|s| !s.items.is_empty())
-                .map(std::sync::Arc::new);
-            self.studio_pane_scene = Some((revision, scene));
-        }
-        let studio = self.studio_pane_scene.as_ref().and_then(|(_, s)| s.clone());
         // View ▸ 3D checkmarks follow the same settings as the bar.
-        {
-            let ui = |k: &str, d: &str| {
-                p.ui_state
-                    .viewer
-                    .get(k)
-                    .and_then(pm_model::Value::as_str)
-                    .unwrap_or(d)
-                    .to_owned()
-            };
-            let current = [
-                ("look", ui("studioLook", "camera")),
-                ("tool", ui("studioTool", "move")),
-                ("axes", ui("studioAxes", "scene")),
-                ("views", ui("studioViews", "1")),
-                ("tier", ui("studioTier", "fast")),
-            ];
+        // Only walk the macOS menu bar when one of the 5 values actually changes
+        // (avoids 120 Hz NSMenu traversal on the main thread during playback).
+        let ui = |key: &str, default: &'static str| {
+            p.ui_state.viewer.get(key).and_then(pm_model::Value::as_str).unwrap_or(default)
+        };
+        let views = ui("studioViews", "1");
+        let current = [
+            ("look", ui("studioLook", "camera")),
+            ("tool", ui("studioTool", "move")),
+            ("axes", ui("studioAxes", "scene")),
+            ("views", views),
+            ("tier", ui("studioTier", "fast")),
+        ];
+        thread_local! {
+            static LAST_VIEW3D: std::cell::RefCell<Option<[String; 5]>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        let values = current.map(|(_, value)| value);
+        let changed = LAST_VIEW3D.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|key| key.each_ref().map(String::as_str) == values) {
+                false
+            } else {
+                *slot = Some(values.map(str::to_owned));
+                true
+            }
+        });
+        if changed {
             pm_shell::check_view3d(&|group, value| {
-                current.iter().any(|(g, v)| *g == group && v == value)
+                current.iter().any(|(g, v)| *g == group && *v == value)
             });
         }
-        let count = match p.ui_state.viewer.get("studioViews").and_then(pm_model::Value::as_str) {
-            Some("2") if studio.is_some() => 2usize,
-            Some("4") if studio.is_some() => 4,
+        let requested = match views {
+            "2" => 2,
+            "4" => 4,
             _ => 1,
         };
+        let studio = self.cached_studio_scene(&p, requested, cx);
+        let count = if studio.is_some() { requested } else { 1 };
         {
             let host = self.host.borrow();
             if host.viewer_split.get() as usize != count {
@@ -208,10 +246,10 @@ impl Controller {
                 }
             }
         }
-        if count == 1 {
-            self.close_studio_panes();
+        let Some(studio) = studio else {
+            self.hide_studio_panes();
             return;
-        }
+        };
         // Grow or shrink to count - 1 extra panes.
         while self.studio_panes.len() > count - 1 {
             if let Some(pane) = self.studio_panes.pop() {
@@ -251,11 +289,11 @@ impl Controller {
                 press: None,
                 applied: None,
                 document: None,
+                menu_label: None,
             });
         }
         let tiles = self.host.borrow().viewer_tiles.borrow().clone();
         let document = format!("{}:{:?}", p.snapshot.doc_id, p.snapshot.render_comp());
-        let scene = studio.as_deref();
         let dims = self.dimensions;
         let inset = self.host.borrow().tokens.metrics.inset;
         for (i, pane) in self.studio_panes.iter_mut().enumerate() {
@@ -294,7 +332,7 @@ impl Controller {
                     snapshot: if pane.look == Look::Shot {
                         p.snapshot.clone()
                     } else {
-                        flat_view_snapshot(&p)
+                        studio.flat.clone()
                     },
                     composition: p.snapshot.render_comp(),
                     media: self.media.clone(),
@@ -319,7 +357,7 @@ impl Controller {
             }
             let camera = match pane.look {
                 Look::Shot => ViewCamera::Active,
-                Look::Axis(axis) => framed(ortho(axis, scene), axis, pane.pan, pane.zoom),
+                Look::Axis(axis) => framed(ortho(axis, studio.bounds), axis, pane.pan, pane.zoom),
             };
             if pane.applied.as_ref() != Some(&(camera.clone(), pane.tier)) {
                 if let Some(viewer) = &*pane.popout.viewer.borrow() {
@@ -330,22 +368,78 @@ impl Controller {
                 }
                 pane.applied = Some((camera, pane.tier));
             }
-            if let Some(button) = &pane.popout.menu {
-                title(button, pane.look, pane.tier);
+            if pane.menu_label != Some((pane.look, pane.tier)) {
+                if let Some(button) = &pane.popout.menu {
+                    title(button, pane.look, pane.tier);
+                }
+                pane.menu_label = Some((pane.look, pane.tier));
             }
         }
     }
-    /// The panes see each new publication (without the main viewer's tier).
+    fn cached_studio_scene(
+        &mut self,
+        published: &std::sync::Arc<pm_kernel::Published>,
+        requested: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<PaneScene> {
+        let cache = &mut self.studio_pane_scenes;
+        if !cache.wants_scene(requested) {
+            return None;
+        }
+        let owner = (published.snapshot.doc_id, published.snapshot.render_comp());
+        if cache.owner.as_ref() != Some(&owner) {
+            cache.ready = None;
+            cache.owner = Some(owner.clone());
+        }
+        let edition = published.snapshot.document.edition();
+        if !cache.pending && cache.ready.as_ref().is_none_or(|(key, _)| *key != edition) {
+            cache.pending = true;
+            let published = published.clone();
+            cx.spawn(async move |this, cx| {
+                let scene = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let scene = pm_panel_studio3d::viewport::scene(&published, 0.)
+                            .ok()
+                            .filter(|scene| !scene.items.is_empty())?;
+                        Some(PaneScene {
+                            bounds: scene_bounds(&scene),
+                            flat: flat_view_snapshot(&published),
+                        })
+                    })
+                    .await;
+                let _ = this.update(cx, |v, cx| {
+                    let cache = &mut v.studio_pane_scenes;
+                    cache.pending = false;
+                    if cache.owner.as_ref() == Some(&owner) {
+                        if let Some(result) = &scene {
+                            for pane in v.studio_panes.iter().filter(|pane| pane.look != Look::Shot)
+                            {
+                                if let Some(viewer) = &*pane.popout.viewer.borrow() {
+                                    let _ = viewer.snapshot(result.flat.clone());
+                                }
+                            }
+                        }
+                        cache.ready = Some((edition, scene));
+                    }
+                    v.sync_studio_panes(cx);
+                });
+            })
+            .detach();
+        }
+        cache.ready.as_ref().and_then(|(_, scene)| scene.clone())
+    }
+
+    /// Shot panes take the full document immediately. Flat panes take their
+    /// filtered snapshot with the matching bounds from the scene worker.
     pub(crate) fn publish_studio_panes(&self, p: &pm_kernel::Published) {
-        let mut flat = None;
-        for pane in &self.studio_panes {
+        for pane in self
+            .studio_panes
+            .iter()
+            .filter(|pane| pane.look == Look::Shot)
+        {
             if let Some(viewer) = &*pane.popout.viewer.borrow() {
-                let snapshot = if pane.look == Look::Shot {
-                    p.snapshot.clone()
-                } else {
-                    flat.get_or_insert_with(|| flat_view_snapshot(p)).clone()
-                };
-                let _ = viewer.snapshot(snapshot);
+                let _ = viewer.snapshot(p.snapshot.clone());
             }
         }
     }
@@ -388,14 +482,19 @@ impl Controller {
     ) {
         use crate::viewer2::PaneInput;
         let aspect = (self.dimensions[0] / self.dimensions[1]).max(1e-3);
-        let span = |pane: &Pane, scene: Option<&pm_panel_studio3d::viewport::Scene>| match pane.look {
-            Look::Axis(axis) => match ortho(axis, scene) {
+        let span = |pane: &Pane, bounds| match pane.look {
+            Look::Axis(axis) => match ortho(axis, bounds) {
                 ViewCamera::Orthographic { span, .. } => span * pane.zoom,
                 _ => 1.,
             },
             Look::Shot => 1.,
         };
-        let scene = self.studio_pane_scene.as_ref().and_then(|(_, s)| s.clone());
+        let bounds = self
+            .studio_pane_scenes
+            .ready
+            .as_ref()
+            .and_then(|(_, s)| s.as_ref())
+            .map_or(EMPTY_BOUNDS, |s| s.bounds);
         let Some(pane) = self.studio_panes.get_mut(index) else {
             return;
         };
@@ -403,7 +502,7 @@ impl Controller {
             PaneInput::Down(uv) => pane.press = Some((uv, uv, false)),
             PaneInput::Drag(uv) => {
                 let flat = pane.look != Look::Shot;
-                let s = span(pane, scene.as_deref());
+                let s = span(pane, bounds);
                 if let Some((_, last, moved)) = pane.press.as_mut() {
                     let (du, dv) = (uv[0] - last[0], uv[1] - last[1]);
                     if flat {
@@ -453,6 +552,12 @@ impl Controller {
         self.sync_studio_panes(cx);
     }
     pub(crate) fn close_studio_panes(&mut self) {
+        self.studio_pane_scenes.ready = None;
+        self.studio_pane_scenes.owner = None;
+        self.hide_studio_panes();
+    }
+
+    fn hide_studio_panes(&mut self) {
         for pane in self.studio_panes.drain(..) {
             pane.popout.shutdown();
         }
@@ -535,26 +640,25 @@ pub(crate) fn flat_view_snapshot(p: &pm_kernel::Published) -> pm_kernel::documen
         return snapshot;
     };
     // A layer's group (or parent) chain, to find what sits inside what.
-    let up = |id: &str| {
-        layers
-            .iter()
-            .find(|l| l["id"] == id)
-            .and_then(|l| l["group"].as_str())
-            .map(str::to_owned)
-    };
+    let by_id: std::collections::HashMap<_, _> = layers
+        .iter()
+        .rev()
+        .filter_map(|layer| Some((layer["id"].as_str()?, layer)))
+        .collect();
+    let up = |id: &str| by_id.get(id).and_then(|layer| layer["group"].as_str());
     let is_3d = |l: &serde_json::Value| {
         pm_scene3d::schema::role(l).is_some() || pm_scene3d::extrusion::enabled(l)
     };
     // Groups holding 3D layers stay on, so those layers do.
-    let mut holds_3d: std::collections::HashSet<String> = Default::default();
+    let mut holds_3d: std::collections::HashSet<&str> = Default::default();
     for l in layers.iter().filter(|l| is_3d(l)) {
-        let mut at = l["group"].as_str().map(str::to_owned);
+        let mut at = l["group"].as_str();
         let mut guard = 0;
         while let Some(g) = at {
-            if !holds_3d.insert(g.clone()) || guard > 64 {
+            if !holds_3d.insert(g) || guard > 64 {
                 break;
             }
-            at = up(&g);
+            at = up(g);
             guard += 1;
         }
     }
@@ -572,14 +676,14 @@ pub(crate) fn flat_view_snapshot(p: &pm_kernel::Published) -> pm_kernel::documen
             continue;
         }
         let mut inside_hidden = false;
-        let mut at = l["group"].as_str().map(str::to_owned);
+        let mut at = l["group"].as_str();
         let mut guard = 0;
         while let Some(g) = at {
-            if layers.iter().any(|x| x["id"] == g.as_str() && hidden(x)) || guard > 64 {
+            if by_id.get(g).is_some_and(|layer| hidden(layer)) || guard > 64 {
                 inside_hidden = true;
                 break;
             }
-            at = up(&g);
+            at = up(g);
             guard += 1;
         }
         if !inside_hidden {
@@ -622,5 +726,23 @@ fn framed(camera: ViewCamera, axis: Axis, pan: [f64; 2], zoom: f64) -> ViewCamer
         axis,
         center,
         span: (span * zoom).clamp(1e-3, 1e5),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_view_skips_scene_work_even_with_a_pending_read() {
+        let mut scenes = PaneScenes {
+            owner: Some((42, String::new())),
+            ready: Some((7, None)),
+            pending: true,
+        };
+        assert!(!scenes.wants_scene(1));
+        assert!(scenes.ready.is_none());
+        assert!(scenes.owner.is_none());
+        assert!(scenes.pending);
     }
 }

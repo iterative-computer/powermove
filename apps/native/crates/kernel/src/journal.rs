@@ -404,15 +404,34 @@ impl Durability {
     /// must not submit writes while waiting. Errors never certify durability.
     pub fn barrier(&self) -> io::Result<()> {
         self.wait_idle();
-        let targets = self.shared.targets.lock().expect("targets").clone();
+        Self::sync_targets(&self.shared)
+    }
+
+    /// The open worker waits instead of suspending the single writer. A
+    /// queue marker orders this wait after the checkpoints already submitted.
+    pub(crate) fn barrier_job(&self) -> impl FnOnce() -> io::Result<()> + Send + 'static {
+        let jobs = self.jobs.clone();
+        let shared = self.shared.clone();
+        move || {
+            if let Some(jobs) = jobs {
+                let (tx, rx) = mpsc::channel();
+                jobs.send(Job::Barrier(tx)).map_err(io::Error::other)?;
+                rx.recv().map_err(io::Error::other)?;
+            }
+            Self::sync_targets(&shared)
+        }
+    }
+
+    fn sync_targets(shared: &Shared) -> io::Result<()> {
+        let targets = shared.targets.lock().expect("targets").clone();
         for target in targets {
             target.sync()?;
         }
-        let errors = self.take_errors();
+        let mut errors = shared.errors.lock().expect("errors");
         if errors.is_empty() {
             Ok(())
         } else {
-            let messages: Vec<String> = errors.into_iter().map(|(_, message)| message).collect();
+            let messages: Vec<String> = errors.drain(..).map(|(_, message)| message).collect();
             Err(io::Error::other(messages.join("; ")))
         }
     }

@@ -1459,14 +1459,19 @@ impl McpSession {
                 let tx = session.transaction.as_mut().unwrap();
                 tx.revision = ack.revision;
                 tx.label = label.clone();
-                if let Some(app) = host.coedit_host() {
+                let changed = ack.revision != revision;
+                if changed
+                    && let (Some(app), Some(document)) = (host.coedit_host(), session.document)
+                {
                     app.record_turn(
                         &id,
+                        document,
+                        session.owner.as_deref(),
                         pm_kernel::Caller::realm(self.writer, 1, Origin::Mcp).writer,
                         &label,
                     );
                 }
-                tx.changed |= ack.revision != revision;
+                tx.changed |= changed;
                 // Folded foreign gestures retain their own normal undo entry.
                 tx.interleaved |= ack.folded.is_some();
                 observe_foreign(session, &host, &id);
@@ -1705,13 +1710,6 @@ impl McpSession {
         if self.agent_token.is_some()
             && let Some(id) = project.as_deref()
         {
-            if let Some(app) = host.coedit_host() {
-                app.record_turn(
-                    id,
-                    pm_kernel::Caller::realm(self.writer, 1, Origin::Mcp).writer,
-                    "Edit project",
-                );
-            }
             host.agent_turn(id, self.writer, true)?;
         }
         let steer_epoch = project.as_deref().map_or(0, crate::coedit::steer_epoch);
@@ -1790,6 +1788,15 @@ impl McpSession {
                 }
                 if tx.changed {
                     rollback(&mut session, &mut host, &id, writer)?;
+                    if !session.committed
+                        && let (Some(app), Some(document)) = (host.coedit_host(), session.document)
+                    {
+                        app.forget_turn_writer(
+                            &id,
+                            document,
+                            pm_kernel::Caller::realm(writer, 1, Origin::Mcp).writer,
+                        );
+                    }
                     *rolled_back = true;
                 }
                 Ok(json!({"changed":session.committed,"historyId":null}))
@@ -2010,13 +2017,6 @@ fn attach(
     active.owned_scopes.clear();
     active.steer_epoch = crate::coedit::steer_epoch(id);
     if agent {
-        if let Some(app) = host.coedit_host() {
-            app.record_turn(
-                id,
-                pm_kernel::Caller::realm(writer, 1, Origin::Mcp).writer,
-                "Edit project",
-            );
-        }
         host.agent_turn(id, writer, true)?;
     }
     active.project = Some(id.to_owned());

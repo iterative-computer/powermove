@@ -1,6 +1,12 @@
 import { createRoot } from "../../src";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";
-import { COMMAND, EasingModel, librarySave, type EasingState } from "./model";
+import {
+  COMMAND,
+  EasingModel,
+  libraryAddGroup,
+  librarySave,
+  type EasingState,
+} from "./model";
 import { EasingPanel } from "./panel";
 
 export async function mount(env: BuiltinEnv): Promise<Mounted> {
@@ -11,9 +17,19 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
       action.type === "save"
         ? command(
             "panel.timeline",
-            librarySave(model.snapshot(), action.name, action.curve),
+            librarySave(
+              model.snapshot(),
+              action.name,
+              action.curve,
+              action.group,
+            ),
           )
-        : command(COMMAND, action),
+        : action.type === "addGroup"
+          ? command(
+              "panel.timeline",
+              libraryAddGroup(model.snapshot(), action.id, action.name),
+            )
+          : command(COMMAND, action),
     report,
   );
   const root = createRoot(transport, report, rootOptions);
@@ -32,11 +48,10 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
         bindings={fields([
           "curve",
           "outX",
-          "outY",
           "inX",
-          "inY",
           "interpolation",
           "name",
+          "groupName",
         ])}
       />,
     );

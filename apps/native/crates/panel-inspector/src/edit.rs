@@ -204,9 +204,9 @@ impl Inspector {
                     }
                 }
                 Binding::Content { field, .. } => {
-                    let src = self.layer(primary)?;
-                    let dst = self.layer(target)?;
-                    if text(&src, "type") == text(&dst, "type")
+                    let src = self.layer_node(primary)?;
+                    let dst = self.layer_node(target)?;
+                    if crate::view::node_text(src, "type") == crate::view::node_text(dst, "type")
                         || (pm_eval::address::can_animate_content(
                             self.layer_node(primary)?,
                             field.as_bytes(),
@@ -237,9 +237,11 @@ impl Inspector {
                 }
             }
             Binding::Layer { layer, field } => {
-                let raw = self.layer(layer)?;
-                let value = raw.get(storage_field(field)).cloned().unwrap_or(
-                    if field == "continuousRaster" {
+                let value = self
+                    .layer_node(layer)?
+                    .get(storage_field(field))
+                    .map(pm_model::Node::to_value)
+                    .unwrap_or(if field == "continuousRaster" {
                         Value::Bool(false)
                     } else {
                         Value::Null
@@ -364,11 +366,17 @@ impl Inspector {
             if let Binding::Property(id) = binding
                 && matches!(id.path.as_str(), "scale.x" | "scale.y" | "scale.z")
             {
-                let layer = self.layer(&id.layer)?;
-                if layer.get("scaleLinked").and_then(Value::as_bool) != Some(true) {
+                let layer = self.layer_node(&id.layer)?;
+                if !matches!(
+                    layer.get("scaleLinked").map(pm_model::Node::kind),
+                    Some(pm_model::NodeKind::Bool(true))
+                ) {
                     continue;
                 }
-                let three_d = layer.get("threeD").and_then(Value::as_bool) == Some(true);
+                let three_d = matches!(
+                    layer.get("threeD").map(pm_model::Node::kind),
+                    Some(pm_model::NodeKind::Bool(true))
+                );
                 let own = self
                     .read_binding(binding, time)?
                     .as_f64()
@@ -545,6 +553,16 @@ impl Inspector {
                     "height" => patch.height = Some(numeric(&value)?),
                     "duration" => patch.duration = Some(numeric(&value)?),
                     "fps" => patch.fps = Some(numeric(&value)?),
+                    "bg" => {
+                        let s = value.as_str().ok_or(InspectorError::InvalidInput)?;
+                        if s.len() != 7
+                            || !s.starts_with('#')
+                            || !s.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+                        {
+                            return Err(InspectorError::InvalidInput);
+                        }
+                        patch.background = Some(s.to_owned());
+                    }
                     "backgroundFill" => patch.background_fill = Some(value),
                     _ => return Err(InspectorError::InvalidInput),
                 }
@@ -634,8 +652,9 @@ impl Inspector {
                 PropertyAction::Diamond if remove => {
                     if let Some(k) = self.key_at(&id, time)? {
                         commands.push(
-                            KeyframeCommand::Delete {
+                            KeyframeCommand::DeleteAt {
                                 key_ids: vec![text(&k, "i").into()],
+                                time,
                             }
                             .into(),
                         );

@@ -167,9 +167,9 @@ impl EffectUiAction {
 }
 impl Inspector {
     pub fn effect_ids(&self, layer: &str) -> Result<Vec<String>, InspectorError> {
-        Ok(array(self.layer(layer)?.get("fx"))
+        Ok(crate::view::node_array(self.layer_node(layer)?.get("fx"))
             .iter()
-            .map(|f| text(f, "id").to_owned())
+            .map(|f| crate::view::node_text(f, "id").to_owned())
             .collect())
     }
     pub fn select_effect(
@@ -220,10 +220,10 @@ impl Inspector {
             .unwrap_or(effect.get("open").and_then(Value::as_bool) != Some(false)))
     }
     pub(crate) fn effect(&self, layer: &str, id: &str) -> Result<Value, InspectorError> {
-        array(self.layer(layer)?.get("fx"))
+        crate::view::node_array(self.layer_node(layer)?.get("fx"))
             .iter()
-            .find(|f| text(f, "id") == id)
-            .cloned()
+            .find(|f| crate::view::node_text(f, "id") == id)
+            .map(pm_model::Node::to_value)
             .ok_or_else(|| InspectorError::MissingEffect(id.into()))
     }
     pub fn toggle_effect(

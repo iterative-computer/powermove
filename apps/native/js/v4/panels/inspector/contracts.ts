@@ -46,6 +46,22 @@ export interface NumberAxis extends Field<number> {
   min?: number;
   max?: number;
 }
+export interface ModelPartItem {
+  v: string;
+  label: string;
+  parent: string | null;
+  depth: number;
+  children: number;
+  visible: boolean;
+  edited: boolean;
+}
+export interface PartsSectionData {
+  layer: string;
+  active: string | null;
+  activeName: string | null;
+  activeEdited: boolean;
+  items: ModelPartItem[];
+}
 export type Control =
   | { kind: "number" | "point"; axes: NumberAxis[] }
   | ({ kind: "text"; multiline?: boolean } & Field<string>)
@@ -123,6 +139,7 @@ export interface Section {
   finishes?: Finish[];
   /** The imported-model part a viewer double-click picked. */
   focused?: boolean;
+  parts?: PartsSectionData;
 }
 export interface InspectorSnapshot {
   target: Target;

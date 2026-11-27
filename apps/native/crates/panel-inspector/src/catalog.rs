@@ -1,7 +1,7 @@
 //! Semantic field availability from the shipped panel. No labels, ordering
 //! contracts for native layout, widget selection, or visual defaults are added.
 use crate::input::NumericSpec;
-use crate::view::{array, text};
+use crate::view::{node_array, node_text, text};
 use crate::{Binding, Inspector, InspectorError, PropertyId};
 #[derive(Clone, Debug, PartialEq)]
 pub enum FieldType {
@@ -99,14 +99,11 @@ impl Inspector {
     /// row, without changing the user's selection to inspect it.
     pub fn fields_for_layer(&self, id: &str) -> Result<Vec<FieldDescriptor>, InspectorError> {
         let mut out = Vec::new();
-        let layer = self.layer(id)?;
-        let kind = text(&layer, "type");
+        let layer = self.layer_node(id)?;
+        let kind = node_text(layer, "type");
         let d = layer.get("d");
         let mut content = |field: &str, kind: FieldType| {
-            let animatable = pm_eval::address::can_animate_content(
-                self.layer_node(id).expect("present"),
-                field.as_bytes(),
-            );
+            let animatable = pm_eval::address::can_animate_content(layer, field.as_bytes());
             out.push(FieldDescriptor {
                 binding: Binding::Content {
                     layer: id.into(),
@@ -142,7 +139,9 @@ impl Inspector {
                     content(field, kind);
                 }
             }
-            "solid" | "shape" | "null" if d.is_none_or(|d| array(d.get("paths")).is_empty()) => {
+            "solid" | "shape" | "null"
+                if d.is_none_or(|d| node_array(d.get("paths")).is_empty()) =>
+            {
                 content("color", FieldType::Color);
                 if kind == "shape" {
                     content("shape", FieldType::Choice);
@@ -150,12 +149,11 @@ impl Inspector {
                 content("w", number(1.0, Some(1.0), None));
                 content("h", number(1.0, Some(1.0), None));
                 if kind == "shape" {
-                    if d.is_some_and(|d| text(d, "shape") == "rect") {
+                    if d.is_some_and(|d| node_text(d, "shape") == "rect") {
                         content("independentCorners", FieldType::Boolean);
                         content("smoothing", number(1.0, Some(0.0), Some(100.0)));
                         if d.and_then(|d| d.get("independentCorners"))
-                            .and_then(|v| v.as_bool())
-                            == Some(true)
+                            .is_some_and(|v| matches!(v.kind(), pm_model::NodeKind::Bool(true)))
                         {
                             for key in ["radiusTL", "radiusTR", "radiusBL", "radiusBR"] {
                                 content(key, number(1.0, Some(0.0), None));
@@ -166,7 +164,7 @@ impl Inspector {
                     }
                     content("stroke", number(0.5, Some(0.0), None));
                     content("strokeColor", FieldType::Color);
-                    if d.is_some_and(|d| ["polygon", "star"].contains(&text(d, "shape"))) {
+                    if d.is_some_and(|d| ["polygon", "star"].contains(&node_text(d, "shape"))) {
                         content("points", number(1.0, Some(3.0), Some(24.0)));
                     }
                 }
@@ -180,8 +178,7 @@ impl Inspector {
                     content("trim", number(0.05, None, None));
                     content("speed", number(0.05, Some(0.05), None));
                     if d.and_then(|d| d.get("embeddedAudio"))
-                        .and_then(|v| v.as_bool())
-                        == Some(true)
+                        .is_some_and(|v| matches!(v.kind(), pm_model::NodeKind::Bool(true)))
                     {
                         content("audioMuted", FieldType::Boolean);
                         content("audioGain", number(0.05, Some(0.0), Some(4.0)));
@@ -200,13 +197,13 @@ impl Inspector {
                         "fadeIn",
                         0.05,
                         Some(0.0),
-                        layer.get("dur").and_then(|v| v.as_f64()),
+                        layer.get("dur").and_then(|v| v.to_value().as_f64()),
                     ),
                     (
                         "fadeOut",
                         0.05,
                         Some(0.0),
-                        layer.get("dur").and_then(|v| v.as_f64()),
+                        layer.get("dur").and_then(|v| v.to_value().as_f64()),
                     ),
                 ] {
                     content(field, number(step, min, max));
@@ -215,7 +212,7 @@ impl Inspector {
             "shader" | "extension" => {
                 content("w", number(1.0, Some(1.0), None));
                 content("h", number(1.0, Some(1.0), None));
-                let definition = d.map(|d| text(d, "definition")).unwrap_or("");
+                let definition = d.map(|d| node_text(d, "definition")).unwrap_or("");
                 for param in self.layer_types.get(definition).into_iter().flatten() {
                     out.push(FieldDescriptor {
                         binding: Binding::Property(PropertyId::new(id, format!("x.{}", param.key))),
@@ -225,16 +222,10 @@ impl Inspector {
                 }
             }
             "precomp" => {
-                let comps = self
-                    .published
-                    .snapshot
-                    .root()
-                    .and_then(|r| r.get("comps"))
-                    .map(|n| n.to_value())
-                    .unwrap_or(crate::Value::Null);
-                if crate::content::precomp_carries_audio(
-                    d.map(|d| text(d, "comp")).unwrap_or(""),
-                    &comps,
+                let comps = self.published.snapshot.root().and_then(|r| r.get("comps"));
+                if crate::content::precomp_node_carries_audio(
+                    d.map(|d| node_text(d, "comp")).unwrap_or(""),
+                    comps,
                 ) {
                     content("audioMuted", FieldType::Boolean);
                     content("audioGain", number(0.05, Some(0.0), Some(4.0)));
@@ -248,8 +239,8 @@ impl Inspector {
         }
         // Trim Paths on each pen path's stroke (v1's Structured section):
         // Start and End in percent of the path, Offset in degrees.
-        for path in array(d.and_then(|d| d.get("paths"))) {
-            let pid = text(path, "id");
+        for path in node_array(d.and_then(|d| d.get("paths"))) {
+            let pid = node_text(path, "id");
             if pid.is_empty() {
                 continue;
             }
@@ -258,6 +249,9 @@ impl Inspector {
                 ("trimEnd", number(1.0, Some(0.0), Some(100.0))),
                 ("trimOffset", number(1.0, None, None)),
             ] {
+                if !pm_eval::node::is_property(path.get("p").and_then(|p| p.get(param))) {
+                    continue;
+                }
                 out.push(FieldDescriptor {
                     binding: Binding::Property(PropertyId::new(id, format!("g.{pid}.{param}"))),
                     kind,
@@ -266,8 +260,10 @@ impl Inspector {
             }
         }
         if kind != "audio" {
-            if let Some(properties) = layer.get("p").and_then(|v| v.as_object()) {
-                for key in properties.keys() {
+            if let Some(pm_model::NodeKind::Object(properties)) =
+                layer.get("p").map(pm_model::Node::kind)
+            {
+                for (key, _) in properties.iter() {
                     out.push(FieldDescriptor {
                         binding: Binding::Property(PropertyId::new(id, key.to_string_lossy())),
                         kind: FieldType::Opaque,

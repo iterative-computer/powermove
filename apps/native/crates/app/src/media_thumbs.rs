@@ -221,6 +221,7 @@ pub struct Thumbs {
     running: usize,
     /// A republish is due for thumbnails made since the last one.
     flush_due: bool,
+    inputs: Option<(u64, u64, u64)>,
     /// Bumped when a project opens: thumbnails finishing for the last one
     /// are dropped (asset ids are per project).
     generation: u64,
@@ -673,12 +674,19 @@ impl crate::session::Controller {
         let Some(published) = self.published.clone() else {
             return;
         };
-        let Some(pm_model::doc::NodeKind::Object(assets)) = published
-            .snapshot
-            .root()
-            .and_then(|r| r.get("assets"))
-            .map(|a| a.kind())
-        else {
+        let Some(assets) = published.snapshot.root().and_then(|r| r.get("assets")) else {
+            return;
+        };
+        let stamp = (
+            published.snapshot.doc_id,
+            assets.rev(),
+            self.media_refresh.observation_epoch(),
+        );
+        if self.thumbs.inputs == Some(stamp) {
+            return;
+        }
+        self.thumbs.inputs = Some(stamp);
+        let pm_model::doc::NodeKind::Object(assets) = assets.kind() else {
             return;
         };
         let items: Vec<Item> = assets

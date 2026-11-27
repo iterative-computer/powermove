@@ -34,6 +34,10 @@ pub struct Scope<'a, 'd> {
     /// `PM.proj`: the open composition (the same as `comp` unless a nested
     /// composition is being evaluated).
     pub project: &'a Comp<'d>,
+    /// Transient editor camera for this composition.
+    pub view_camera: Option<crate::space3d::Camera3d>,
+    pub(crate) active_camera: Option<(u64, Option<crate::space3d::Camera3d>)>,
+    pub(crate) active_camera_dof: Option<(u64, Option<(f64, f64)>)>,
     /// Local matrices and group ancestry computed in this scope, when
     /// memoized ([`Scope::memoize_transforms`]).
     pub(crate) local_memo: Option<LocalMemo<'d>>,
@@ -44,12 +48,16 @@ pub struct Scope<'a, 'd> {
 /// names one node and its content cannot change while the memo exists.
 #[derive(Default)]
 pub(crate) struct LocalMemo<'d> {
+    index: Option<Arc<LayerIndex>>,
     local: std::collections::HashMap<(usize, u64), crate::transform::Mat2d, BuildAddressHasher>,
     ancestors: std::collections::HashMap<usize, Vec<&'d Node>, BuildAddressHasher>,
-    /// `local3D` and `parent3D` (its own parent lookup), by node and time:
+    pub(crate) is_3d: std::collections::HashMap<usize, bool, BuildAddressHasher>,
+    /// `local3D`, `world3D` and `parent3D` (its own parent lookup), by node and time:
     /// depth ordering and each plane matrix walk the same group and parent
     /// chains.
     pub(crate) local3d:
+        std::collections::HashMap<(usize, u64), crate::space3d::Mat4, BuildAddressHasher>,
+    pub(crate) world3d:
         std::collections::HashMap<(usize, u64), crate::space3d::Mat4, BuildAddressHasher>,
     pub(crate) parent3d:
         std::collections::HashMap<(usize, u64), crate::space3d::Mat4, BuildAddressHasher>,
@@ -112,6 +120,9 @@ impl<'a, 'd> Scope<'a, 'd> {
             ev,
             comp,
             project,
+            view_camera: None,
+            active_camera: None,
+            active_camera_dof: None,
             local_memo: None,
         }
     }
@@ -122,6 +133,9 @@ impl<'a, 'd> Scope<'a, 'd> {
             ev,
             comp,
             project: comp,
+            view_camera: None,
+            active_camera: None,
+            active_camera_dof: None,
             local_memo: None,
         }
     }
@@ -145,7 +159,13 @@ impl<'a, 'd> Scope<'a, 'd> {
     }
 
     pub(crate) fn index(&mut self) -> Arc<LayerIndex> {
-        self.ev.layer_index(self.comp)
+        if let Some(memo) = &mut self.local_memo {
+            memo.index
+                .get_or_insert_with(|| self.ev.layer_index(self.comp))
+                .clone()
+        } else {
+            self.ev.layer_index(self.comp)
+        }
     }
 
     /// The composition's layer index (ids to positions, duplicated ids),

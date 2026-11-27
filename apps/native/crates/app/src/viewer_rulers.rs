@@ -27,6 +27,7 @@ pub struct Rulers {
     pub guides_locked: bool,
     /// The guide the pointer carries (a new one came out of a ruler).
     pub dragging: Option<usize>,
+    pub(super) original: Option<RulerGuide>,
     /// The pointer over the viewer, for the rulers' marks.
     pub pointer: Option<Point<Pixels>>,
 }
@@ -110,6 +111,7 @@ impl GizmoSurface {
             && let Some(i) = self.guide_at(p, frame)
         {
             self.rulers.dragging = Some(i);
+            self.rulers.original = Some(self.rulers.guides[i]);
             return true;
         }
         false
@@ -138,10 +140,20 @@ impl GizmoSurface {
         let Some(i) = self.rulers.dragging.take() else {
             return false;
         };
+        self.rulers.original = None;
         if self.in_band(p).is_some() || !self.bounds.contains(&p) {
             self.rulers.guides.remove(i);
         }
         true
+    }
+    pub(super) fn rulers_cancel(&mut self) {
+        if let Some(i) = self.rulers.dragging.take() {
+            if let Some(original) = self.rulers.original.take() {
+                self.rulers.guides[i] = original;
+            } else {
+                self.rulers.guides.remove(i);
+            }
+        }
     }
     /// The cursor over a ruler or a guide.
     pub(super) fn rulers_cursor(&self, p: Point<Pixels>, frame: ViewFrame) -> Option<CursorStyle> {

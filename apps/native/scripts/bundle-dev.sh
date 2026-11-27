@@ -21,6 +21,7 @@ cp "$binary" "$app/Contents/MacOS/powermove-native"
 cp "$here/little-victory-deep.wav" "$app/Contents/Resources/"
 # The About window's notices, and the licence text of the icons it names.
 cp "$here/Credits.rtf" "$app/Contents/Resources/"
+cp "$here/icon.icns" "$here/document.icns" "$app/Contents/Resources/"
 cp "$here/Distortion Waves License.txt" "$app/Contents/Resources/"
 cp "$here/../crates/shell/icons/pierre/LICENSE" "$app/Contents/Resources/Pierre Icons License.txt"
 # The app starts these by path; without the shader compiler no effect draws.
@@ -45,19 +46,20 @@ if [ -n "${PM_TRANSCRIBE_RUNTIME:-}" ] && [ -f "$PM_TRANSCRIBE_RUNTIME/contract.
 else
   echo "warning: PM_TRANSCRIBE_RUNTIME is unset; Generate Captions will say its runtime is missing." >&2
 fi
-# Agent runtimes (docs/native/AGENTS.md, launch order step 4): a release bundles
-# the pinned Codex and Claude under Resources/<name>/bin/<name>. A dev bundle uses
-# the ones installed on this Mac, cloned, not linked (launch refuses symlinks).
-for name in codex claude; do
-  if exe=$(command -v "$name" 2>/dev/null); then
-    mkdir -p "$app/Contents/Resources/$name/bin"
-    cp -cL "$exe" "$app/Contents/Resources/$name/bin/$name" 2>/dev/null \
-      || cp -L "$exe" "$app/Contents/Resources/$name/bin/$name"
-  else
-    echo "warning: no $name on PATH; the Agent panel will say its runtime is missing." >&2
-    echo "  install it, or set $(echo "$name" | tr a-z A-Z)_BINARY to an executable (release pins: Codex 0.169.0, Claude 2.1.280)" >&2
-  fi
-done
+# Agent runtimes download on demand on first sign-in (`pm-agents::account`).
+# Set PM_BUNDLE_AGENT_RUNTIMES=1 to pre-bundle local `codex`/`claude` binaries
+# into a dev app for offline testing.
+if [ "${PM_BUNDLE_AGENT_RUNTIMES:-0}" = "1" ]; then
+  for name in codex claude; do
+    if exe=$(command -v "$name" 2>/dev/null); then
+      mkdir -p "$app/Contents/Resources/$name/bin"
+      cp -cL "$exe" "$app/Contents/Resources/$name/bin/$name" 2>/dev/null \
+        || cp -L "$exe" "$app/Contents/Resources/$name/bin/$name"
+    else
+      echo "warning: no $name on PATH; set $(echo "$name" | tr a-z A-Z)_BINARY or sign in to download on demand." >&2
+    fi
+  done
+fi
 # Review launches can hand the app environment, which LaunchServices does not
 # pass from the launcher: PM_DEV_BUNDLE_ENV="PM_NATIVE_APPEARANCE=light ..."
 # becomes the bundle's LSEnvironment. Unset, the bundle has none.
@@ -71,7 +73,7 @@ if otool -L "$binary" | grep -Fq libOpenImageDenoise; then
   : "${OIDN_DIR:?Set OIDN_DIR to a Metal-enabled OIDN install with CPU fallback}"
   python3 "$(dirname "$0")/bundle-oidn.py" "$app" --oidn-dir "$OIDN_DIR"
 fi
-xcrun actool "$here/Assets.xcassets" --compile "$app/Contents/Resources" \
+xcrun actool "$here/Assets.xcassets" "$here/Powermove.icon" --compile "$app/Contents/Resources" \
   --platform macosx --minimum-deployment-target 14.0 --accent-color AccentColor \
-  --output-partial-info-plist "$out/assets-info.plist" >/dev/null
+  --app-icon Powermove --output-partial-info-plist "$out/assets-info.plist" >/dev/null
 echo "$app"

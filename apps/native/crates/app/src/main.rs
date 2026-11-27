@@ -45,10 +45,12 @@ mod extension_authoring;
 mod extension_template;
 mod extension_transfer;
 mod extension_vars;
+mod ext_capabilities;
 mod extensions;
 mod figma_paste;
 mod file_coordination;
 mod first_run;
+mod fork_auto_rebase;
 mod sign_in;
 mod first_run_stage;
 // Development builds only (it draws with `pm_shell::capture_app`); the

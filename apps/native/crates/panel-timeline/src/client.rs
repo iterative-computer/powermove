@@ -1,5 +1,9 @@
 use crate::{Drag, DragKind, DragSample, HostEffect, ModelError, Plan, TimelineModel};
 use pm_kernel::{Ack, Call, Caller, GestureCall, KernelHandle, Reply, Request, WriteBody};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -48,13 +52,91 @@ pub struct LayerPreviewFrame {
     pub gain_commands: Option<std::sync::Arc<[pm_kernel::Command]>>,
     pub trimmed: bool,
 }
+/// Absolute timeline positions for moved keys, and `None` for the keys
+/// they replace on the destination frame. Indexed by layer, then key id.
+#[derive(Debug, Default, PartialEq)]
+pub struct KeyMovePreview {
+    pub(crate) layers: HashMap<String, HashMap<String, Option<f64>>>,
+}
+
+struct KeyMove {
+    tracks: Vec<(usize, usize)>,
+    limits: (f64, f64),
+    delta: Option<f64>,
+    frame: Arc<KeyMovePreview>,
+}
+impl KeyMove {
+    fn new(index: &crate::TimelineIndex, ids: &[String]) -> Self {
+        let ids: HashSet<_> = ids.iter().map(String::as_str).collect();
+        let mut tracks = Vec::new();
+        let mut limits = (f64::NEG_INFINITY, f64::INFINITY);
+        for (i, layer) in index.layers.iter().enumerate() {
+            for (j, channel) in layer.channels.iter().enumerate() {
+                let mut affected = false;
+                for key in channel
+                    .keys
+                    .iter()
+                    .filter(|key| ids.contains(key.id.as_str()))
+                {
+                    affected = true;
+                    limits.0 = limits.0.max(key.time.min(-layer.from) - key.time);
+                    limits.1 = limits
+                        .1
+                        .min(key.time.max((index.duration - layer.from).max(0.)) - key.time);
+                }
+                if affected {
+                    tracks.push((i, j));
+                }
+            }
+        }
+        Self {
+            tracks,
+            limits,
+            delta: None,
+            frame: Arc::default(),
+        }
+    }
+    fn sample(&mut self, index: &crate::TimelineIndex, ids: &[String], delta: f64) {
+        // Keep the same frame rounding, composition limits and collision rule
+        // as the writer's KeyframeCommand::Move.
+        let rate = index.fps;
+        let frame = |time: f64| (time * rate + 0.5).floor();
+        let delta = (frame(delta) / rate).max(self.limits.0).min(self.limits.1);
+        if self.delta == Some(delta) {
+            return;
+        }
+        self.delta = Some(delta);
+        let mut preview = KeyMovePreview::default();
+        if delta.abs() > 1e-12 {
+            let ids: HashSet<_> = ids.iter().map(String::as_str).collect();
+            for &(i, j) in &self.tracks {
+                let layer = &index.layers[i];
+                let keys = &layer.channels[j].keys;
+                let changes = preview.layers.entry(layer.id.clone()).or_default();
+                let mut destination = HashSet::new();
+                for key in keys.iter().filter(|key| ids.contains(key.id.as_str())) {
+                    destination.insert(frame(key.time + delta) as i64);
+                    changes.insert(key.id.clone(), Some(layer.from + (key.time + delta)));
+                }
+                for key in keys.iter().filter(|key| !ids.contains(key.id.as_str())) {
+                    if destination.contains(&(frame(key.time) as i64)) {
+                        changes.insert(key.id.clone(), None);
+                    }
+                }
+            }
+        }
+        self.frame = Arc::new(preview);
+    }
+}
+
 struct LayerPreview {
     drag: Drag,
     gain: bool,
+    key_move: Option<KeyMove>,
     commands: Vec<pm_kernel::Command>,
     frame: Option<LayerPreviewFrame>,
     serial: u64,
-    sample: Option<DragSample>,
+    sample: Option<(DragSample, u64)>,
 }
 /// Awaitable kernel adapter. No wait(), call_blocking(), platform or JS calls.
 /// Caller identity is injected so agent/MCP lock protections are retained.
@@ -65,6 +147,7 @@ pub struct TimelineClient {
     pub model: TimelineModel,
     active: Option<(u64, Drag)>,
     active_revision: Option<u64>,
+    switch_gesture: Option<u64>,
     preview: Option<LayerPreview>,
     adopted: Option<pm_model::Value>,
 }
@@ -81,6 +164,7 @@ impl TimelineClient {
             model: TimelineModel::default(),
             active: None,
             active_revision: None,
+            switch_gesture: None,
             preview: None,
             adopted: None,
         };
@@ -99,7 +183,9 @@ impl TimelineClient {
         }) {
             self.preview = None;
         }
-        if let Some(sample) = self.preview.as_ref().and_then(|p| p.sample) {
+        if let Some((sample, edition)) = self.preview.as_ref().and_then(|p| p.sample)
+            && edition != p.snapshot.document.edition()
+        {
             self.preview_sample(sample)?;
         }
         Ok(())
@@ -295,7 +381,10 @@ impl TimelineClient {
         }
         self.sync()?;
         let gain = self.is_gain_drag(&kind);
-        if !gain && !kind.is_strip_trim() && !matches!(kind, DragKind::Layers { .. }) {
+        if !gain
+            && !kind.is_strip_trim()
+            && !matches!(kind, DragKind::Layers { .. } | DragKind::Keys { .. })
+        {
             return Err(ModelError::InvalidGesture.into());
         }
         let mut drag = Drag::begin(&self.model, kind)?;
@@ -317,9 +406,14 @@ impl TimelineClient {
                     .insert((layer.clone(), path.clone()), value);
             }
         }
+        let key_move = match &drag.kind {
+            DragKind::Keys { ids } if !gain => Some(KeyMove::new(&drag.start, ids)),
+            _ => None,
+        };
         self.preview = Some(LayerPreview {
             drag,
             gain,
+            key_move,
             commands: vec![],
             frame: None,
             serial: 0,
@@ -357,12 +451,22 @@ impl TimelineClient {
     pub fn layer_preview(&self) -> Option<&LayerPreviewFrame> {
         self.preview.as_ref().and_then(|p| p.frame.as_ref())
     }
+    pub fn key_preview(&self) -> Option<&Arc<KeyMovePreview>> {
+        self.preview
+            .as_ref()?
+            .key_move
+            .as_ref()
+            .map(|keys| &keys.frame)
+    }
     fn preview_sample(&mut self, sample: DragSample) -> Result<Ack, ClientError> {
         use pm_model::{Document, Op, Patch};
         let p = self
             .kernel
             .published(&self.project)
             .ok_or(ClientError::Closed)?;
+        if !self.model.follows_snapshot(&p.snapshot) {
+            self.model.sync(&p);
+        }
         let preview = self.preview.as_mut().ok_or(ClientError::NoGesture)?;
         if p.snapshot.doc_id != preview.drag.start.doc_id
             || p.snapshot.open_comp() != preview.drag.start.comp_id
@@ -372,13 +476,26 @@ impl TimelineClient {
         // Gain is relative and trim targets are absolute times from the
         // drag's start: an edit published since would be overwritten.
         let trimmed = preview.drag.kind.is_strip_trim();
-        if (preview.gain || trimmed) && p.revision() != preview.drag.start.revision {
+        if (preview.gain || trimmed || preview.key_move.is_some())
+            && p.revision() != preview.drag.start.revision
+        {
             // The edit ends; the model shows the other edit.
             self.preview = None;
             self.sync()?;
             return Err(ClientError::ConcurrentRelativeGesture);
         }
         let commands = preview.drag.commands(sample)?;
+        if let Some(keys) = &mut preview.key_move {
+            if let [
+                pm_kernel::Command::Keyframe(pm_kernel::KeyframeCommand::Move { key_ids, delta }),
+            ] = commands.as_slice()
+            {
+                keys.sample(&preview.drag.start, key_ids, *delta);
+            }
+            preview.sample = Some((sample, p.snapshot.document.edition()));
+            preview.commands = commands;
+            return Ok(preview_ack(p.revision()));
+        }
         if preview.gain || trimmed {
             let root = p.snapshot.root().ok_or(ClientError::Closed)?;
             let revision = p.revision() + preview.serial + 1;
@@ -416,7 +533,7 @@ impl TimelineClient {
                 gain_commands: preview.gain.then(|| commands.clone().into()),
                 trimmed,
             });
-            preview.sample = Some(sample);
+            preview.sample = Some((sample, p.snapshot.document.edition()));
             preview.commands = commands;
             return Ok(preview_ack(p.revision()));
         }
@@ -429,28 +546,18 @@ impl TimelineClient {
                 _ => None,
             })
             .collect();
-        // Resolve the current stack once, including a concurrent reorder. A
-        // foreign edit remains visible and cancellation never rolls it back.
+        // Use ordinals from this publication, including after a foreign reorder.
         let root = p.snapshot.root().ok_or(ClientError::Closed)?;
-        let comp = pm_kernel::model::comp_node(root, preview.drag.start.comp_id.as_deref())
-            .ok_or(ClientError::DocumentChanged)?;
-        let locations: std::collections::HashMap<_, _> = pm_kernel::model::layers_of(comp)
-            .enumerate()
-            .filter_map(|(index, layer)| {
-                layer
-                    .get("id")
-                    .map(pm_model::Node::to_value)
-                    .and_then(|id| id.as_str().map(|id| (id.to_owned(), index)))
-            })
-            .collect();
         let mut ops = Vec::with_capacity(starts.len());
         for command in &commands {
             let pm_kernel::Command::Layer(pm_kernel::LayerCommand::Set { layer_id: id, patch }) = command else {
                 continue;
             };
             let Some(from) = patch.from else { continue };
-            let index = *locations
-                .get(id)
+            let index = self
+                .model
+                .index
+                .source_ordinal(id)
                 .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
             let mut path = pm_kernel::model::LayerLoc {
                 comp_id: preview.drag.start.comp_id.clone(),
@@ -471,7 +578,7 @@ impl TimelineClient {
         document
             .apply_ops_at(&ops, revision)
             .map_err(|e| ClientError::Kernel(e.to_string()))?;
-        preview.sample = Some(sample);
+        preview.sample = Some((sample, p.snapshot.document.edition()));
         preview.commands = commands;
         preview.frame = Some(LayerPreviewFrame {
             starts: starts.into(),
@@ -545,8 +652,10 @@ impl TimelineClient {
                     .call(Call::Transact {
                         label: Some(preview.drag.label().into()),
                         body: WriteBody::Commands(preview.commands),
-                        expected_revision: (preview.gain || preview.drag.kind.is_strip_trim())
-                            .then_some(preview.drag.start.revision),
+                        expected_revision: (preview.gain
+                            || preview.drag.kind.is_strip_trim()
+                            || preview.key_move.is_some())
+                        .then_some(preview.drag.start.revision),
                     })
                     .await;
             }
@@ -582,6 +691,74 @@ impl TimelineClient {
         self.active_revision = None;
         Ok(ack)
     }
+
+    /// Begin a press-and-drag switch paint gesture (one undo step across all swept rows).
+    pub async fn begin_switch_paint(
+        &mut self,
+        label: String,
+        commands: Vec<pm_kernel::Command>,
+    ) -> Result<(), ClientError> {
+        if let Some(old) = self.switch_gesture.take() {
+            let _ = self.call(GestureCall::Commit { gesture: old }.into()).await;
+        }
+        self.sync()?;
+        let ack = self
+            .call(GestureCall::Begin { label }.into())
+            .await?;
+        let Reply::Gesture(id) = ack.reply else {
+            return Err(ClientError::Rejected("gesture acknowledgement".into()));
+        };
+        self.switch_gesture = Some(id);
+        if !commands.is_empty() {
+            self.call(
+                GestureCall::Step {
+                    gesture: id,
+                    body: WriteBody::Commands(commands),
+                    replace: false,
+                }
+                .into(),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Append newly swept layer switch edits to the active switch-paint gesture.
+    pub async fn step_switch_paint(
+        &mut self,
+        commands: Vec<pm_kernel::Command>,
+    ) -> Result<(), ClientError> {
+        let Some(id) = self.switch_gesture else {
+            return Ok(());
+        };
+        if commands.is_empty() {
+            return Ok(());
+        }
+        self.call(
+            GestureCall::Step {
+                gesture: id,
+                body: WriteBody::Commands(commands),
+                replace: false,
+            }
+            .into(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Commit or cancel the active switch-paint gesture.
+    pub async fn finish_switch_paint(&mut self, commit: bool) -> Result<(), ClientError> {
+        let Some(id) = self.switch_gesture.take() else {
+            return Ok(());
+        };
+        let call = if commit {
+            GestureCall::Commit { gesture: id }
+        } else {
+            GestureCall::Cancel { gesture: id }
+        };
+        self.call(call.into()).await?;
+        Ok(())
+    }
     /// Adopt view facts another client of this project persisted. Rows depend
     /// on them, so a native surface and the panel worker must agree.
     pub fn adopt_view(&mut self) -> Result<bool, ClientError> {
@@ -601,11 +778,6 @@ impl TimelineClient {
     /// one published: every view the panel draws from (the mode, the graph,
     /// reveals) follows whatever changed the model, menu, key or control.
     pub async fn publish_view_if_changed(&self) -> Result<(), ClientError> {
-        let state = self.kernel.state();
-        let old = state.ui.get(&self.project).cloned().unwrap_or_default();
-        if self.model.patch_ui(&old) == old {
-            return Ok(());
-        }
         self.publish_view().await
     }
     pub async fn publish_view(&self) -> Result<(), ClientError> {
@@ -625,13 +797,17 @@ impl TimelineClient {
         const TRIES: usize = 8;
         for attempt in 1..=TRIES {
             let old = state.ui.get(&self.project).cloned().unwrap_or_default();
+            let next = self.model.patch_ui(&old);
+            if next == old && self.kernel.state().revision == state.revision {
+                return Ok(());
+            }
             let written = self
                 .kernel
                 .state_transaction(StateTransaction {
                     expected_revision: Some(state.revision),
                     ops: vec![StateOp::Ui {
                         project: self.project.clone(),
-                        next: self.model.patch_ui(&old),
+                        next,
                     }],
                 })
                 .await

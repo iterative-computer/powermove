@@ -17,7 +17,7 @@ pub enum Key {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Button<A> {
-    pub label: &'static str,
+    pub label: std::borrow::Cow<'static, str>,
     pub action: A,
     /// Return presses it.
     pub default: bool,
@@ -25,9 +25,9 @@ pub struct Button<A> {
     pub destructive: bool,
 }
 impl<A> Button<A> {
-    pub fn new(label: &'static str, action: A) -> Self {
+    pub fn new(label: impl Into<std::borrow::Cow<'static, str>>, action: A) -> Self {
         Self {
-            label,
+            label: label.into(),
             action,
             default: false,
             key: Key::None,
@@ -85,8 +85,8 @@ impl<A> Alert<A> {
         self
     }
     #[cfg(test)]
-    pub fn labels(&self) -> Vec<&'static str> {
-        self.buttons.iter().map(|b| b.label).collect()
+    pub fn labels(&self) -> Vec<&str> {
+        self.buttons.iter().map(|b| b.label.as_ref()).collect()
     }
 }
 impl<A: Clone + 'static> Alert<A> {
@@ -147,7 +147,7 @@ impl<A: Clone + 'static> Alert<A> {
         }
         let mut default_cell = None;
         for b in &buttons {
-            let button = native.addButtonWithTitle(&NSString::from_str(b.label));
+            let button = native.addButtonWithTitle(&NSString::from_str(&b.label));
             // Explicit for every button: NSAlert gives the first one Return.
             let (key, modifiers) = match b.key {
                 Key::Escape => ("\u{1b}", NSEventModifierFlags::empty()),

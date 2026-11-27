@@ -21,6 +21,7 @@ use std::{
 #[derive(Default)]
 struct Recorder {
     canvas_focuses: Cell<usize>,
+    studio_view: Cell<Option<pm_engine_service::studio::FreeView>>,
     lines: RefCell<Vec<OverlayLine>>,
     /// The marks sent with them (handles, knob, anchor rings, keyline).
     marks: RefCell<Vec<crate::gizmo_layer::Mark>>,
@@ -51,6 +52,8 @@ struct Recorder {
     files: RefCell<Vec<std::path::PathBuf>>,
     /// Where each outline was placed over the viewer.
     placements: RefCell<Vec<Option<crate::gizmo_layer::Placement>>>,
+    /// Focused group changes requested by double-clicking a group or empty canvas.
+    focused_groups: RefCell<Vec<Option<String>>>,
 }
 /// The canvas editor without AppKit: typing is an event, as from NSTextView.
 #[derive(Default)]
@@ -194,13 +197,17 @@ impl Host for Recording {
     fn open_composition(&self, comp: String, _: &mut App) {
         self.0.opened.borrow_mut().push(comp);
     }
+    fn focus_group(&self, group: Option<String>, _: &mut App) {
+        self.0.focused_groups.borrow_mut().push(group);
+    }
     fn scene3d_assets(&self, _: &App) -> Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>> {
         self.0.assets.borrow().clone()
     }
     fn focus_part(&self, layer: &str, slot: Option<u64>, _: &mut App) {
         self.0.parts.borrow_mut().push((layer.into(), slot));
     }
-    fn studio_view(&self, _: Option<pm_engine_service::studio::FreeView>, cx: &mut App) {
+    fn studio_view(&self, view: Option<pm_engine_service::studio::FreeView>, cx: &mut App) {
+        self.0.studio_view.set(view);
         if let Some(owner) = self.0.lease.borrow().as_ref() {
             owner.read(cx);
         }
@@ -1149,6 +1156,41 @@ fn dragging_a_group_with_its_member_moves_the_member_once(cx: &mut TestAppContex
     };
     assert_eq!((x("g"), x("l1")), (40., 450.));
 }
+#[gpui::test]
+fn right_click_cancels_a_viewer_gizmo_drag_and_then_opens_menus_normally(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let before = s.pose();
+    let history = s.rig.kernel.published(PROJECT).unwrap().history.entries;
+    let (_, corner, _) = s.points();
+    let at = s.point_of(corner);
+    let moved = at + point(px(50.), px(50.));
+    let outside = point(px(-5.), px(-5.));
+    let none = Modifiers::none();
+    s.vcx.simulate_mouse_down(at, MouseButton::Left, none);
+    s.vcx.simulate_mouse_move(moved, MouseButton::Left, none);
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    assert!(s.rig.kernel.published(PROJECT).unwrap().entry.is_some());
+    s.vcx.simulate_mouse_down(outside, MouseButton::Right, none);
+    s.vcx.simulate_mouse_up(outside, MouseButton::Right, none);
+    s.vcx.simulate_mouse_move(moved, MouseButton::Left, none);
+    s.vcx.simulate_mouse_up(moved, MouseButton::Left, none);
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    assert!(s.rig.kernel.published(PROJECT).unwrap().entry.is_none());
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().history.entries, history);
+    s.refresh(cx);
+    assert_eq!(s.pose().scale, before.scale);
+    assert_eq!(s.recorder.menus.get(), 0);
+
+    let at = s.point_of([320., 180.]);
+    s.vcx.simulate_mouse_down(at, MouseButton::Right, none);
+    s.vcx.simulate_mouse_up(at, MouseButton::Right, none);
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| recorder.menus.get() == 1);
+    assert_eq!(s.recorder.menus.get(), 1);
+}
+
 #[gpui::test]
 fn a_secondary_press_selects_the_layer_and_opens_the_layer_menu(cx: &mut TestAppContext) {
     let mut s = stage_on(cx, &pair());
@@ -3302,6 +3344,153 @@ fn studio_view_commands_run_after_the_controller_update(cx: &mut TestAppContext)
     assert_eq!(s.recorder.canvas_focuses.get(), 1);
 }
 
+#[gpui::test]
+fn fly_from_2d_in_a_grouped_composition_without_a_camera(cx: &mut TestAppContext) {
+    let project = r#"{
+        "id":"c","name":"Do anything","w":640,"h":360,"fps":30,"dur":5,
+        "layers":[
+            {"id":"card","type":"group","threeD":true,"from":0,"dur":2,"on":true,"p":{},"d":{},"fx":[]},
+            {"id":"child","group":"card","type":"shape","from":0,"dur":2,"on":true,"p":{},"d":{"w":120,"h":80},"fx":[]},
+            {"id":"caption","group":"card","type":"text","threeD":true,"from":0,"dur":2,"on":true,"p":{},"d":{},"fx":[]},
+            {"id":"light-control","type":"null","threeD":true,"from":0,"dur":2,"on":true,"p":{},"d":{},"fx":[]},
+            {"id":"wash","type":"adjustment","from":0,"dur":5,"on":true,"p":{},"d":{},"fx":[]},
+            {"id":"l0","type":"solid","from":0,"dur":5,"on":true,"p":{},"d":{"w":640,"h":360},"fx":[]}
+        ]
+    }"#;
+    let mut s = stage_on(cx, project);
+    let published = s.rig.kernel.published(PROJECT).unwrap();
+    let root = published.snapshot.root().unwrap();
+    let rows = pm_kernel::model::list_layers(root, published.snapshot.open_comp().as_deref());
+    assert!(
+        !crate::session::project_disabled_commands(Some(&published), &rows).contains("studio.view"),
+        "Fly Navigation must be available in the menu and command palette"
+    );
+    let active_scene = pm_panel_studio3d::viewport::scene(&published, 0.5).unwrap();
+    assert!(!active_scene.has_camera);
+    assert!(active_scene.items.iter().any(|item| item.id == "light-control"));
+    let empty_scene = pm_panel_studio3d::viewport::scene(&published, 3.).unwrap();
+    assert!(!empty_scene.has_camera);
+    assert!(empty_scene.items.is_empty());
+
+    let binding = pm_shell::keyboard::shipped()
+        .into_iter()
+        .find(|binding| binding.id == "native.fly")
+        .unwrap();
+    assert_eq!(binding.chord, "shift+`");
+    assert_eq!(binding.command, "studio.view");
+    let group = binding.args[0].as_str().unwrap();
+    let value = binding.args[1].as_str().unwrap();
+
+    let capture = Rc::new(Cell::new(false));
+    let input = gpui::VisualContext::new_window_entity(&mut s.vcx, |_, _| ());
+    let start_fly = |s: &mut Stage| {
+        input.update_in(&mut s.vcx, |_, window, cx| {
+            assert!(s.surface.read(cx).studio_takes_key(group, false, window));
+            crate::session::defer_studio_view(
+                s.surface.clone(),
+                group.into(),
+                value.into(),
+                capture.clone(),
+                || {},
+                window,
+                cx,
+            );
+        });
+        assert!(capture.get());
+        assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+    };
+    let ui_is = |flying: &str, look: &str, s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        let viewer = &p.ui_state.viewer;
+        viewer.get("studioFly").and_then(pm_model::Value::as_str) == Some(flying)
+            && viewer.get("studioLook").and_then(pm_model::Value::as_str) == Some(look)
+    };
+
+    for time in [3., 0.5] {
+        s.recorder.time.set(Some(time));
+        s.refresh(cx);
+        assert!(s.recorder.studio_view.get().is_none());
+        assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+        start_fly(&mut s);
+        settle(cx, |_| ui_is("on", "free", &s));
+
+        let initial = s.recorder.studio_view.get().unwrap();
+        let end = s.surface.update(&mut s.vcx, |g, cx| {
+            g.studio_fly_pointer(point(px(100.), px(100.)), cx);
+            g.studio_fly_pointer(point(px(110.), px(100.)), cx);
+            assert_ne!(s.recorder.studio_view.get().unwrap().target, initial.target);
+            g.studio_fly_advance(2., 0.5, cx);
+            g.studio_free_pose().unwrap()
+        });
+        let pushed = s.recorder.studio_view.get().unwrap();
+        assert_ne!(end.position, initial.eye);
+        assert_eq!(pushed.eye, end.position);
+        assert_eq!(pushed.target, end.target);
+
+        let keep = time == 0.5;
+        s.vcx.simulate_keystrokes(if keep { "enter" } else { "escape" });
+        assert!(!capture.get());
+        settle(cx, |_| ui_is("off", if keep { "free" } else { "camera" }, &s));
+        if keep {
+            assert_eq!(s.surface.read_with(&s.vcx, |g, _| g.studio_free_pose()), Some(end));
+            assert_eq!(s.recorder.studio_view.get(), Some(pushed));
+        } else {
+            assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+            assert!(s.recorder.studio_view.get().is_none());
+        }
+    }
+    assert_eq!(s.rig.kernel.published(PROJECT).unwrap().revision(), published.revision());
+    assert!(s.recorder.reports.borrow().is_empty());
+}
+
+#[gpui::test]
+fn flat_3d_layers_keep_shot_gizmos_and_support_navigation_and_fly(cx: &mut TestAppContext) {
+    let project =
+        project_of("shape").replace(r#""type":"shape""#, r#""type":"shape","threeD":true"#);
+    let mut stage = stage_on(cx, &project);
+    let shot = stage.pose().corners;
+    let revision = stage.rig.kernel.published(PROJECT).unwrap().revision();
+    stage.surface.update(&mut stage.vcx, |g, cx| {
+        assert!(g.studio_active());
+        assert!(!g.studio_free());
+        g.studio_setting("look", "free", cx);
+        let front = g.studio_free_pose().unwrap();
+        g.studio_setting("nav", "orbit-right", cx);
+        let orbited = g.studio_free_pose().unwrap();
+        assert_ne!(orbited.position, front.position);
+        g.studio_setting("nav", "pan-right", cx);
+        let panned = g.studio_free_pose().unwrap();
+        assert_ne!(panned.target, orbited.target);
+        g.studio_setting("nav", "zoom-in", cx);
+        assert_ne!(g.studio_free_pose().unwrap().position, panned.position);
+        g.studio_frame(cx);
+        assert_ne!(g.studio_free_pose().unwrap().target, panned.target);
+        g.studio_setting("look", "camera", cx);
+    });
+    assert_eq!(stage.pose().corners, shot);
+    stage.surface.update(&mut stage.vcx, |g, cx| {
+        g.studio_setting("fly", "", cx);
+        assert!(g.studio_flying());
+        g.studio_fly_end(false, cx);
+        assert!(!g.studio_flying());
+        assert!(!g.studio_free());
+        g.studio_setting("fly", "", cx);
+        let start = g.studio_free_pose().unwrap();
+        g.studio_fly_advance(2., 1., cx);
+        let end = g.studio_free_pose().unwrap();
+        assert_ne!(end.position, start.position);
+        g.studio_fly_end(true, cx);
+        assert_eq!(g.studio_free_pose(), Some(end));
+        assert!(!g.studio_flying());
+        assert!(g.studio_free());
+    });
+    assert_eq!(
+        stage.rig.kernel.published(PROJECT).unwrap().revision(),
+        revision
+    );
+    assert!(stage.recorder.reports.borrow().is_empty());
+}
+
 /// Fly navigation (Shift+`, Blender's Fly) through the shot camera: confirm
 /// stores the flight on the camera as one Undo (the camera and its point of
 /// interest move together, so it looks where the flight ended).
@@ -3335,10 +3524,17 @@ fn flying_through_the_camera_stores_the_flight_as_one_undo(cx: &mut TestAppConte
     let num = |v: &serde_json::Value| v.as_f64().or(v["v"].as_f64()).unwrap();
     // It flew forward, toward what it looked at (−Z from z = 6).
     assert!(num(&after["p"]["position.z"]) < num(&before["p"]["position.z"]), "{after}");
-    // The point of interest moved with it: the camera still looks straight ahead.
-    let dz_cam = num(&after["p"]["position.z"]) - num(&before["p"]["position.z"]);
-    let t = |l: &serde_json::Value| num(&l["d"]["data"]["camera"]["p"]["targetZ"]);
-    assert!((t(&after) - t(&before) - dz_cam).abs() < 1e-6, "{} {}", t(&after), dz_cam);
+    // Rotation-only camera: flying forward moves position.z while keeping
+    // rotation unchanged (no Point of Interest dependency).
+    assert_eq!(after["d"]["data"]["camera"]["autoOrient"], "off");
+    assert!(
+        (num(&after["p"]["rotation.x"]) - num(&before["p"]["rotation.x"])).abs() < 1e-6,
+        "{after}"
+    );
+    assert!(
+        (num(&after["p"]["rotation.y"]) - num(&before["p"]["rotation.y"])).abs() < 1e-6,
+        "{after}"
+    );
     assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()), "back to the shot");
     undo_3d(&mut s, cx);
     assert_eq!(stored(&s, "cam")["p"]["position.z"], before["p"]["position.z"]);
@@ -3485,6 +3681,38 @@ fn the_middle_button_orbits_pans_and_zooms(cx: &mut TestAppContext) {
     assert!(d.target == c.target && (reach(d) - reach(c)).abs() > 1e-6, "zoom");
     assert!(s.recorder.navigation.borrow().is_empty(), "the 2D view never panned");
 }
+#[gpui::test]
+fn right_click_restores_the_3d_view_after_orbit_pan_or_dolly(cx: &mut TestAppContext) {
+    let mut s = studio_stage(cx);
+    let history = applied(&s);
+    let from = s.point_of([300., 180.]);
+    let to = from + point(px(30.), px(40.));
+    // Starting in the shot, even the switch into Free View is reverted.
+    let none = Modifiers::none();
+    s.vcx.simulate_mouse_down(from, MouseButton::Middle, none);
+    s.vcx.simulate_mouse_move(to, MouseButton::Middle, none);
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+    s.vcx.simulate_mouse_down(to, MouseButton::Right, none);
+    s.vcx.simulate_mouse_up(to, MouseButton::Right, none);
+    s.vcx.simulate_mouse_up(to, MouseButton::Middle, none);
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.studio_free()));
+
+    in_3d(&mut s, cx);
+    let before = view(&s);
+    for modifiers in [Modifiers::alt(), Modifiers { alt: true, shift: true, ..none }, Modifiers { alt: true, control: true, ..none }] {
+        s.vcx.simulate_mouse_down(from, MouseButton::Left, modifiers);
+        s.vcx.simulate_mouse_move(to, MouseButton::Left, modifiers);
+        assert_ne!(view(&s), before);
+        s.vcx.simulate_mouse_down(to, MouseButton::Right, none);
+        s.vcx.simulate_mouse_up(to, MouseButton::Right, none);
+        s.vcx.simulate_mouse_move(to, MouseButton::Left, modifiers);
+        s.vcx.simulate_mouse_up(to, MouseButton::Left, none);
+        assert_eq!(view(&s), before);
+    }
+    assert_eq!(applied(&s), history);
+    assert_eq!(s.recorder.menus.get(), 0);
+}
+
 /// In camera view a scroll navigates the view (the viewer's own zoom), and
 /// a middle drag leaves for the editor view from where the camera stands
 /// (Blender with Lock Camera to View off): the authored camera never moves
@@ -4276,6 +4504,137 @@ fn selection_box_projects_through_plane_matrix_for_3d_layers_and_3d_groups(
             "{id} should show perspective foreshortening: left={left_h}, right={right_h}"
         );
     }
+}
+
+#[gpui::test]
+fn three_d_group_with_3d_children_keeps_box_at_90_deg_and_drags_children_in_3d(
+    cx: &mut TestAppContext,
+) {
+    let project = r#"{
+        "id":"c","name":"Main","w":1000,"h":600,"fps":30,"dur":4,
+        "layers":[
+            {
+                "id":"g3d","type":"group","name":"Cube","threeD":true,
+                "from":0,"dur":4,"on":true,
+                "p":{
+                    "position.x":{"v":500,"kf":[]},
+                    "position.y":{"v":300,"kf":[]},
+                    "position.z":{"v":200,"kf":[]},
+                    "scale.x":{"v":100,"kf":[]},
+                    "scale.y":{"v":100,"kf":[]},
+                    "scale.z":{"v":100,"kf":[]},
+                    "rotation":{"v":0,"kf":[]},
+                    "rotation.x":{"v":0,"kf":[]},
+                    "rotation.y":{"v":90,"kf":[]},
+                    "anchor.x":{"v":500,"kf":[]},
+                    "anchor.y":{"v":300,"kf":[]},
+                    "anchor.z":{"v":200,"kf":[]},
+                    "perspective":{"v":50,"kf":[]},
+                    "opacity":{"v":100,"kf":[]}
+                },
+                "d":{},
+                "fx":[]
+            },
+            {
+                "id":"c1","type":"shape","name":"Side","group":"g3d","threeD":true,
+                "from":0,"dur":4,"on":true,
+                "p":{
+                    "position.x":{"v":500,"kf":[]},
+                    "position.y":{"v":300,"kf":[]},
+                    "position.z":{"v":100,"kf":[]},
+                    "scale.x":{"v":100,"kf":[]},
+                    "scale.y":{"v":100,"kf":[]},
+                    "scale.z":{"v":100,"kf":[]},
+                    "rotation":{"v":0,"kf":[]},
+                    "rotation.x":{"v":0,"kf":[]},
+                    "rotation.y":{"v":-90,"kf":[]},
+                    "anchor.x":{"v":0,"kf":[]},
+                    "anchor.y":{"v":0,"kf":[]},
+                    "anchor.z":{"v":0,"kf":[]},
+                    "perspective":{"v":50,"kf":[]},
+                    "opacity":{"v":100,"kf":[]}
+                },
+                "d":{"kind":"rect","w":140,"h":140,"stroke":0},
+                "fx":[]
+            }
+        ]
+    }"#;
+    let mut s = unposed(cx, project);
+    // 1. Even when the 3D group is rotated 90° edge-on, its 3D child facing the
+    // camera still gives the group a valid, finite selection box enclosing it.
+    select_ids(&mut s, cx, &["g3d"]);
+    let poses = s.surface.read_with(&s.vcx, |g, _| g.poses());
+    assert_eq!(poses.len(), 1, "edge-on 3D group with 3D child must keep its selection box");
+    let w = (poses[0].corners[1][0] - poses[0].corners[0][0]).abs();
+    let h = (poses[0].corners[3][1] - poses[0].corners[0][1]).abs();
+    assert!(w > 50.0 && h > 50.0, "box should enclose 3D child: {w}x{h}");
+
+    // 2. Selecting the 3D child inside the 90°-rotated group and dragging horizontally
+    // on screen moves the child cleanly along its group's Z axis (not stuck/exploding).
+    select_ids(&mut s, cx, &["c1"]);
+    let child_poses = s.surface.read_with(&s.vcx, |g, _| g.poses());
+    assert_eq!(child_poses.len(), 1);
+    let drag_from = s.point_of(child_poses[0].anchor);
+    s.drag(cx, drag_from, point(px(60.), px(0.)), Modifiers::none());
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    let mut mirror = pm_kernel::QueryMirror::new(&p);
+    let new_z = mirror
+        .queries()
+        .evaluate(None, "c1", "position.z", 0.5)
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    assert!(
+        (new_z - 100.0).abs() > 20.0,
+        "dragging 3D child inside 90°-rotated 3D group should move along local Z, got z={new_z}"
+    );
+}
+#[gpui::test]
+fn double_clicking_group_in_viewer_focuses_it_and_empty_canvas_exits(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &grouped());
+    select(&s, &[]);
+    // Double-click the group in the viewer -> focuses group "g" and selects child "l1".
+    click(&mut s, cx, [460., 160.], Modifiers::none(), 1);
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["g".to_string()]
+    });
+    click(&mut s, cx, [460., 160.], Modifiers::none(), 2);
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| {
+        *recorder.focused_groups.borrow() == [Some("g".to_string())]
+    });
+    assert_eq!(selected(&s), ["l1"]);
+
+    // Persist focusedGroup = "g" in ui_state as Controller::focus_builtin_group does.
+    let state = s.rig.kernel.state();
+    let mut ui = state.ui.get(PROJECT).cloned().unwrap_or_default();
+    let mut native = pm_model::Map::new();
+    native.insert("focusedGroup", pm_model::Value::from("g"));
+    let mut tl = pm_model::Map::new();
+    tl.insert("nativeModel", pm_model::Value::Object(native));
+    ui.timeline = pm_model::Value::Object(tl);
+    s.rig
+        .kernel
+        .state_transaction(pm_kernel::state::StateTransaction {
+            expected_revision: Some(state.revision),
+            ops: vec![pm_kernel::state::StateOp::Ui {
+                project: PROJECT.into(),
+                next: ui,
+            }],
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.vcx.run_until_parked();
+
+    // While focused on "g", clicking outside layer "l0" (at [210, 160]) hits nothing,
+    // and double-clicking empty canvas exits group focus back to None.
+    click(&mut s, cx, [210., 160.], Modifiers::none(), 2);
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| {
+        *recorder.focused_groups.borrow() == [Some("g".to_string()), None]
+    });
 }
 #[path = "drag_latency_viewer_tests.rs"]
 mod drag_latency_metrics;

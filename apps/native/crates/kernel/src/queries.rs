@@ -36,6 +36,13 @@
 //! are surfaced as [`QueryError::NeedsFonts`] etc. and must **not** be read as
 //! "no layer".
 
+use std::collections::{HashMap, HashSet};
+
+use pm_eval::{
+    bounds::NoHost,
+    node,
+    space3d::{Mat4, multiply, translation},
+};
 use pm_model::consistency::ConsistencyHash;
 use pm_model::json::{self, to_canonical_string};
 use pm_model::{Document, Map, Node, Op, Value};
@@ -108,6 +115,8 @@ pub struct Bounds {
 pub struct PickOptions {
     /// Hit locked layers too (the old selection tool skipped them).
     pub include_locked: bool,
+    /// Restrict picking to descendants of this focused group layer.
+    pub focus_group: Option<String>,
 }
 
 /// A frozen answer to "what is under the pointer".
@@ -120,9 +129,165 @@ pub struct PickHit {
     pub revision: u64,
 }
 
+/// Evaluates one viewport frame against a single composition and layer index.
+/// The scope shares transform and expression work between all of its items.
+pub struct ViewportQueries<'a, 'd> {
+    scope: pm_eval::Scope<'a, 'd>,
+    document: &'d Document,
+    time: f64,
+    indices: HashMap<&'d str, usize>,
+    locked: Option<HashSet<&'d str>>,
+    group_spaces: HashMap<Vec<*const Node>, Mat4>,
+    host_queries: Option<QueryContext>,
+}
+
+impl<'a, 'd> ViewportQueries<'a, 'd> {
+    pub fn with_open<R>(
+        document: &'d Document,
+        time: f64,
+        build: impl FnOnce(&mut ViewportQueries<'_, 'd>) -> R,
+    ) -> Result<R, QueryError> {
+        let comp_id = document
+            .root()
+            .and_then(model::render_comp_id)
+            .unwrap_or_default();
+        let comp = pm_eval::Comp::resolve(document, &comp_id)
+            .map_err(|_| QueryError::CompNotFound(comp_id))?;
+        let mut ev = pm_eval::Evaluator::new()
+            .with_expressions(std::sync::Arc::new(pm_wasm::expr::PmExpressions));
+        let mut scope = pm_eval::Scope::open(&mut ev, &comp);
+        scope.memoize_transforms();
+        let mut indices = HashMap::with_capacity(comp.layers().len());
+        for (index, layer) in comp.layers().iter().enumerate() {
+            if let Some(id) = layer.get("id").and_then(model::str_of) {
+                indices.entry(id).or_insert(index);
+            }
+        }
+        Ok(build(&mut ViewportQueries {
+            scope,
+            document,
+            time,
+            indices,
+            locked: None,
+            group_spaces: HashMap::new(),
+            host_queries: None,
+        }))
+    }
+
+    pub fn layer(&self, id: &str) -> Option<(usize, &'d Node)> {
+        let index = *self.indices.get(id)?;
+        Some((index, &self.scope.layers()[index]))
+    }
+
+    pub fn active_plane(&mut self, layer: &'d Node) -> bool {
+        // Spans give a cheap rejection before walking the group graph. Keep
+        // paired cuts and the composition endpoint in the evaluator.
+        !pm_eval::evaluator::outside_layer_span(layer, self.time)
+            && self.scope.is_3d_layer(layer).unwrap_or(false)
+            && self.scope.active(layer, self.time).unwrap_or(false)
+    }
+
+    pub fn plane_worlds(&mut self, layer: &'d Node) -> Option<(Mat4, Mat4)> {
+        let t = self.time;
+        if node::truthy(layer.get("parent")) {
+            return Some((
+                self.scope.world3d(layer, t, false).ok()?,
+                self.scope.world3d(layer, t, true).ok()?,
+            ));
+        }
+        // Without a transform parent the full parent matrix depends only on
+        // the actual group chain. Key by the whole chain to preserve cycles
+        // and duplicate-id behavior in the evaluator's group walk.
+        let groups: Vec<_> = self
+            .scope
+            .group_ancestors(layer)
+            .ok()?
+            .into_iter()
+            .map(std::ptr::from_ref)
+            .collect();
+        let parent = match self.group_spaces.entry(groups) {
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                *entry.insert(self.scope.parent3d(layer, t, None).ok()?)
+            }
+        };
+        let local = self.scope.local3d(layer, t).ok()?;
+        let z = if node::truthy(layer.get("threeD")) {
+            self.scope.value3d(layer, "position.z", t, 0.).ok()?
+        } else {
+            0.
+        };
+        Some((
+            multiply(&parent, &local),
+            multiply(&parent, &translation(0., 0., z)),
+        ))
+    }
+
+    pub fn channels(&mut self, layer: &'d Node, keys: [&str; 3], default: f64) -> [f64; 3] {
+        keys.map(|key| match self.scope.channel(layer, key, self.time) {
+            Ok(pm_eval::JsValue::Number(value)) => value,
+            _ => default,
+        })
+    }
+
+    /// Default bounds for the standalone viewport. Queries requiring the
+    /// font registry or extension geometry retain the engine's host path.
+    pub fn bounds(&mut self, index: usize, layer: &'d Node) -> Option<Bounds> {
+        let kind = layer.get("type").and_then(model::str_of);
+        if matches!(kind, Some("text" | "captions" | "extension" | "group"))
+            || pm_scene3d::layer_role(layer).is_some()
+        {
+            let queries = self
+                .host_queries
+                .get_or_insert_with(|| QueryContext::new(self.document));
+            let comp = queries.open_comp();
+            return bounds_of(
+                queries
+                    .layer_query_at("bounds", &comp, &comp, index, self.time, &[])
+                    .ok()?,
+            )
+            .ok()
+            .flatten();
+        }
+        let b = self
+            .scope
+            .bounds_with_measure(layer, self.time, &mut None, &mut NoHost)
+            .ok()??;
+        Some(Bounds {
+            x0: b.x0,
+            y0: b.y0,
+            x1: b.x1,
+            y1: b.y1,
+            w: b.w,
+            h: b.h,
+            ax: b.ax,
+            ay: b.ay,
+        })
+    }
+
+    pub fn locked(&mut self, id: &str) -> bool {
+        self.locked
+            .get_or_insert_with(|| viewport_locks(self.scope.layers()))
+            .contains(id)
+    }
+}
+
+// Layer-panel locking uses the first group with a matching id.
+fn viewport_locks(layers: &[Node]) -> HashSet<&str> {
+    let groups = model::GroupLocks::new(layers);
+    layers
+        .iter()
+        .filter_map(|layer| {
+            let id = layer.get("id").and_then(model::str_of)?;
+            groups.locked(layer, id).then_some(id)
+        })
+        .collect()
+}
+
 /// The synchronous query facade. See the module documentation.
 pub struct QueryContext {
     engine: Engine,
+    layer_indices: HashMap<Option<String>, HashMap<String, usize>>,
     /// Whether a composition holds any layer marked `threeD`, at a revision:
     /// `(revision, composition, marked)`. See [`QueryContext::is_3d_layer`].
     marked_3d: Option<(u64, String, bool)>,
@@ -135,6 +300,7 @@ impl QueryContext {
         engine.adopt_document(document.clone(), ConsistencyHash::default());
         QueryContext {
             engine,
+            layer_indices: HashMap::new(),
             marked_3d: None,
         }
     }
@@ -147,12 +313,17 @@ impl QueryContext {
             && pm_model::binary::encode(ops)
                 .ok()
                 .is_some_and(|body| self.engine.apply(&body, base, revision).is_ok());
-        if !ok {
+        if ok {
+            if model::changes_layer_index(ops, false) {
+                self.layer_indices.clear();
+            }
+        } else {
             self.resync(current);
         }
     }
 
     pub(crate) fn resync(&mut self, document: &Document) {
+        self.layer_indices.clear();
         self.engine
             .adopt_document(document.clone(), ConsistencyHash::default());
     }
@@ -220,20 +391,28 @@ impl QueryContext {
     }
 
     fn resolve(
-        &self,
+        &mut self,
         comp_id: Option<&str>,
         layer_id: &str,
     ) -> Result<(String, usize), QueryError> {
         let root = self
+            .engine
+            .document()
             .root()
             .ok_or_else(|| QueryError::Error("no document".into()))?;
         let comp = comp_id
             .map(str::to_owned)
             .or_else(|| model::open_comp_id(root));
-        let node = model::comp_node(root, comp.as_deref())
-            .ok_or_else(|| QueryError::CompNotFound(comp.clone().unwrap_or_default()))?;
-        let index = model::layers_of(node)
-            .position(|l| l.get("id").and_then(model::str_of) == Some(layer_id))
+        let indices = match self.layer_indices.entry(comp.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let node = model::comp_node(root, comp.as_deref())
+                    .ok_or_else(|| QueryError::CompNotFound(comp.clone().unwrap_or_default()))?;
+                entry.insert(model::layer_positions(node))
+            }
+        };
+        let index = *indices
+            .get(layer_id)
             .ok_or_else(|| QueryError::LayerNotFound(layer_id.to_owned()))?;
         Ok((comp.unwrap_or_default(), index))
     }
@@ -319,10 +498,21 @@ impl QueryContext {
         extra: &[(&str, Value)],
     ) -> Result<Value, QueryError> {
         let (comp, index) = self.resolve(comp_id, layer_id)?;
-        let open = self.open_comp();
+        self.layer_query_at(op, &comp, &self.open_comp(), index, t, extra)
+    }
+
+    fn layer_query_at(
+        &mut self,
+        op: &str,
+        comp: &str,
+        open: &str,
+        index: usize,
+        t: f64,
+        extra: &[(&str, Value)],
+    ) -> Result<Value, QueryError> {
         let mut m = Map::new();
         m.insert("op", Value::from(op));
-        m.insert("open", Value::from(open.as_str()));
+        m.insert("open", Value::from(open));
         m.insert("comp", Value::from(comp));
         m.insert("layer", Value::Number(index as f64));
         m.insert("t", Value::Number(t));
@@ -562,6 +752,9 @@ impl QueryContext {
         m.insert("x", Value::Number(x));
         m.insert("y", Value::Number(y));
         m.insert("includeLocked", Value::Bool(options.include_locked));
+        if let Some(group) = &options.focus_group {
+            m.insert("focusGroup", Value::from(group.as_str()));
+        }
         let reply = self.query(&Value::Object(m))?;
         let revision = self.revision();
         let index = reply
@@ -675,4 +868,42 @@ fn bounds_of(v: Value) -> Result<Option<Bounds>, QueryError> {
         ax: get("ax")?,
         ay: get("ay")?,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indexed_queries_follow_layer_reorders_and_resyncs() {
+        let root = json::parse(
+            r#"{"id":"project","layers":[
+                {"id":"first","p":{"position.x":{"v":12,"kf":[]}}},
+                {"id":"second","p":{"position.x":{"v":34,"kf":[]}}}
+            ]}"#,
+        )
+        .unwrap();
+        let mut current = Document::new(Some(root), 1);
+        let mut queries = QueryContext::new(&current);
+        let position = |q: &mut QueryContext| {
+            q.evaluate(None, "first", "position.x", 0.)
+                .unwrap()
+                .as_f64()
+        };
+        assert_eq!(position(&mut queries), Some(12.));
+        let order = Op::Order {
+            path: vec!["layers".into()],
+            ids: vec!["second".into(), "first".into()],
+        };
+        let ops = [order];
+        current.apply_ops_at(&ops, 2).unwrap();
+        queries.apply(&ops, 1, 2, &current);
+        assert_eq!(position(&mut queries), Some(12.));
+        let replacement = json::parse(
+            r#"{"id":"project","layers":[{"id":"first","p":{"position.x":{"v":56,"kf":[]}}}]}"#,
+        )
+        .unwrap();
+        queries.resync(&Document::new(Some(replacement), 3));
+        assert_eq!(position(&mut queries), Some(56.));
+    }
 }
