@@ -6,8 +6,10 @@
 //! light, once, on the window's own rectangle. Nothing paints a ground: the
 //! stage is the veil, the mark and its light (`light`'s one pass,
 //! premultiplied over clear), the credit and the window. The first-run steps
-//! change inside the window with a quick spring cross-fade; the last one
-//! hands off into the app: the window eases out as the veil fades away.
+//! change inside the window with a quick spring cross-fade. Once the Welcome
+//! stands in its own real window the veil and the light fade away and the
+//! stage leaves (`Curtain`): nothing stays above the person's other apps.
+//! The last step hands off into the app: the window eases out.
 //! Timing is the cue sheet's (`cue`), Dia's opening measured.
 pub mod cue;
 pub mod intro;
@@ -29,8 +31,6 @@ use std::{rc::Rc, time::Instant};
 
 /// A sound cue (`cue::Sound::id`) reached.
 pub type OnSound = Rc<dyn Fn(&str, &mut App)>;
-/// What runs once the hand-off's lights are up (the stage closes).
-type AfterHandOff = Box<dyn FnOnce(&mut Window, &mut App)>;
 
 /// Seconds the window takes to fade in after a Skip.
 const SKIP_FADE: f64 = 0.35;
@@ -45,9 +45,59 @@ const SLIDE_OUT: f32 = 6.;
 const ARRIVE: Spring = Spring::new(520., 46.);
 const LEAVE: Spring = Spring::new(900., 60.);
 
-struct HandOff {
-    start: f64,
-    done: Option<AfterHandOff>,
+/// The stage's lights after the wave: they go down once the Welcome stands
+/// in its own real window (`CueSheet::lights_left`), and whatever is left
+/// fades with the hand-off (`CueSheet::veil_left`). Dark once, then the
+/// stage window goes; it never comes back.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Curtain {
+    /// The real window showed (the intro's time).
+    down: Option<f64>,
+    /// The hand-off started.
+    out: Option<f64>,
+    gone: bool,
+}
+impl Curtain {
+    /// The Welcome's real window is up at `t`: the lights go down.
+    pub fn native_shown(&mut self, t: f64) {
+        self.down.get_or_insert(t);
+    }
+    /// The hand-off starts at `t`.
+    pub fn hand_off(&mut self, t: f64) {
+        self.out.get_or_insert(t);
+    }
+    /// Seconds into the hand-off at `t`, once it has started.
+    pub fn out_since(&self, t: f64) -> Option<f64> {
+        self.out.map(|at| t - at)
+    }
+    pub fn handing_off(&self) -> bool {
+        self.out.is_some()
+    }
+    /// The share of the veil and the mark's light left at `t` (1 to 0).
+    pub fn left(&self, sheet: &CueSheet, motion: bool, t: f64) -> f64 {
+        if self.gone {
+            return 0.;
+        }
+        let down = self.down.map_or(1., |at| sheet.lights_left(t - at, motion));
+        let out = self.out.map_or(1., |at| sheet.veil_left(t - at));
+        (down * out).clamp(0., 1.)
+    }
+    /// The lights are on their way down: the stage keeps drawing.
+    pub fn fading(&self) -> bool {
+        !self.gone && (self.down.is_some() || self.out.is_some())
+    }
+    /// True once, when the lights are out at `t` (or at once with `force`,
+    /// the safety net for a stage that stopped drawing): the stage goes.
+    pub fn take_dark(&mut self, sheet: &CueSheet, motion: bool, t: f64, force: bool) -> bool {
+        if !self.fading() || !(force || self.left(sheet, motion, t) <= 0.) {
+            return false;
+        }
+        self.gone = true;
+        true
+    }
+    pub fn gone(&self) -> bool {
+        self.gone
+    }
 }
 /// A step's content leaving while the next arrives.
 struct Leaving {
@@ -79,7 +129,7 @@ pub struct Stage {
     on_sound: Option<OnSound>,
     focus: FocusHandle,
     skip: Option<Entity<NativeControl>>,
-    hand_off: Option<HandOff>,
+    curtain: Curtain,
     /// `StageEvent::WindowLive` was sent.
     live_sent: bool,
     /// A real window (`native_window`) holds the Welcome now: the stage
@@ -97,6 +147,8 @@ pub enum StageEvent {
     /// The wave has drawn the window and it is live: the owner puts the
     /// Welcome in a real window on the same rectangle (`native_window`).
     WindowLive,
+    /// The lights are out (`Curtain`): the owner removes the stage window.
+    Dark,
 }
 impl EventEmitter<StageEvent> for Stage {}
 
@@ -140,7 +192,7 @@ impl Stage {
             on_sound: None,
             focus: cx.focus_handle(),
             skip: None,
-            hand_off: None,
+            curtain: Curtain::default(),
             live_sent: false,
             native: None,
             native_drawn: false,
@@ -206,7 +258,8 @@ impl Stage {
         self.pending = Some(card);
         cx.notify();
     }
-    /// The real window is up: the stage stops drawing its own copy.
+    /// The real window is up: the stage stops drawing its own copy, and
+    /// its veil and light fade away; then it goes.
     pub fn native_shown(&mut self, cx: &mut Context<Self>) {
         self.native_drawn = true;
         if let Some(card) = self.pending.take() {
@@ -214,7 +267,25 @@ impl Stage {
             self.leaving = None;
             self.presence = Animated::unit(1.);
         }
+        self.curtain.native_shown(self.now());
+        // Never left standing if the stage stops drawing (an occluded
+        // window, a Space switch): dark by this time whatever happens.
+        let wait = self.sheet.lights_seconds(self.motion()) + 0.45;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs_f64(wait))
+                .await;
+            let _ = this.update(cx, |stage, cx| stage.lights_out(true, cx));
+        })
+        .detach();
         cx.notify();
+    }
+    /// Dark (or `force`): tells the owner, once.
+    fn lights_out(&mut self, force: bool, cx: &mut Context<Self>) {
+        let (motion, t) = (self.motion(), self.now());
+        if self.curtain.take_dark(&self.sheet, motion, t, force) {
+            cx.emit(StageEvent::Dark);
+        }
     }
     /// The real window holding the Welcome, if one does.
     pub fn native_window(&self) -> Option<AnyWindowHandle> {
@@ -257,19 +328,13 @@ impl Stage {
         self.wave.update(cx, |w, _| w.clear());
         cx.notify();
     }
-    /// The last step: the window eases out while the veil fades from the
-    /// app's first window behind the stage, then `done` runs.
-    pub fn hand_off(
-        &mut self,
-        done: impl FnOnce(&mut Window, &mut App) + 'static,
-        cx: &mut Context<Self>,
-    ) {
+    /// The last step: the window eases out while what is left of the veil
+    /// fades from the app's first window behind the stage; dark, the stage
+    /// tells its owner (`StageEvent::Dark`).
+    pub fn hand_off(&mut self, cx: &mut Context<Self>) {
         let start = self.now().max(self.sheet.length());
         self.offset += start - self.now();
-        self.hand_off = Some(HandOff {
-            start,
-            done: Some(Box::new(done)),
-        });
+        self.curtain.hand_off(start);
         cx.notify();
     }
     fn motion(&self) -> bool {
@@ -647,7 +712,7 @@ impl Render for Stage {
         let phase = self.sheet.phase(t);
         let live = self.sheet.length();
         let stepping = self.step_springs(t, cx);
-        let resting = t > live + 0.5 && !stepping && self.hand_off.is_none();
+        let resting = t > live + 0.5 && !stepping && !self.curtain.fading();
         if self.clock.is_none() && !resting {
             window.request_animation_frame();
         }
@@ -664,16 +729,17 @@ impl Render for Stage {
         // straight to the window too): the first frame is always clear.
         let mut stage_alpha =
             smooth(opened / if self.motion() { 0.35 } else { 0.6 }) as f32;
-        let picture: AnyElement = if let Some(hand_off) = self.hand_off.as_mut() {
-            let since = t - hand_off.start;
+        // The lights go down once the Welcome has its own window, and with
+        // the hand-off: the veil and the mark's light together.
+        let lights = self.curtain.left(&self.sheet, self.motion(), t) as f32;
+        stage_alpha *= lights;
+        veil *= lights;
+        if lights <= 0. {
+            self.lights_out(false, cx);
+        }
+        let picture: AnyElement = if let Some(since) = self.curtain.out_since(t) {
             let out = smooth(since / WINDOW_OUT);
-            let left = self.sheet.veil_left(since) as f32;
-            stage_alpha *= left;
-            veil *= left;
-            if left <= 0. {
-                if let Some(done) = hand_off.done.take() {
-                    cx.defer_in(window, move |_, window, cx| done(window, cx));
-                }
+            if lights <= 0. {
                 div().into_any_element()
             } else {
                 self.set_snapshots(true, cx);
@@ -712,7 +778,7 @@ impl Render for Stage {
             self.intro(t, area, scale)
         };
         let title = self.sheet.title(phase);
-        let skippable = t < live && self.hand_off.is_none();
+        let skippable = t < live && !self.curtain.handing_off();
         let mut root = div()
             .id("stage")
             .debug_selector(|| "stage".into())
@@ -863,5 +929,83 @@ pub fn snapshot_build(revision: u64) -> BuildSnapshot {
         revision: Some(revision),
         ready: Some(0.),
         filter: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CueSheet, Curtain,
+        cue::{LIGHTS_DOWN, LIGHTS_DOWN_REDUCED},
+    };
+    #[test]
+    fn the_lights_go_down_once_the_welcome_has_its_own_window_then_the_stage_goes_once() {
+        let sheet = CueSheet::default();
+        let mut c = Curtain::default();
+        let at = sheet.length() + 0.4;
+        // The intro and the drawn window keep their dim and light.
+        assert_eq!(c.left(&sheet, true, at), 1.);
+        assert!(!c.fading());
+        assert!(!c.take_dark(&sheet, true, at + 60., false));
+        assert!(
+            !c.take_dark(&sheet, true, at + 60., true),
+            "no stage to clear before"
+        );
+        c.native_shown(at);
+        assert!(c.fading());
+        // Subtle and eased: most of it in the first half, none of it after.
+        let half = c.left(&sheet, true, at + LIGHTS_DOWN / 2.);
+        assert!(half > 0. && half < 0.5, "{half}");
+        assert!(!c.take_dark(&sheet, true, at + 0.1, false));
+        assert_eq!(c.left(&sheet, true, at + LIGHTS_DOWN), 0.);
+        assert!(c.take_dark(&sheet, true, at + LIGHTS_DOWN, false));
+        assert!(c.gone());
+        // Gone stays gone: a later frame, the safety net or a hand-off never
+        // bring it back or remove it twice.
+        assert!(!c.take_dark(&sheet, true, at + 5., true));
+        c.hand_off(at + 10.);
+        assert_eq!(c.left(&sheet, true, at + 10.), 0.);
+        assert!(!c.take_dark(&sheet, true, at + 20., false));
+        // Showing again (a second `native_shown`) keeps the first start.
+        c.native_shown(at + 30.);
+        assert_eq!(c.left(&sheet, true, at + 30.), 0.);
+    }
+    #[test]
+    fn reduce_motion_is_a_plain_quick_cross_fade() {
+        let sheet = CueSheet::default();
+        let mut c = Curtain::default();
+        c.native_shown(0.);
+        let half = c.left(&sheet, false, LIGHTS_DOWN_REDUCED / 2.);
+        assert!((half - 0.5).abs() < 0.02, "linear: {half}");
+        assert!(c.take_dark(&sheet, false, LIGHTS_DOWN_REDUCED, false));
+    }
+    #[test]
+    fn a_hand_off_fades_what_is_left_and_the_replay_without_a_real_window_still_goes() {
+        let sheet = CueSheet::default();
+        // Mid-way down: the hand-off only takes it further, never back up.
+        let mut c = Curtain::default();
+        c.native_shown(0.);
+        let before = c.left(&sheet, true, 0.2);
+        c.hand_off(0.2);
+        let mut last = before;
+        for i in 0..=30 {
+            let l = c.left(&sheet, true, 0.2 + f64::from(i) * 0.05);
+            assert!(l <= last + 1e-9, "{l} after {last}");
+            last = l;
+        }
+        assert!(c.take_dark(&sheet, true, 0.2 + sheet.dim_out.seconds, false));
+        // A stage with no real window (captures, or one that never showed):
+        // the hand-off alone takes it out, once; the safety net after it
+        // does nothing.
+        let mut c = Curtain::default();
+        c.hand_off(9.);
+        assert!(c.fading());
+        assert!(c.left(&sheet, true, 9.1) > 0.);
+        assert!(c.take_dark(&sheet, true, 9.02 + sheet.dim_out.seconds, false));
+        assert!(!c.take_dark(&sheet, true, 30., true));
+        // The safety net clears a stage that stopped drawing mid-fade.
+        let mut c = Curtain::default();
+        c.native_shown(0.);
+        assert!(c.take_dark(&sheet, true, 0.1, true));
     }
 }

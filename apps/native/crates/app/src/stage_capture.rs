@@ -253,7 +253,7 @@ pub fn run(out: std::path::PathBuf, stills_only: bool, reduced: bool) -> anyhow:
                 let stage = view.downcast::<Stage>().unwrap();
                 stage.update(cx, |s, cx| {
                     s.clock = Some(t);
-                    s.hand_off(|_, _| {}, cx);
+                    s.hand_off(cx);
                 });
             })
             .unwrap();
@@ -334,7 +334,7 @@ pub fn pacing(out: &std::path::Path) -> anyhow::Result<()> {
                 let stage = view.downcast::<Stage>().unwrap();
                 stage.update(cx, |s, cx| {
                     s.clock = Some(t);
-                    s.hand_off(|_, _| {}, cx);
+                    s.hand_off(cx);
                 });
             })
             .unwrap();

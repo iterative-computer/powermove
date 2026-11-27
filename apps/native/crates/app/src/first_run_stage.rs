@@ -1,7 +1,8 @@
 //! The first run on the stage (`pm_shell::stage`): the intro, then the
 //! first-run steps in the Welcome window (drawn by the wave, then a real
-//! window on the same rectangle), then the hand-off into the app. Also the
-//! intro replayed from Help and `--replay-onboarding`.
+//! window on the same rectangle, as the stage's lights go down and the stage
+//! leaves), then the hand-off into the app. Also the intro replayed from Help
+//! and `--replay-onboarding`.
 use gpui::{AnyWindowHandle, AppContext, Bounds, Entity, WindowHandle};
 use pm_shell::{
     stage::{
@@ -27,6 +28,9 @@ pub struct StageWindow {
     /// Hand-off has started: no late `WindowLive` event may open a new native
     /// Welcome window, and repeated hand-offs are ignored.
     handed_off: Rc<Cell<bool>>,
+    /// The stage window has been removed (its lights went out, or the
+    /// hand-off's safety net): never removed twice.
+    stage_gone: Rc<Cell<bool>>,
     /// The window's close button quits (the first run); else it hands off
     /// (the intro replayed).
     quits: bool,
@@ -107,66 +111,60 @@ impl StageWindow {
             c
         });
         *self.card.borrow_mut() = next.clone();
-        let native = *self.native.borrow();
-        let _ = self.window.update(cx, |stage, window, cx| {
-            stage.set_card(next.clone(), cx);
-            if native.is_none() {
-                next.update(cx, |c, cx| c.hold_focus(window, cx));
-            }
+        // The `Stage` entity, not its window: once the Welcome has its own
+        // window the stage window has gone.
+        self.stage
+            .update(cx, |stage, cx| stage.set_card(next.clone(), cx));
+        let holder = self.native.borrow().unwrap_or_else(|| self.window.into());
+        let _ = holder.update(cx, |_, window, cx| {
+            next.update(cx, |c, cx| c.hold_focus(window, cx));
         });
-        if let Some(native) = native {
-            let _ = native.update(cx, |_, window, cx| {
-                next.update(cx, |c, cx| c.hold_focus(window, cx));
-            });
-        }
     }
-    /// The last step: the window eases out and the room's lights come up
-    /// on the app's first window, opened behind the stage a moment before.
+    /// The last step: the window eases out and the app's first window,
+    /// opened a moment before, is there. Whatever is left of the stage (the
+    /// intro replayed, a hand-off while its lights were still going down)
+    /// fades with it; a stage already gone stays gone.
     pub fn hand_off(&self, cx: &mut gpui::App) {
         if self.handed_off.replace(true) {
             return;
         }
-        let stage_window: AnyWindowHandle = self.window.into();
-        let stage_entity = self.stage.clone();
-        let native_slot = self.native.clone();
-        let native = native_slot.borrow_mut().take();
+        let this = self.clone();
         cx.spawn(async move |cx| {
-            // A few frames for the window to draw behind the stage.
+            // A few frames for the app's window to draw.
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(120))
                 .await;
-            let (deadline, active_native) = cx.update(|cx| {
-                let active_native = native.or_else(|| native_slot.borrow_mut().take());
-                if let Some(native) = active_native {
+            let deadline = cx.update(|cx| {
+                if let Some(native) = this.native.borrow_mut().take() {
                     native_window::ease_out(native, cx);
                 }
-                // Update the `Stage` entity directly rather than through
-                // `WindowHandle::update`, which returns `Err` (and was
-                // silently ignored) if the stage window is mid-draw (e.g.
-                // spinning on S110) when the timer fires.
-                stage_entity.update(cx, |stage, cx| {
-                    stage.hand_off(|window, _| window.remove_window(), cx);
-                });
-                (
-                    stage_entity.read(cx).sheet.dim_out.seconds + 0.45,
-                    active_native,
-                )
+                // The `Stage` entity directly, not through the window: that
+                // update fails while the stage window is mid-draw, and the
+                // entity outlives a stage window already gone.
+                this.stage.update(cx, |stage, cx| stage.hand_off(cx));
+                this.stage.read(cx).sheet.dim_out.seconds + 0.45
             });
-            // Safety net: if a macOS fullscreen Space switch or window
-            // occlusion stops the stage display link before `veil_left` reaches
-            // 0, never leave the status-level veil or Welcome window stuck on
-            // screen forever.
+            // Safety net: a fullscreen Space switch or an occluded window
+            // stops the stage drawing before its lights are out; never leave
+            // the status-level veil on screen.
             cx.background_executor()
                 .timer(std::time::Duration::from_secs_f64(deadline))
                 .await;
-            cx.update(|cx| {
-                if let Some(native) = active_native.or_else(|| native_slot.borrow_mut().take()) {
-                    remove_window_reliably(native, cx);
-                }
-                remove_window_reliably(stage_window, cx);
-            });
+            cx.update(|cx| this.remove_stage(cx));
         })
         .detach();
+    }
+    /// The stage's lights are out: its window goes, once, and the Welcome
+    /// (if it is still up) becomes an ordinary window.
+    fn remove_stage(&self, cx: &mut gpui::App) {
+        if self.stage_gone.replace(true) {
+            return;
+        }
+        remove_window_reliably(self.window.into(), cx);
+        let native = *self.native.borrow();
+        if let Some(native) = native {
+            native_window::stage_left(native, cx);
+        }
     }
 }
 
@@ -223,6 +221,7 @@ pub fn open(
         on_action,
         native: Rc::default(),
         handed_off: Rc::new(Cell::new(false)),
+        stage_gone: Rc::new(Cell::new(false)),
         quits,
     };
     let live = staged.clone();
@@ -232,6 +231,10 @@ pub fn open(
             // borrowed on GPUI's update stack when `go_native` queries its bounds.
             let live = live.clone();
             cx.defer(move |cx| live.go_native(stage, cx));
+        }
+        StageEvent::Dark => {
+            let live = live.clone();
+            cx.defer(move |cx| live.remove_stage(cx));
         }
     })
     .detach();

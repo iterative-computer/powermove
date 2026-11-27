@@ -168,6 +168,38 @@ fn a_new_user_gets_onboarding_and_no_migration() {
     assert!(onboarding_completed(&profile));
 }
 #[test]
+fn once_the_app_has_opened_no_first_run_window_shows_again() {
+    // The owner signed in, finished the steps, and Home was up; Get Aerolite
+    // opened Checkout in the browser, the app lost focus, and the billing and
+    // identity changes that followed brought the stage back on the last
+    // step's frame. Entering ends the first run for good.
+    let (_temp, home) = home();
+    let mut flow = Flow::new(plan(&home));
+    start(&mut flow);
+    for id in ["begin", "continue", "not_now", "choose:claude", "continue", "continue"] {
+        flow.action(id);
+    }
+    assert!(
+        flow.visible(),
+        "the last step shows while the library opens"
+    );
+    titled(&flow.frame(), "Opening Powermove");
+    flow.entered();
+    assert!(!flow.visible());
+    for message in [
+        Message::Powermove(Some("ana@example.com".into())),
+        Message::AeroPlan(AeroPlan::default()),
+        Message::Powermove(None),
+        Message::Account(pm_agents::Provider::Claude, Some("Signed in".into())),
+    ] {
+        flow.message(message);
+        assert!(!flow.visible());
+    }
+    flow.action("continue");
+    flow.action("back");
+    assert!(!flow.visible());
+}
+#[test]
 fn bringing_a_workspace_records_the_opt_in_and_back_reaches_welcome() {
     let (_temp, home) = home();
     let mut flow = Flow::new(plan(&home));
