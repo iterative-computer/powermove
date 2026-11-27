@@ -3232,23 +3232,11 @@ function Composer({
         // was under it (the composition there, or the window).
         { label: "Select Part of the Screen", value: "pickRegion" },
       );
-    if (canApprove)
-      options.push(
-        ...(Object.keys(ACCESS) as Access[]).map((value) => ({
-          label: ACCESS[value].label,
-          detail: ACCESS[value].detail,
-          value,
-          checked: value === s.settings.access,
-          category: "Approvals",
-        })),
-      );
     void menu?.({ anchor, picker: "add", search: false, placeholder: "", options }).then((choice) => {
       if (menuEpoch.current !== epoch) return;
       setOpenPicker(null);
       if (choice === "attach") send({ type: "attach" });
       else if (choice === "pickRegion") send({ type: "pickRegion" });
-      else if (typeof choice === "string" && choice in ACCESS && choice !== s.settings.access)
-        send({ type: "setAccess", access: choice as Access });
     });
   };
   const openAccess = (anchor: number) => {
@@ -3492,8 +3480,8 @@ function Composer({
               role="button"
               tabIndex={0}
               label="Add"
-              title="Add files or part of the screen, or choose approvals"
-              disabled={!menu || !(canAttach || canApprove)}
+              title="Add files or part of the screen"
+              disabled={!menu || !canAttach}
               open={openPicker === "add"}
               aria-haspopup="menu"
               aria-expanded={openPicker === "add"}

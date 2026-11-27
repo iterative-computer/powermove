@@ -387,6 +387,58 @@ fn deleting_the_last_key_keeps_its_value() {
 }
 
 #[test]
+fn deleting_all_keys_at_playhead_keeps_the_value_shown_at_the_playhead() {
+    // Playhead ahead of the last keyframe keeps the last keyframe's value.
+    let mut s = store();
+    run(
+        &mut s,
+        kc(KeyframeCommand::DeleteAt {
+            key_ids: vec!["k1".into(), "k2".into()],
+            time: 3.0,
+        }),
+    );
+    assert!(keys(&s, "anim", "opacity").is_empty());
+    assert_eq!(num(&layer(&s, "anim"), &["p", "opacity", "v"]), 100.0);
+
+    // Playhead between keyframes keeps the interpolated value shown in the viewer.
+    s.undo().unwrap();
+    run(
+        &mut s,
+        kc(KeyframeCommand::DeleteAt {
+            key_ids: vec!["k1".into(), "k2".into()],
+            time: 0.75,
+        }),
+    );
+    assert!(keys(&s, "anim", "opacity").is_empty());
+    assert_eq!(num(&layer(&s, "anim"), &["p", "opacity", "v"]), 75.0);
+
+    // Playhead before the first keyframe keeps the first keyframe's value.
+    s.undo().unwrap();
+    run(
+        &mut s,
+        kc(KeyframeCommand::DeleteAt {
+            key_ids: vec!["k1".into(), "k2".into()],
+            time: 0.0,
+        }),
+    );
+    assert!(keys(&s, "anim", "opacity").is_empty());
+    assert_eq!(num(&layer(&s, "anim"), &["p", "opacity", "v"]), 0.0);
+
+    // Deleting only one of two keyframes keeps the remaining keyframe intact.
+    s.undo().unwrap();
+    run(
+        &mut s,
+        kc(KeyframeCommand::DeleteAt {
+            key_ids: vec!["k1".into()],
+            time: 3.0,
+        }),
+    );
+    let remaining = keys(&s, "anim", "opacity");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(at(&remaining[0], &["i"]).as_str(), Some("k2"));
+}
+
+#[test]
 fn clear_all_keeps_the_value_shown_at_the_playhead() {
     let mut s = store();
     run(

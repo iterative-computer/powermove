@@ -333,7 +333,7 @@ impl DrawReuse {
     }
 
     fn layer_traits(&mut self, comp: &pm_eval::Comp<'_>, id: &JsString, node: &Node) -> &LayerTraits {
-        const MAX_LAYERS: usize = 4096;
+        const MAX_LAYERS: usize = 65_536;
         let key = (comp.id().clone(), comp.at_root(), id.clone());
         if self.layer_traits.len() >= MAX_LAYERS && !self.layer_traits.contains_key(&key) {
             self.layer_traits.clear();

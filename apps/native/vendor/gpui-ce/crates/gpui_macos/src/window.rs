@@ -2816,15 +2816,30 @@ impl PlatformWindow for MacWindow {
     }
 
     fn start_window_move(&self) {
-        let this = self.0.lock();
-        if this.simple_fullscreen_state.is_some() {
+        let (window, blocked) = {
+            let this = self.0.lock();
+            (
+                this.native_window,
+                this.simple_fullscreen_state.is_some() || this.is_fullscreen(),
+            )
+        };
+        if blocked {
             return;
         }
-        let window = this.native_window;
 
         unsafe {
             let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let event: ObjcId = msg_send![app, currentEvent];
+            if event.is_null() {
+                return;
+            }
+            let event_type = event.eventType();
+            if !matches!(
+                event_type,
+                NSEventType::LeftMouseDown | NSEventType::LeftMouseDragged
+            ) {
+                return;
+            }
             let _: () = msg_send![window, performWindowDragWithEvent: event];
         }
     }

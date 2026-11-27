@@ -645,24 +645,24 @@ impl Renderer {
         self.evaluator.channel_memo_stats()
     }
 
-    /// Queues the document's native effect programs on the compiler worker.
-    /// Host-provided effects retain their own lifecycle.
+    /// Queues the document's native effect and custom shader-layer programs on
+    /// background compiler workers. Host-provided effects retain their own
+    /// lifecycle.
     pub fn prewarm_programs(&mut self, document: &pm_model::Document) -> usize {
-        if self.effect_host.is_some() {
-            return 0;
-        }
-        let first = crate::effects::prewarm::document_definitions(document);
         let precision = document
             .root()
             .and_then(|root| crate::composite::color::project_color(root).ok())
             .map_or(pm_protocol::color::Precision::Float16, |color| {
                 color.precision
             });
-        self.effects.prewarm(
-            &self.device,
-            pm_gpu::target::working_format(precision),
-            &first,
-        )
+        let format = pm_gpu::target::working_format(precision);
+        let mut queued = 0;
+        if self.effect_host.is_none() {
+            let first = crate::effects::prewarm::document_definitions(document);
+            queued += self.effects.prewarm(&self.device, format, &first);
+        }
+        queued += self.shaders.prewarm(&self.device, format, document);
+        queued
     }
 
     /// The draw reuse's counters (with the frames drawn from a kept bottom

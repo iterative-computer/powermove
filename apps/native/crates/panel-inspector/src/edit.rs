@@ -652,8 +652,9 @@ impl Inspector {
                 PropertyAction::Diamond if remove => {
                     if let Some(k) = self.key_at(&id, time)? {
                         commands.push(
-                            KeyframeCommand::Delete {
+                            KeyframeCommand::DeleteAt {
                                 key_ids: vec![text(&k, "i").into()],
+                                time,
                             }
                             .into(),
                         );

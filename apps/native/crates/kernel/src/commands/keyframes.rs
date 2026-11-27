@@ -216,6 +216,11 @@ pub enum KeyframeCommand {
     /// keeps that key's value as its static value. Missing ids are ignored.
     /// Label "Delete Keyframes".
     Delete { key_ids: Vec<String> },
+    /// Delete selected keys at composition `time` (the playhead): a channel
+    /// losing its last key keeps the value currently evaluated at `time`
+    /// instead of snapping back to the first key's value. Missing ids are
+    /// ignored. Label "Delete Keyframes".
+    DeleteAt { key_ids: Vec<String>, time: f64 },
     /// Clear All Keyframes / Remove Animation: the channel becomes static at
     /// the value its keys give at `time` (the playhead) and loses its keys.
     /// Label "Clear Keyframes".
@@ -326,7 +331,7 @@ impl KeyframeCommand {
             KeyframeCommand::Simplify { .. } => "Simplify Keyframes",
             KeyframeCommand::Add { .. } => "Add Keyframe",
             KeyframeCommand::Toggle { .. } => "Toggle Keyframe",
-            KeyframeCommand::Delete { .. } => "Delete Keyframes",
+            KeyframeCommand::Delete { .. } | KeyframeCommand::DeleteAt { .. } => "Delete Keyframes",
             KeyframeCommand::ClearAll { .. } => "Clear Keyframes",
             KeyframeCommand::Move { .. } => "Move Keyframes",
             KeyframeCommand::Edit { .. } => "Edit Keyframe",
@@ -362,13 +367,8 @@ impl KeyframeCommand {
                 key_id,
                 value,
             } => add_key(cx, layer_id, channel, *time, key_id, value.as_ref(), true),
-            KeyframeCommand::Delete { key_ids } => {
-                let ids: HashSet<&str> = key_ids.iter().map(String::as_str).collect();
-                edit_tracks(cx, &ids, |_, prop, _| {
-                    track::remove_keys(prop, &ids);
-                    Ok(())
-                })
-            }
+            KeyframeCommand::Delete { key_ids } => delete_keys(cx, key_ids, None),
+            KeyframeCommand::DeleteAt { key_ids, time } => delete_keys(cx, key_ids, Some(*time)),
             KeyframeCommand::ClearAll {
                 layer_id,
                 channel,
@@ -790,6 +790,36 @@ fn add_key(
         }
     }
     cx.put_layer(&loc, layer)
+}
+
+/// Delete selected keys; when `time` is given and all keys on a channel are
+/// removed, the channel becomes static at the value evaluated at `time` (the
+/// playhead) rather than snapping back to the first key's value.
+fn delete_keys(cx: &mut Cx<'_>, key_ids: &[String], time: Option<f64>) -> Result<(), CommandError> {
+    let time = match time {
+        Some(t) => Some(values::finite(t, "time")?),
+        None => None,
+    };
+    let ids: HashSet<&str> = key_ids.iter().map(String::as_str).collect();
+    edit_tracks(cx, &ids, |layer, prop, channel| {
+        let all_removed = !track::keys_of(prop).is_empty()
+            && track::keys_of(prop).iter().all(|k| {
+                k.get("i")
+                    .and_then(Value::as_str)
+                    .is_some_and(|i| ids.contains(i))
+            });
+        let kept = if all_removed {
+            time.map(|t| value_at(prop, track::local_time(layer, t), channel))
+        } else {
+            None
+        };
+        if track::remove_keys(prop, &ids)
+            && let Some(v) = kept
+        {
+            values::obj(prop).insert("v", v);
+        }
+        Ok(())
+    })
 }
 
 /// Clear All Keyframes: static at the value shown at `time`.

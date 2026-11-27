@@ -238,8 +238,9 @@ impl TimelineModel {
             if all {
                 if let Some(k) = at {
                     commands.push(
-                        KeyframeCommand::Delete {
+                        KeyframeCommand::DeleteAt {
                             key_ids: vec![k.id.clone()],
+                            time,
                         }
                         .into(),
                     );

@@ -3104,11 +3104,10 @@ pub use crate::kit::tooltip;
 impl Editor {
     /// Home fills the window below the toolbar: no docks, no viewer slot,
     /// no native panel bodies and no status bar (v1's Projects screen).
-    /// The title bar's empty band, `top` points tall. AppKit passes a press
-    /// on the toolbar's empty space through to this view, so the title bar's
-    /// own double-click never runs; a double-click here does what the person
-    /// chose in System Settings (Fill, Zoom or Minimize). Single presses fall
-    /// through untouched: AppKit still moves the window from here.
+    /// The title bar's empty band, `top` points tall. AppKit passes presses
+    /// on the toolbar's empty space through to GPUI's full-size content view,
+    /// so we handle both window dragging (`start_window_move`) on single press
+    /// and the system double-click action (Fill, Zoom or Minimize) here.
     fn titlebar_band(top: f32, fill: u32) -> Div {
         div()
             .absolute()
@@ -3120,6 +3119,8 @@ impl Editor {
             .on_mouse_down(MouseButton::Left, |e: &MouseDownEvent, window, _| {
                 if e.click_count == 2 {
                     window.titlebar_double_click();
+                } else if e.click_count == 1 && !e.modifiers.modified() {
+                    window.start_window_move();
                 }
             })
     }

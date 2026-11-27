@@ -1974,13 +1974,15 @@ impl Engine {
                 }
                 self.studio_source_view = self.studio_view.clone();
             }
-            if need_prewarm
-                && !self.drag_frame
-                && (self.frame_interrupt.is_none() || !large_scene(scene))
-            {
-                // Small viewer scenes and standalone renders can prime the
-                // pipeline cache. A heavy viewer scene compiles on demand.
-                self.renderer.prewarm(&scene.doc);
+            if need_prewarm && !self.drag_frame {
+                // Background program compilation (effects + custom GLSL shader
+                // layers) runs off the frame thread, so large scenes benefit
+                // from priming them ahead of playback without blocking the
+                // current frame. Synchronous core/text pipeline priming stays
+                // restricted to smaller scenes and standalone renders.
+                if self.frame_interrupt.is_none() || !large_scene(scene) {
+                    self.renderer.prewarm(&scene.doc);
+                }
                 self.renderer.prewarm_programs(&scene.doc);
                 self.prewarm_key = Some(prewarm_key);
             }

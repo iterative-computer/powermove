@@ -366,7 +366,7 @@ test("provider and model share one menu; effort has its own; approvals are in +;
   };
   p.snapshot.settings.model = "gpt-6";
   p.snapshot.settings.effort = "high";
-  const picks = ["provider:claude", "model:gpt-6-mini", "low", "auto"];
+  const picks: (string | null)[] = ["provider:claude", "model:gpt-6-mini", "low", null, "auto"];
   const asked: MenuOption[][] = [];
   const menu: Menu = async (r) => {
     asked.push(r.options);
@@ -382,6 +382,7 @@ test("provider and model share one menu; effort has its own; approvals are in +;
     "agent-model",
     "agent-effort",
     "agent-add",
+    "agent-access",
   ]) {
     await root.drive(byId(root, id).id, "click");
     await Promise.resolve();
@@ -395,14 +396,16 @@ test("provider and model share one menu; effort has its own; approvals are in +;
     ["Low", false],
     ["High", true],
   ]);
-  // "+": the attachments, then Approvals as a section of their own.
+  // "+": attachments only; Approvals live on the dedicated access control.
   expect(asked[3]!.map((o) => [o.category ?? "", o.label, o.checked ?? false])).toEqual([
     ["", "Add Files…", false],
     ["", "Select Part of the Screen", false],
-    ["Approvals", "Composition only", true],
-    ["Approvals", "Supervised", false],
-    ["Approvals", "Auto", false],
-    ["Approvals", "Full access", false],
+  ]);
+  expect(asked[4]!.map((o) => [o.category ?? "", o.label, o.checked ?? false])).toEqual([
+    ["Access Mode", "Composition only", true],
+    ["Access Mode", "Supervised", false],
+    ["Access Mode", "Auto", false],
+    ["Access Mode", "Full access", false],
   ]);
   expect(actions).toEqual([
     { type: "setProvider", provider: "claude" },

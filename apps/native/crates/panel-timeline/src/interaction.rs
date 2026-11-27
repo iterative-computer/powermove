@@ -491,7 +491,13 @@ impl TimelineModel {
                 if keys.is_empty() {
                     return Ok(Plan::default());
                 }
-                edit(KeyframeCommand::Delete { key_ids: keys }.into())
+                edit(
+                    KeyframeCommand::DeleteAt {
+                        key_ids: keys,
+                        time,
+                    }
+                    .into(),
+                )
             }
             "delete" => {
                 let roots: Vec<_> = self
@@ -2857,7 +2863,13 @@ impl TimelineModel {
                 };
                 Plan::default()
             }
-            "keys.delete" => edit(KeyframeCommand::Delete { key_ids: keys }.into()),
+            "keys.delete" => edit(
+                KeyframeCommand::DeleteAt {
+                    key_ids: keys,
+                    time,
+                }
+                .into(),
+            ),
             "keys.hold" => {
                 let hold = !self.all_held(&keys);
                 edit(

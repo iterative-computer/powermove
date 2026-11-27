@@ -585,6 +585,69 @@ fn apply_ground(window: &NSWindow, backdrop: &NSView, t: &Tokens, fullscreen: bo
     };
     window.setBackgroundColor(Some(&colour));
 }
+/// In macOS Full Screen, AppKit moves `NSToolbarView` / `NSTitlebarContainerView`
+/// into a separate `NSToolbarFullScreenWindow` that slides down with the menu bar
+/// when hovering the top edge. With `FullSizeContentView` + `Unified` toolbar on
+/// macOS 26, that overlay window stays transparent even when
+/// `titlebarAppearsTransparent` is `false`, so panel headers bleed through it.
+/// Paint an opaque `window` background directly on the fullscreen overlay window
+/// and its titlebar container while fullscreen, and clear it when exiting.
+fn style_fullscreen_toolbar(window: &NSWindow, tabs: &NSView, t: &Tokens, fullscreen: bool) {
+    window.setTitlebarAppearsTransparent(!fullscreen);
+    let sep = if fullscreen {
+        objc2_app_kit::NSTitlebarSeparatorStyle::Line
+    } else {
+        objc2_app_kit::NSTitlebarSeparatorStyle::None
+    };
+    window.setTitlebarSeparatorStyle(sep);
+    let bg = native_color(t.colors.window);
+    let cg = bg.CGColor();
+    let paint_ancestors = |view: &NSView, solid: bool| {
+        let mut cur: Option<Retained<NSView>> = unsafe { view.superview() };
+        while let Some(v) = cur {
+            let cls = v.class().name().to_string_lossy();
+            if cls.contains("NSTitlebarContainerView") || cls.contains("NSTitlebarView") {
+                v.setWantsLayer(true);
+                if let Some(layer) = v.layer() {
+                    layer.setBackgroundColor(solid.then_some(&*cg));
+                }
+            }
+            cur = unsafe { v.superview() };
+        }
+    };
+    if fullscreen {
+        if let Some(tb_win) = tabs.window()
+            && !std::ptr::eq(Retained::as_ptr(&tb_win), window as *const NSWindow)
+        {
+            tb_win.setOpaque(true);
+            tb_win.setBackgroundColor(Some(&bg));
+            if let Some(content) = tb_win.contentView() {
+                content.setWantsLayer(true);
+                if let Some(layer) = content.layer() {
+                    layer.setBackgroundColor(Some(&cg));
+                }
+            }
+        }
+        if let Some(children) = window.childWindows() {
+            for child in children.to_vec() {
+                let cls = child.class().name().to_string_lossy();
+                if cls.contains("ToolbarFullScreen") {
+                    child.setOpaque(true);
+                    child.setBackgroundColor(Some(&bg));
+                    if let Some(content) = child.contentView() {
+                        content.setWantsLayer(true);
+                        if let Some(layer) = content.layer() {
+                            layer.setBackgroundColor(Some(&cg));
+                        }
+                    }
+                }
+            }
+        }
+        paint_ancestors(tabs, true);
+    } else {
+        paint_ancestors(tabs, false);
+    }
+}
 fn ground(window: &NSWindow, backdrop: &NSView, t: &Tokens) {
     let fullscreen = window.styleMask().contains(NSWindowStyleMask::FullScreen);
     apply_ground(window, backdrop, t, fullscreen);
@@ -2019,7 +2082,12 @@ define_class!(
     #[thread_kind = MainThreadOnly]
     #[name = "PMShellTabStrip"]
     struct TabStrip;
-    impl TabStrip {}
+    impl TabStrip {
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn mouse_down_can_move_window(&self) -> bool {
+            true
+        }
+    }
 );
 fn strip_document(strip: &NSView) -> Retained<NSView> {
     TabScroll::find(strip)
@@ -5172,7 +5240,7 @@ impl Host {
                         && let Ok(h) = host.try_borrow()
                     {
                         apply_ground(&h.window, &h.backdrop, &h.tokens, fullscreen);
-                        h.window.setTitlebarAppearsTransparent(!fullscreen);
+                        style_fullscreen_toolbar(&h.window, &h.tabs, &h.tokens, fullscreen);
                     }
                     let _ = sender.try_send(Command {
                         name: "shellFullscreenChanged".into(),
@@ -6200,6 +6268,9 @@ impl Host {
         }
         self.tabs_width.setConstant(x);
         *self.tabs_shown.borrow_mut() = (marked, room, marks);
+        if self.is_fullscreen() {
+            style_fullscreen_toolbar(&self.window, &self.tabs, &self.tokens, true);
+        }
     }
     /// Home or a page shows over the project.
     fn aside(&self) -> bool {
