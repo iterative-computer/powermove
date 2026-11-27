@@ -62,7 +62,7 @@ impl MarqueeSession {
         layers: Vec<String>,
     ) -> crate::render::Marquee {
         self.picked.clear();
-        if !self.graph && !layers.is_empty() {
+        if !self.graph && picked.is_empty() && !layers.is_empty() {
             let previous = self.layers.iter().filter(|_| self.additive).cloned();
             return crate::render::Marquee {
                 clips: unique_ids(previous.chain(layers)),
@@ -274,5 +274,27 @@ mod tests {
                 SelectionCall::Channel(Some(channel)),
             ] if ids == &["original"] && keys == &["shared-key"] && channel == "position.x")
         ));
+    }
+
+    #[test]
+    fn marquee_across_multiple_layers_keeps_keyframes_even_when_crossing_clip_bars() {
+        let model = TimelineModel::default();
+        let mut session = MarqueeSession::begin(&model, false, false);
+        let picked = vec![
+            ("layer-a".to_owned(), "ka1".to_owned()),
+            ("layer-b".to_owned(), "kb1".to_owned()),
+        ];
+        // Box spans from layer-a's property rows across layer-b's clip strip
+        // into layer-b's property rows.
+        assert!(session.preview(picked.clone(), vec!["layer-b".to_owned()]));
+        let (clips, keys) = session.current();
+        assert_eq!(keys, picked.as_slice());
+        assert_eq!(clips, &["layer-a", "layer-b"]);
+
+        // When no keyframes are covered, crossing clips still selects clips.
+        assert!(session.preview(vec![], vec!["layer-b".to_owned()]));
+        let (clips, keys) = session.current();
+        assert!(keys.is_empty());
+        assert_eq!(clips, &["layer-b"]);
     }
 }

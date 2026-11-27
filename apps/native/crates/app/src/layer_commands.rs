@@ -1463,7 +1463,7 @@ fn nudge(
 /// the time they took. A layer moves by the removed spans that end at or
 /// before its start; one that overlaps a removed span stays where it is, and
 /// so does a locked one. A group that moves carries its members.
-fn ripple_delete(layers: &[LayerInfo], selected: &[String]) -> Option<Plan> {
+fn ripple_delete(layers: &[LayerInfo], selected: &[String], time: f64) -> Option<Plan> {
     let chosen: HashSet<&str> = selected.iter().map(String::as_str).collect();
     let info: HashMap<&str, &LayerInfo> = layers.iter().map(|l| (l.id.as_str(), l)).collect();
     let picked: Vec<&LayerInfo> = layers
@@ -1521,8 +1521,9 @@ fn ripple_delete(layers: &[LayerInfo], selected: &[String]) -> Option<Plan> {
         }
     }
     let mut commands: Vec<Command> = vec![
-        LayerCommand::Delete {
+        LayerCommand::DeleteAt {
             layer_ids: picked.iter().map(|l| l.id.clone()).collect(),
+            time,
         }
         .into(),
     ];
@@ -1870,7 +1871,7 @@ pub fn command_plan(
         | "toggleThreeD"
         | "unlockSelectedLayers"
         | "unlockGroup" => layer_menu_plan(name, args, published, time),
-        "rippleDelete" => ripple_delete(&layers, &selected),
+        "rippleDelete" => ripple_delete(&layers, &selected, time),
         // The Properties alignment strip, for the palette and agents: the
         // selection's anchors meet the target edge or centre.
         "alignLayers" => {

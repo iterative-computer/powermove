@@ -2422,9 +2422,10 @@ impl Controller {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         if cut {
             if let Some(layer_ids) = cut_layers {
+                let time = self.time();
                 self.run_layer_plan(layer_commands::Plan {
                     label: "Cut".into(),
-                    commands: vec![pm_kernel::LayerCommand::Delete { layer_ids }.into()],
+                    commands: vec![pm_kernel::LayerCommand::DeleteAt { layer_ids, time }.into()],
                     select: Some(Vec::new()),
                     count_keys: None,
                 }, cx);

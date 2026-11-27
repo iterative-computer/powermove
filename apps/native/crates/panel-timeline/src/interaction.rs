@@ -529,7 +529,13 @@ impl TimelineModel {
                 let locked = skipped.len();
                 let groups = skipped.iter().all(|l| l.kind == "group");
                 let mut plan = if layers.iter().any(|id| self.index.layer(id).is_some()) {
-                    edit(LayerCommand::Delete { layer_ids: layers }.into())
+                    edit(
+                        LayerCommand::DeleteAt {
+                            layer_ids: layers,
+                            time,
+                        }
+                        .into(),
+                    )
                 } else {
                     Plan::default()
                 };

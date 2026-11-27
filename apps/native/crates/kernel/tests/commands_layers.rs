@@ -2379,6 +2379,89 @@ fn group_initializes_from_and_dur_to_member_span() {
 }
 
 #[test]
+fn deleting_parent_null_preserves_child_world_pose_like_unlinking() {
+    let make_parented = || {
+        let mut s = store_with(|p| {
+            let layers = p
+                .as_object_mut()
+                .unwrap()
+                .get_mut("layers")
+                .unwrap()
+                .as_array_mut()
+                .unwrap();
+            layers.insert(
+                0,
+                parse(
+                    r#"{"id":"rig","type":"null","name":"Rig","from":0,"dur":10,"on":true,"p":{
+                        "position.x":{"v":600,"kf":[{"i":"rk0","t":0,"v":600},{"i":"rk1","t":4,"v":1000}],"expr":null},
+                        "position.y":{"v":400,"kf":[],"expr":null},
+                        "anchor.x":{"v":0,"kf":[],"expr":null},"anchor.y":{"v":0,"kf":[],"expr":null},
+                        "scale.x":{"v":200,"kf":[],"expr":null},"scale.y":{"v":200,"kf":[],"expr":null},
+                        "rotation":{"v":90,"kf":[],"expr":null},"skew":{"v":0,"kf":[],"expr":null},
+                        "opacity":{"v":100,"kf":[],"expr":null}
+                    },"d":{}}"#,
+                )
+                .unwrap(),
+            );
+        });
+        // Parent `box` to the animated null at t = 2.0 (where rig.position.x = 800).
+        run(
+            &mut s,
+            LayerCommand::Set {
+                layer_id: "box".into(),
+                patch: LayerPatch {
+                    parent: Some(ParentChange {
+                        parent: Some("rig".into()),
+                        time: 2.0,
+                    }),
+                    ..Default::default()
+                },
+            },
+        );
+        s
+    };
+    let mut s = make_parented();
+    // Deleting the null at t = 2.0 must match manually unlinking at t = 2.0.
+    let mut unlinked = make_parented();
+    run(
+        &mut unlinked,
+        LayerCommand::Set {
+            layer_id: "box".into(),
+            patch: LayerPatch {
+                parent: Some(ParentChange {
+                    parent: None,
+                    time: 2.0,
+                }),
+                ..Default::default()
+            },
+        },
+    );
+    run(
+        &mut s,
+        LayerCommand::DeleteAt {
+            layer_ids: vec!["rig".into()],
+            time: 2.0,
+        },
+    );
+    assert!(!ids(&s).contains(&"rig".to_owned()));
+    let after_delete = layer(&s, "box");
+    let after_unlink = layer(&unlinked, "box");
+    assert!(get(&after_delete, &["parent"]).is_null());
+    for ch in ["position.x", "position.y", "scale.x", "scale.y", "rotation"] {
+        let a = num(&after_delete, &["p", ch, "v"]);
+        let b = num(&after_unlink, &["p", ch, "v"]);
+        assert!(
+            (a - b).abs() < 1e-4,
+            "{ch}: after delete {a} != after unlink {b}"
+        );
+    }
+    // Undo restores the null and parenting cleanly in one step.
+    s.undo().unwrap();
+    assert!(ids(&s).contains(&"rig".to_owned()));
+    assert_eq!(get(&layer(&s, "box"), &["parent"]).as_str(), Some("rig"));
+}
+
+#[test]
 fn enabling_3d_on_group_with_3d_children_centers_z_pivot() {
     let mut s = store_with(|p| {
         p.as_object_mut().unwrap().insert(

@@ -178,11 +178,15 @@ pub enum LayerCommand {
     /// new layer (the old command did unless `select: false`).
     Add(Box<AddLayer>),
     /// `delete_layers`: the layers and everything inside the groups among
-    /// them; children parented to a deleted layer are unparented. Locked
-    /// layers are skipped (all locked: `All targeted layers are locked`; a
-    /// group with locked contents: `Unlock the group and its contents before
-    /// deleting`). Label "Delete Layers".
+    /// them; children parented to a deleted layer are unparented while
+    /// preserving their world pose. Locked layers are skipped (all locked:
+    /// `All targeted layers are locked`; a group with locked contents:
+    /// `Unlock the group and its contents before deleting`). Label "Delete
+    /// Layers".
     Delete { layer_ids: Vec<String> },
+    /// Same as [`LayerCommand::Delete`], evaluating surviving parented
+    /// children's world pose at `time` (the playhead) before unparenting.
+    DeleteAt { layer_ids: Vec<String>, time: f64 },
     /// Cmd+D (`duplicate`: `pasteLayers` of the selection in place): copies
     /// (`PM.cloneLayer`: numbered names, fresh key ids) inserted above the
     /// topmost one, links between copies remapped. Any locked layer refuses.
@@ -247,7 +251,7 @@ impl LayerCommand {
         match self {
             LayerCommand::Set { patch, .. } => patch_label(patch),
             LayerCommand::Add(_) => "Add Layer",
-            LayerCommand::Delete { .. } => "Delete Layers",
+            LayerCommand::Delete { .. } | LayerCommand::DeleteAt { .. } => "Delete Layers",
             LayerCommand::Duplicate { .. } => "Duplicate",
             LayerCommand::Paste { .. } => "Paste",
             LayerCommand::InsertBlock { label, .. } => return label.clone(),
@@ -267,7 +271,8 @@ impl LayerCommand {
         match self {
             LayerCommand::Set { layer_id, patch } => set_layer(cx, layer_id, patch),
             LayerCommand::Add(c) => add_layer(cx, c),
-            LayerCommand::Delete { layer_ids } => delete_layers(cx, layer_ids),
+            LayerCommand::Delete { layer_ids } => delete_layers(cx, layer_ids, 0.0),
+            LayerCommand::DeleteAt { layer_ids, time } => delete_layers(cx, layer_ids, *time),
             LayerCommand::Duplicate { layer_ids, new_ids } => duplicate(cx, layer_ids, new_ids),
             LayerCommand::Paste {
                 comp,
@@ -1632,7 +1637,8 @@ fn content_audio(layer: &mut Value) -> Result<(), CommandError> {
 
 /// Resolve IDs per composition, expand groups once, then skip locked items.
 /// Unlike Electron's group-wide rejection, editable targets still delete.
-fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandError> {
+fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String], time: f64) -> Result<(), CommandError> {
+    let time = values::finite(time, "time")?;
     let mut by_comp: Vec<(Option<String>, Vec<String>)> = Vec::new();
     for id in layer_ids {
         let Ok(loc) = cx.find(id) else { continue };
@@ -1672,14 +1678,33 @@ fn delete_layers(cx: &mut Cx<'_>, layer_ids: &[String]) -> Result<(), CommandErr
         if gone.is_empty() {
             continue;
         }
-        // Survivors parented to a deleted layer are unparented first (their
-        // indexes still hold), then each deleted layer goes by id.
+        // Survivors parented to a deleted layer are unparented first with their
+        // world pose preserved at `time` (their indexes still hold), then each
+        // deleted layer goes by id.
         let path = cx.layers_path(comp.as_deref());
         for (index, l) in layers.iter().enumerate() {
             let id = values::text(l, "id");
             if !id.is_some_and(|i| gone.contains(i))
                 && values::text(l, "parent").is_some_and(|p| gone.contains(p))
             {
+                let has_pose = transformable(values::text(l, "type").unwrap_or_default())
+                    && cx
+                        .layer_node(&crate::model::LayerLoc {
+                            comp_id: comp.clone(),
+                            index,
+                        })
+                        .ok()
+                        .and_then(|node| node.get("p"))
+                        .is_some_and(|p| {
+                            ["position.x", "position.y", "scale.x", "scale.y", "rotation"]
+                                .iter()
+                                .all(|k| p.get(k).is_some())
+                        });
+                if has_pose {
+                    cx.kernel(comp.as_deref(), |edit| {
+                        pm_edit::pose::reparent(edit, index, None, time)
+                    })?;
+                }
                 let mut at = path.clone();
                 at.extend([PathPart::Index(index as f64), "parent".into()]);
                 cx.set(at, Value::Null)?;

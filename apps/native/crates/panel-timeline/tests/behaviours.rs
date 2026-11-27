@@ -2567,18 +2567,21 @@ fn shift_marquee_toggles_keys_against_captured_selection_each_sample() {
     }
 }
 #[test]
-fn a_mixed_timeline_marquee_selects_clips_and_clears_even_additive_keys() {
+fn a_mixed_timeline_marquee_prefers_keys_and_clip_only_clears_even_additive_keys() {
     let (_actor, mut client) = client();
     select(&mut client, &["a"]);
     select_keys(&mut client, &["a0"]);
     let mut marquee = MarqueeSession::begin(&client.model, true, false);
+    // Crossing clip bars while covering keyframes keeps keyframe selection.
     let mixed = marquee.update(on("a", &["a2"]), strings(&["b"]));
     run(&mut client, mixed);
+    assert_eq!(client.model.selection.keys(), strings(&["a0", "a2"]));
+    assert_eq!(client.model.selection.layers(), strings(&["a"]));
+    // When no keyframes are covered, touching clips switches to clip selection and clears keys.
+    let clips_only = marquee.update(Vec::new(), strings(&["b"]));
+    run(&mut client, clips_only);
     assert_eq!(client.model.selection.layers(), strings(&["a", "b"]));
     assert!(client.model.selection.keys().is_empty());
-    let properties = marquee.update(on("a", &["a2"]), Vec::new());
-    run(&mut client, properties);
-    assert_eq!(client.model.selection.keys(), strings(&["a0", "a2"]));
 }
 
 #[test]
