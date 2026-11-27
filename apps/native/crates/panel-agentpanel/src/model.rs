@@ -407,6 +407,8 @@ pub enum EffectKind {
     SelectProvider(String),
     NewThread,
     OpenSettings,
+    /// Checkout for Aero's plan, in the browser.
+    Subscribe,
     ChooseFiles,
     Shell(ShellAction),
     ConfirmArchive,
@@ -2404,6 +2406,11 @@ impl Panel {
     pub fn host_settings(&mut self, thread: &str) -> Result<Effect> {
         let target = self.target(thread)?;
         Ok(self.effect(target, EffectKind::OpenSettings))
+    }
+    /// Aero on Free: Checkout for the plan the account can buy.
+    pub fn host_subscribe(&mut self, thread: &str) -> Result<Effect> {
+        let target = self.target(thread)?;
+        Ok(self.effect(target, EffectKind::Subscribe))
     }
     pub fn host_action(&mut self, thread: &str, action: ShellAction) -> Result<Effect> {
         let target = self.target(thread)?;

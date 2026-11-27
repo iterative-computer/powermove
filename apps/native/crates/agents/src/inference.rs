@@ -133,7 +133,7 @@ pub enum Standing {
     Unreachable(String),
 }
 /// What the picker and the panel say on Free.
-pub const NEEDS_PLAN: &str = "Aero needs Aerolite or Aero.";
+pub const NEEDS_PLAN: &str = "Aero needs Aerolite.";
 
 /// The test endpoint, when `development` (a debug build with the switch on)
 /// and it names plain HTTP on 127.0.0.1 with a port, nothing else.

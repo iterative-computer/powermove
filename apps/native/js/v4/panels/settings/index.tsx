@@ -200,25 +200,9 @@ function RowControl({
         />
       </div>
     );
-  // Free: Continue… opens Checkout for the plan chosen in the picker
-  // under the title (PlanPicker) in the browser.
-  if (row.control === "plans" && row.options?.length) {
-    const chosen = chosenPlan(row, model);
-    return (
-      <Button
-        label={row.actionLabel!}
-        disabled={disabled || !model.services}
-        onClick={() => {
-          void model.perform({
-            type: "row",
-            id: row.id,
-            action: row.action!,
-            plan: chosen,
-          });
-        }}
-      />
-    );
-  }
+  // Free: each plan card carries its own action (PlanPicker); the row
+  // has none.
+  if (row.control === "plans") return null;
   if (row.control === "action") {
     const button = (
       <Button
@@ -302,25 +286,22 @@ function RowControl({
 }
 /** The plan Settings › Account's picker has chosen: the person's choice,
  *  else the first offered. */
-function chosenPlan(row: Row, model: SettingsModel): string {
-  const options = row.options ?? [];
-  return String(
-    options.find((o) => o.v === model.chosenPlan)?.v ?? options[0]?.v ?? "",
-  );
-}
-/** Aerolite or Aero, in Settings' visual picker, the card's width under
- *  the title. */
+/** Free and the plans the backend offers, as the website's cards in
+ *  Settings' visual picker; a plan card's button opens Checkout for it. */
 function PlanPicker({ row, model }: { row: Row; model: SettingsModel }) {
   const options = row.options ?? [];
   return (
     <UI.SegmentedControl
-      label="Plan"
+      label="Plans"
       disabled={row.disabled || row.busy}
       attr={{ "aria-description": row.detail ?? "" }}
       metadata={{ picker: "plans" }}
-      value={chosenPlan(row, model)}
+      value=""
       options={options.map((o) => ({ id: String(o.v), label: o.label }))}
-      onChange={(id) => model.choosePlan(id)}
+      onChange={(id) => {
+        if (id === "free" || !row.action) return;
+        void model.perform({ type: "row", id: row.id, action: row.action, plan: id });
+      }}
     />
   );
 }

@@ -2919,6 +2919,11 @@ impl Controller {
                     }
                     Ok(Value::Null)
                 }
+                // Aero on Free: Checkout for the plan the backend offers.
+                "agent.subscribe" => {
+                    crate::cloud::subscribe_offered(cx);
+                    Ok(Value::Null)
+                }
                 "agent.settings" => {
                     // Aero on Free or out of credits: its plans are on
                     // Settings › Account (Subscribe…, Upgrade…).

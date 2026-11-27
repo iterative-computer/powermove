@@ -1373,10 +1373,25 @@ function Welcome({
         >
           Make your next move
         </text>
-        {!compact && (
+        {!compact && !aeroNeedsPlan(s, n) && (
           <text id="agent-welcome-description" style={quiet}>
             {explanation}
           </text>
+        )}
+        {aeroNeedsPlan(s, n) && (
+          <div id="agent-welcome-plan" style={{ ...row, gap: t("metrics.gap") }}>
+            <text style={quiet}>Aero needs Aerolite.</text>
+            <button
+              id="agent-welcome-subscribe"
+              role="button"
+              tabIndex={0}
+              label="Subscribe"
+              onClick={() => send({ type: "subscribe" })}
+              style={{ ...target, color: t("colors.accent_text") }}
+            >
+              <text style={{ ...strong, color: t("colors.accent_text") }}>Subscribe…</text>
+            </button>
+          </div>
         )}
       </div>
       <div
@@ -2981,8 +2996,8 @@ function Composer({
     // Aero on Free: one quiet line and Subscribe…, which opens Settings ›
     // Account on its plans.
     if (aeroNeedsPlan(s, n) && s.runId === null) {
-      options.push({ kind: "status", label: "Aero needs Aerolite or Aero.", value: "" });
-      options.push({ kind: "action", label: "Subscribe…", value: "providers:" });
+      options.push({ kind: "status", label: "Aero needs Aerolite.", value: "" });
+      options.push({ kind: "action", label: "Subscribe…", value: "subscribe:" });
       return { options };
     }
     const fault = !harnessSignedOut(s, n) && n.connection === "unavailable" && s.runId === null;
@@ -3088,7 +3103,10 @@ function Composer({
       const at = choice.indexOf(":");
       const [kind, value] = [choice.slice(0, at), choice.slice(at + 1)];
       const now = latest.current;
-      if (kind === "providers") {
+      if (kind === "subscribe") {
+        setOpenPicker(null);
+        send({ type: "subscribe" });
+      } else if (kind === "providers") {
         setOpenPicker(null);
         send({ type: "openSettings" });
       } else if (kind === "retry") {
@@ -3488,6 +3506,31 @@ function Composer({
           openEffort={openEffort}
           signedOut={signedOut}
         />
+        {aeroNeedsPlan(s, n) && (
+          // Aero on Free: Checkout straight from the composer, a compact
+          // accent pill beside the model's (the plan the backend offers).
+          <button
+            id="agent-subscribe"
+            role="button"
+            tabIndex={0}
+            label="Subscribe"
+            title="Aero needs Aerolite: subscribe in your browser"
+            onClick={() => send({ type: "subscribe" })}
+            style={{
+              ...target,
+              ...row,
+              flexShrink: 0,
+              height: t("metrics.hit"),
+              paddingLeft: t("space.md"),
+              paddingRight: t("space.md"),
+              borderRadius: t("metrics.inner_radius"),
+              background: t("colors.accent_text"),
+              color: t("colors.floating"),
+            }}
+          >
+            <text style={{ ...strong, color: t("colors.floating") }}>Subscribe</text>
+          </button>
+        )}
         <div style={{ flexGrow: 1, minWidth: t("space.xs") }} />
         {working && (
           <button

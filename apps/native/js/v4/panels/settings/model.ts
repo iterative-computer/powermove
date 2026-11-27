@@ -237,12 +237,6 @@ export class SettingsModel {
   private changed() {
     if (this.alive) for (const listener of this.listeners) listener();
   }
-  /** The plan chosen in Settings › Account's picker, before Continue. */
-  chosenPlan: string | null = null;
-  choosePlan(id: string) {
-    this.chosenPlan = id;
-    this.changed();
-  }
   get rows(): Row[] {
     const base = [
       ...(this.publication.project ? projectRows() : []),

@@ -483,7 +483,7 @@ pub fn admit(action: &Value, connected: bool, live: bool) -> Result<(), String> 
             "draft" | "focus" | "newThread" | "switchThread" | "deleteThread" | "disclose"
             | "removeAttachment" | "setProvider" | "setModel" | "chooseAnswer" | "typeAnswer"
             | "keepResult" | "undoResult" | "applyPlan" | "dismissPlan" | "dismissInterrupted"
-            | "openSettings",
+            | "openSettings" | "subscribe",
         ) => true,
         Some("stop" | "stopTask") => true,
         Some("answer") => connected || live,

@@ -146,6 +146,21 @@ pub struct Frame {
     pub sign_in: Option<SignIn>,
     /// The primary action is at work: a spinner stands in its title.
     pub busy: bool,
+    /// A plan to buy under the step's choices (Aero's, on Free): the
+    /// website's pricing card. Its button sends `offer:get`, Maybe Later
+    /// `offer:later`.
+    pub offer: Option<Offer>,
+}
+/// A plan's card, as the website draws it: its name, price and period, one
+/// line on who it is for, its features, its button.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Offer {
+    pub name: String,
+    pub price: String,
+    pub period: String,
+    pub note: String,
+    pub features: Vec<(String, String)>,
+    pub action: String,
 }
 /// Where the account's sign-in is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

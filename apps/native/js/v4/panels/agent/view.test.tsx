@@ -2297,7 +2297,7 @@ test("Aero on Free says it needs a plan, quietly, with Subscribe… to Settings 
     [
       true,
       [
-        ["status", "Aero needs Aerolite or Aero."],
+        ["status", "Aero needs Aerolite."],
         ["action", "Subscribe…"],
       ],
     ],
@@ -2307,7 +2307,7 @@ test("Aero on Free says it needs a plan, quietly, with Subscribe… to Settings 
     p.snapshot.catalog = harnessCatalog([]);
     p.snapshot.settings.provider = "aero";
     p.native.connection = "unavailable";
-    p.native.reason = "Aero needs Aerolite or Aero.";
+    p.native.reason = "Aero needs Aerolite.";
     p.native.aero = { usage: [], needsPlan };
     const asked: Parameters<Menu>[0][] = [];
     await root.render(
@@ -2326,6 +2326,29 @@ test("Aero on Free says it needs a plan, quietly, with Subscribe… to Settings 
     expect(asked[0]!.options.filter((o) => o.kind !== "harness").map((o) => [o.kind, o.label])).toEqual(rows);
     root.dispose();
   }
+});
+test("Aero on Free offers Subscribe beside the model pill and in the empty panel, straight to Checkout", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.catalog = harnessCatalog([]);
+  p.snapshot.settings.provider = "aero";
+  p.native.connection = "unavailable";
+  p.native.reason = "Aero needs Aerolite.";
+  p.native.aero = { usage: [], needsPlan: true };
+  const sent: Action[] = [];
+  await root.render(<AgentView publication={p} send={(a) => sent.push(a)} />);
+  await root.drive(byId(root, "agent-subscribe").id, "click");
+  await root.drive(byId(root, "agent-welcome-subscribe").id, "click");
+  expect(sent.filter((a) => a.type === "subscribe").length).toBe(2);
+  root.dispose();
+  // On a plan, neither shows.
+  const { root: paid } = mount();
+  const q = fixture();
+  q.snapshot.settings.provider = "aero";
+  q.native.aero = { usage: [], needsPlan: false };
+  await paid.render(<AgentView publication={q} send={() => {}} />);
+  expect(paid.inspect().nodes.some((node) => node.props.id === "agent-subscribe")).toBe(false);
+  paid.dispose();
 });
 test("the pill shows Claude Code's logo, OpenAI's for Codex, and the Aero (Powermove) mark for every Aero model", async () => {
   for (const [harness, model, mark] of [

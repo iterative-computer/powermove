@@ -119,7 +119,7 @@ export interface NativeFacts {
    * bigger plan. */
   aero?: {
     usage: [label: string, value: string][];
-    /** Signed in on Free: Aero needs Aerolite or Aero (quiet, never a fault). */
+    /** Signed in on Free: Aero needs Aerolite (quiet, never a fault). */
     needsPlan?: boolean;
     /** No credits left this period. */
     outOfCredits?: { resets: string | null; upgrade: string | null } | null;
@@ -168,6 +168,7 @@ export type Action =
         | "stop"
         | "newThread"
         | "openSettings"
+        | "subscribe"
         | "applyPlan"
         | "keepResult"
         | "undoResult"

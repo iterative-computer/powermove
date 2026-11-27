@@ -2388,6 +2388,7 @@ impl Backend {
                     let mut store = KernelStore::new(self.kernel.clone(), self.application);
                     let operation = match &effect.kind {
                         EffectKind::OpenSettings => Some(("agent.settings", Value::Null)),
+                        EffectKind::Subscribe => Some(("agent.subscribe", Value::Null)),
                         EffectKind::Shell(ShellAction::Open) => Some(("agent.open", Value::Null)),
                         EffectKind::Shell(ShellAction::Close) => Some(("agent.close", Value::Null)),
                         // Escape in the docked composer: the editor takes the keyboard back.
