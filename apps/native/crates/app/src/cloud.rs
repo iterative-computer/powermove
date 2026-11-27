@@ -58,6 +58,20 @@ pub struct Keychain {
 impl Keychain {
     #[cfg(target_os = "macos")]
     pub fn for_app(profile: &Path) -> Self {
+        // The Sandbox and other ad-hoc signed builds (`profile-session`): every
+        // rebuild is a new app to a Keychain item's access list, so macOS asks
+        // for the login password on launch. They keep the session in the
+        // profile instead; shipped Developer ID builds keep the Keychain.
+        if cfg!(feature = "profile-session") {
+            let id =
+                crate::platform::bundle_id().unwrap_or_else(|| "com.powermove.native.dev".into());
+            return Self::with_items(
+                format!("{id} Powermove Cloud"),
+                "session".into(),
+                None,
+                Box::new(ProfileItems::new(profile)),
+            );
+        }
         let mut keychain = Self::named("Powermove Cloud", "session");
         // Settings › Extensions › Sign-Ins from the Original App. Release builds
         // only: a development build never reads or touches a real account.
@@ -135,6 +149,72 @@ impl Vault for Keychain {
             Err(error) => outcome = outcome.and(Err(error)),
         }
         outcome
+    }
+}
+
+/// Generic-password items as files in the profile (`cloud/secrets/`): one
+/// owner-only (0600) file per service and account in an owner-only folder,
+/// written whole and renamed into place. For builds whose signature changes
+/// on every build (`profile-session`), where the Keychain would prompt.
+pub struct ProfileItems {
+    dir: PathBuf,
+}
+impl ProfileItems {
+    pub fn new(profile: &Path) -> Self {
+        Self {
+            dir: profile.join("cloud/secrets"),
+        }
+    }
+    fn file(&self, service: &str, account: &str) -> PathBuf {
+        let key = blake3::hash(format!("{service}\n{account}").as_bytes());
+        self.dir.join(key.to_hex().as_str())
+    }
+}
+impl Items for ProfileItems {
+    fn read(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
+        match std::fs::read(self.file(service, account)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("Couldn’t read the saved session ({})", e.kind())),
+        }
+    }
+    fn write(&mut self, service: &str, account: &str, bytes: &[u8]) -> Result<(), String> {
+        use std::io::Write as _;
+        use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+        let failed = |e: std::io::Error| format!("Couldn’t save the session ({})", e.kind());
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&self.dir)
+            .map_err(failed)?;
+        std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(failed)?;
+        let file = self.file(service, account);
+        let temp = file.with_extension(format!("{}.tmp", std::process::id()));
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temp)
+            .and_then(|mut f| {
+                f.write_all(bytes)?;
+                f.sync_all()
+            })
+            .and_then(|()| std::fs::rename(&temp, &file));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&temp);
+            return Err(failed(e));
+        }
+        Ok(())
+    }
+    fn delete(&mut self, service: &str, account: &str) -> Result<(), String> {
+        match std::fs::remove_file(self.file(service, account)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(format!("Couldn’t remove the saved session ({})", e.kind()))
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -1924,5 +2004,57 @@ mod billing_tests {
         ] {
             assert_eq!(billing_return(other), None, "{other}");
         }
+    }
+}
+
+#[cfg(test)]
+mod profile_session_tests {
+    use super::{Items as _, Keychain, ProfileItems, Vault as _};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// The profile store keeps the session owner-only, reads back what it
+    /// wrote, replaces it whole, and signing out leaves nothing behind.
+    #[test]
+    fn the_profile_keeps_the_session_owner_only() {
+        let profile = tempfile::tempdir().unwrap();
+        let mut vault = Keychain::with_items(
+            "com.powermove.native.v2-sandbox Powermove Cloud".into(),
+            "session".into(),
+            None,
+            Box::new(ProfileItems::new(profile.path())),
+        );
+        assert_eq!(vault.read().unwrap(), None);
+        vault.write(br#"{"token":"one"}"#).unwrap();
+        vault.write(br#"{"token":"two"}"#).unwrap();
+        assert_eq!(
+            vault.read().unwrap().as_deref(),
+            Some(&br#"{"token":"two"}"#[..])
+        );
+        let dir = profile.path().join("cloud/secrets");
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 1, "one file, no temp left: {files:?}");
+        assert_eq!(
+            std::fs::metadata(&files[0]).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // Another account or bundle never reads it.
+        let other = ProfileItems::new(profile.path());
+        assert_eq!(
+            other
+                .read("com.powermove.native Powermove Cloud", "session")
+                .unwrap(),
+            None
+        );
+        vault.delete().unwrap();
+        vault.delete().unwrap();
+        assert_eq!(vault.read().unwrap(), None);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
     }
 }
