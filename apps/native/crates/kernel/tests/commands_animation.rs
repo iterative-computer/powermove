@@ -978,3 +978,103 @@ fn every_menu_preset_reads_back_by_name() {
         .insert("outInterp", Value::String("hold".into()));
     assert_eq!(ease_preset(&held, 0), None);
 }
+
+#[test]
+fn placing_a_keyframe_inside_a_curved_segment_preserves_value_and_speed_curve() {
+    let eval_at = |s: &DocumentStore, t: f64| -> f64 {
+        let kfs = keys(s, "anim", "opacity");
+        let node = pm_model::Node::from_value(Value::Array(kfs), 0);
+        let mut springs = pm_eval::easing::SpringTables::new();
+        pm_eval::keyframes::evaluate(Some(&node), t, false, &mut springs)
+            .unwrap()
+            .as_number()
+            .unwrap()
+    };
+
+    for preset in ["easeOut", "expoOut", "easeInOut", "swish"] {
+        let mut s = store();
+        run(
+            &mut s,
+            kc(KeyframeCommand::SetEasing {
+                key_ids: vec!["k1".into(), "k2".into()],
+                curve: EaseSpec::Preset(preset.into()),
+            }),
+        );
+
+        let samples: Vec<(f64, f64)> = (0..=100)
+            .map(|i| {
+                let t = i as f64 / 100.0;
+                (t, eval_at(&s, t))
+            })
+            .collect();
+
+        // Insert a keyframe in the middle of the curved segment (e.g. 0.4s -> 12/30s).
+        let insert_t = 0.4;
+        let eps = 1e-4;
+        let speed_left_before = (eval_at(&s, insert_t) - eval_at(&s, insert_t - eps)) / eps;
+        let speed_right_before = (eval_at(&s, insert_t + eps) - eval_at(&s, insert_t)) / eps;
+        run(
+            &mut s,
+            kc(KeyframeCommand::Add {
+                layer_id: "anim".into(),
+                channel: "opacity".into(),
+                time: insert_t,
+                key_id: "mid".into(),
+                value: None,
+            }),
+        );
+
+        let k = keys(&s, "anim", "opacity");
+        assert_eq!(k.len(), 3, "preset {preset}: key inserted");
+        assert_eq!(at(&k[1], &["i"]).as_str(), Some("mid"));
+        assert_eq!(
+            at(&k[1], &["continuous"]).as_bool(),
+            Some(true),
+            "preset {preset}: inserted key is continuous bezier"
+        );
+
+        // Every sampled point along the curve must match before and after.
+        for &(t, before) in &samples {
+            let after = eval_at(&s, t);
+            assert!(
+                (after - before).abs() < 1e-4,
+                "preset {preset} at t={t}: value diverged before={before} after={after}"
+            );
+        }
+
+        // Numerical speed right across the newly placed key must match the original curve!
+        let speed_left_after = (eval_at(&s, insert_t) - eval_at(&s, insert_t - eps)) / eps;
+        let speed_right_after = (eval_at(&s, insert_t + eps) - eval_at(&s, insert_t)) / eps;
+        assert!(
+            (speed_left_after - speed_left_before).abs() < 0.05
+                && (speed_right_after - speed_right_before).abs() < 0.05,
+            "preset {preset}: speed changed across inserted key before=({speed_left_before}, {speed_right_before}) after=({speed_left_after}, {speed_right_after})"
+        );
+    }
+}
+
+#[test]
+fn placing_a_keyframe_inside_a_hold_segment_keeps_it_held() {
+    let mut s = store();
+    run(
+        &mut s,
+        kc(KeyframeCommand::SetHold {
+            key_ids: vec!["k1".into()],
+            hold: true,
+        }),
+    );
+    run(
+        &mut s,
+        kc(KeyframeCommand::Add {
+            layer_id: "anim".into(),
+            channel: "opacity".into(),
+            time: 0.5,
+            key_id: "mid".into(),
+            value: None,
+        }),
+    );
+    let k = keys(&s, "anim", "opacity");
+    assert_eq!(k.len(), 3);
+    assert_eq!(num(&k[1], &["v"]), 0.0);
+    assert_eq!(at(&k[1], &["outInterp"]).as_str(), Some("hold"));
+}

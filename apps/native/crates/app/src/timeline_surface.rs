@@ -169,7 +169,9 @@ enum Spec {
     Trim(Edge),
     Locked {
         layer: String,
+        source: String,
         trim: bool,
+        action: &'static str,
     },
     Offset,
     Ripple(Edge),
@@ -3011,12 +3013,12 @@ impl TimelineSurface {
             });
         }
         if let Some((layer, edge)) = capsule {
-            if self
-                .model
-                .index
-                .layer(&layer)
-                .is_none_or(|clip| clip.effectively_locked)
-            {
+            if let Some(clip) = self.model.index.layer(&layer) {
+                if clip.effectively_locked {
+                    self.notify_locked(&layer, "edit transition", false, cx);
+                    return;
+                }
+            } else {
                 return;
             }
             let facts = (|| {
@@ -3171,9 +3173,16 @@ impl TimelineSurface {
             if let Some(id) = self.split_clip_at(x, y) {
                 let at = self.model.split_time(self.time_at(x), self.delegate.time(cx), self.snap_radius());
                 let all = event.modifiers.shift;
-                let locked = self.model.index.layers.iter().any(|l| (all || l.id == id)
-                    && l.effectively_locked && at > l.from && at < l.from + l.duration);
-                if locked { self.delegate.report("Locked layers were skipped.".into(), cx); }
+                let locked_id = self
+                    .model
+                    .index
+                    .layers
+                    .iter()
+                    .find(|l| (all || l.id == id) && l.effectively_locked && at > l.from && at < l.from + l.duration)
+                    .map(|l| l.id.clone());
+                if let Some(locked_id) = locked_id {
+                    self.notify_locked(&locked_id, "split", false, cx);
+                }
                 match self.model.split_at(&id, at, all) {
                     Ok(plan) if !plan.calls.is_empty() => { self.queue.push_back(Job::Apply(plan)); self.pump(cx); }
                     Err(e) => self.delegate.report(e.to_string(), cx),
@@ -3240,6 +3249,11 @@ impl TimelineSurface {
             // whole selection when the key is part of it (the first click
             // selected it).
             if event.click_count == 2 {
+                if layer.effectively_locked {
+                    let layer_id = layer.id.clone();
+                    self.notify_locked(&layer_id, "edit keyframes", false, cx);
+                    return;
+                }
                 self.delegate.command("keyframeValue", cx);
                 return;
             }
@@ -3282,15 +3296,37 @@ impl TimelineSurface {
             && let Some(op) = frame.ops.iter().rev().find(|op| {
                 let right = op.bounds.x + op.bounds.width;
                 op.shape == "stagger"
-                    && op.detail["locked"] != true
                     && y >= op.detail["hitTop"].as_f64().unwrap_or(f64::INFINITY)
                     && y <= op.detail["hitBottom"].as_f64().unwrap_or(f64::NEG_INFINITY)
                     && ((x - right).abs() < 5. || (op.bounds.x - 2. ..=right).contains(&x))
             })
         {
-            if let Ok(band) = serde_json::from_value(op.detail["band"].clone()) {
+            if let Ok(band) = serde_json::from_value::<pm_panel_timeline::stagger::Band>(
+                op.detail["band"].clone(),
+            ) {
+                if op.detail["locked"] == true {
+                    let owner = self
+                        .model
+                        .index
+                        .locking_layer(&band.layer)
+                        .map(|o| o.id.clone())
+                        .unwrap_or_else(|| band.layer.clone());
+                    self.queue
+                        .push_back(Job::SelectLayer(band.layer.clone(), mods));
+                    self.gesture = Gesture::Pressed(Press {
+                        origin: event.position,
+                        spec: Some(Spec::Locked {
+                            layer: owner,
+                            source: band.layer,
+                            trim: false,
+                            action: "edit text stagger",
+                        }),
+                        release: None,
+                    });
+                    self.pump(cx);
+                    return;
+                }
                 let end = (x - (op.bounds.x + op.bounds.width)).abs() < 5.;
-                let band: pm_panel_timeline::stagger::Band = band;
                 self.queue
                     .push_back(Job::SelectLayer(band.layer.clone(), mods));
                 self.gesture = Gesture::Pressed(Press {
@@ -3317,18 +3353,30 @@ impl TimelineSurface {
                 .locking_layer(&layer)
                 .map(|owner| owner.id.clone());
             // Two close presses can straddle a row boundary.
-            if event.click_count == 2 && same_layer && lock.is_none() {
+            if event.click_count == 2 && same_layer {
                 if let Some(l) = self.model.index.layer(&layer) {
                     if l.kind == "precomp" {
+                        if lock.is_some() {
+                            self.notify_locked(&layer, "open", false, cx);
+                            return;
+                        }
                         if let Some(id) = l.comp.clone() {
                             self.delegate.effect(HostEffect::OpenComposition(id), cx);
                         }
+                        return;
                     } else if l.kind == "group" {
+                        if lock.is_some() {
+                            self.notify_locked(&layer, "open", false, cx);
+                            return;
+                        }
                         self.delegate
                             .effect(HostEffect::FocusGroup(Some(layer)), cx);
+                        return;
                     }
                 }
-                return;
+                if lock.is_none() {
+                    return;
+                }
             }
             let tracks = self.model.mode == TimelineMode::Tracks;
             // A chosen edit tool works in both modes; in Tracks the
@@ -3369,12 +3417,24 @@ impl TimelineSurface {
                         .iter()
                         .any(|id| index.layer(id).is_some_and(|l| !l.effectively_locked));
                 if !can_edit_selection {
-                    self.queue.push_back(Job::SelectLayer(layer, mods));
+                    let action = match &spec {
+                        Spec::Trim(_) => "trim",
+                        Spec::Ripple(_) => "ripple trim",
+                        Spec::Roll(_) => "roll",
+                        Spec::Slip => "slip",
+                        Spec::Slide => "slide",
+                        Spec::Duplicate => "duplicate",
+                        Spec::Offset => "offset",
+                        _ => "move",
+                    };
+                    self.queue.push_back(Job::SelectLayer(layer.clone(), mods));
                     self.gesture = Gesture::Pressed(Press {
                         origin: event.position,
                         spec: Some(Spec::Locked {
                             layer: owner,
+                            source: layer,
                             trim: edge.is_some(),
+                            action,
                         }),
                         release: None,
                     });
@@ -3428,15 +3488,24 @@ impl TimelineSurface {
                     };
                     if row_at < cursor + h {
                         if let RowId::Layer(id) = &row.id
-                            && self.model.index.locking_layer(id).is_none()
                             && let Some(l) = self.model.index.layer(id)
                         {
                             if l.kind == "precomp" {
+                                if self.model.index.locking_layer(id).is_some() {
+                                    let id = id.clone();
+                                    self.notify_locked(&id, "open", false, cx);
+                                    return;
+                                }
                                 if let Some(comp) = l.comp.clone() {
                                     self.delegate.effect(HostEffect::OpenComposition(comp), cx);
                                     return;
                                 }
                             } else if l.kind == "group" {
+                                if self.model.index.locking_layer(id).is_some() {
+                                    let id = id.clone();
+                                    self.notify_locked(&id, "open", false, cx);
+                                    return;
+                                }
                                 self.delegate
                                     .effect(HostEffect::FocusGroup(Some(id.clone())), cx);
                                 return;
@@ -3637,6 +3706,17 @@ impl TimelineSurface {
                 .into(),
             );
         }
+        if commands.is_empty()
+            && switch != LayerSwitch::Locked
+            && self
+                .model
+                .index
+                .layer(&pressed)
+                .is_some_and(|l| l.effectively_locked)
+        {
+            self.notify_locked(&pressed, "change switches", false, cx);
+            return;
+        }
         let last_row = self
             .model
             .rows()
@@ -3662,6 +3742,7 @@ impl TimelineSurface {
 
     pub fn press_parent(&mut self, layer: String, origin: Point<Pixels>, cx: &mut Context<Self>) {
         self.start_pointer_gesture(cx);
+        let pressed_layer = layer.clone();
         let selected = self.model.selection.layers();
         let ids = if selected.contains(&layer) {
             selected.to_vec()
@@ -3685,6 +3766,13 @@ impl TimelineSurface {
                 target: None,
                 moved: false,
             };
+        } else if self
+            .model
+            .index
+            .layer(&pressed_layer)
+            .is_some_and(|l| l.effectively_locked)
+        {
+            self.notify_locked(&pressed_layer, "change parent", false, cx);
         }
     }
     fn parent_target(&self, ids: &[String], position: Point<Pixels>) -> Option<String> {
@@ -3759,6 +3847,25 @@ impl TimelineSurface {
         cx: &mut Context<Self>,
     ) {
         self.start_pointer_gesture(cx);
+        if self
+            .model
+            .index
+            .layer(&layer)
+            .is_some_and(|l| l.effectively_locked)
+        {
+            let selected = self.model.selection.layers();
+            let has_unlocked = selected.iter().any(|id| id == &layer)
+                && selected.iter().any(|id| {
+                    self.model
+                        .index
+                        .layer(id)
+                        .is_some_and(|l| !l.effectively_locked)
+                });
+            if !has_unlocked {
+                self.notify_locked(&layer, "edit properties", false, cx);
+                return;
+            }
+        }
         self.gesture = Gesture::Pressed(Press {
             origin,
             spec: Some(Spec::Property {
@@ -4223,10 +4330,11 @@ impl TimelineSurface {
                 vec![layer]
             };
             let index = &self.model.index;
-            let locked = index
+            let locked_id = index
                 .expanded_ids(&moving)
-                .iter()
-                .any(|id| index.layer(id).is_none_or(|l| l.effectively_locked));
+                .into_iter()
+                .find(|id| index.layer(id).is_none_or(|l| l.effectively_locked));
+            let locked = locked_id.is_some();
             if !locked {
                 self.cursor = CursorStyle::ClosedHand;
                 self.outline.layer_dragged.set(true);
@@ -4240,6 +4348,9 @@ impl TimelineSurface {
                     drop: None,
                 }
             };
+            if let Some(id) = locked_id {
+                self.notify_locked(&id, "reorder", false, cx);
+            }
             self.pump(cx);
             if matches!(self.gesture, Gesture::Reorder { .. }) {
                 self.row_scroll = Some(cx.spawn(async move |this, cx| {
@@ -4301,15 +4412,16 @@ impl TimelineSurface {
                     self.gesture = Gesture::Idle;
                     return true;
                 };
-                if let Spec::Locked { layer, trim } = spec {
+                if let Spec::Locked {
+                    layer,
+                    source,
+                    trim,
+                    action,
+                } = spec
+                {
                     self.gesture = Gesture::Idle;
                     self.delegate.effect(
-                        HostEffect::LockedStrip {
-                            layer,
-                            document: self.model.index.doc_id,
-                            composition: self.model.index.comp_id.clone(),
-                            trim,
-                        },
+                        locked_strip_effect_for(&self.model.index, &layer, &source, action, trim),
                         cx,
                     );
                     return true;
@@ -4699,7 +4811,7 @@ impl TimelineSurface {
             // A click on a name stays the row's own (it selects).
             Gesture::LayerPress { .. } => return false,
             // One undo step ("Move layers"), through the model's drop.
-            Gesture::Reorder { moving, drop, .. } => {
+            Gesture::Reorder { moving, drop, at } => {
                 if let Some(drop) = drop {
                     let time = self.delegate.time(cx);
                     match self.model.drop_layers(
@@ -4721,7 +4833,32 @@ impl TimelineSurface {
                             );
                             self.queue.push_back(Job::Apply(plan));
                         }
+                        Err(pm_panel_timeline::ModelError::Locked(id)) => {
+                            self.notify_locked(&id, "reorder", false, cx);
+                        }
                         Err(error) => self.delegate.report(error.to_string(), cx),
+                    }
+                } else {
+                    let (_, y) = self.local(at);
+                    let target = self
+                        .scene
+                        .as_ref()
+                        .zip(self.viewport())
+                        .and_then(|(scene, vp)| scene.layer_row_at(vp, &self.tokens, y))
+                        .and_then(|row| pm_panel_timeline::v4::parse_row(&row.id).ok())
+                        .and_then(|row| match row {
+                            pm_panel_timeline::RowId::Layer(id) => Some(id),
+                            _ => None,
+                        });
+                    if let Some(target_id) = target
+                        && !self.model.index.expanded_ids(&moving).contains(&target_id)
+                        && self
+                            .model
+                            .index
+                            .layer(&target_id)
+                            .is_some_and(|l| l.effectively_locked)
+                    {
+                        self.notify_locked(&target_id, "reorder here", false, cx);
                     }
                 }
             }
@@ -5653,6 +5790,16 @@ impl TimelineSurface {
     pub fn cursor_style(&self) -> CursorStyle {
         self.cursor
     }
+    pub(super) fn notify_locked(
+        &self,
+        layer_id: &str,
+        action: &str,
+        trim: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.delegate
+            .effect(locked_strip_effect(&self.model.index, layer_id, action, trim), cx);
+    }
     pub fn model(&self) -> Arc<TimelineModel> {
         self.model.clone()
     }
@@ -5704,6 +5851,44 @@ fn steady_graph(
         Some(Arc::new(next.clone()))
     }
 }
+fn locked_strip_effect(
+    index: &pm_panel_timeline::TimelineIndex,
+    layer_id: &str,
+    action: &str,
+    trim: bool,
+) -> HostEffect {
+    let owner = index
+        .locking_layer(layer_id)
+        .map(|o| o.id.clone())
+        .unwrap_or_else(|| layer_id.to_owned());
+    locked_strip_effect_for(index, &owner, layer_id, action, trim)
+}
+
+fn locked_strip_effect_for(
+    index: &pm_panel_timeline::TimelineIndex,
+    owner: &str,
+    source: &str,
+    action: &str,
+    trim: bool,
+) -> HostEffect {
+    let message = match (index.layer(source), index.layer(owner)) {
+        (Some(layer), Some(group)) if group.id != layer.id => format!(
+            "“{}” is inside locked group “{}”",
+            layer.name.to_string_lossy(),
+            group.name.to_string_lossy()
+        ),
+        (Some(layer), _) => format!("“{}” is locked — can't {action}", layer.name.to_string_lossy()),
+        _ => format!("That layer is locked — can't {action}"),
+    };
+    HostEffect::LockedStrip {
+        layer: owner.to_owned(),
+        document: index.doc_id,
+        composition: index.comp_id.clone(),
+        trim,
+        message: Some(message),
+    }
+}
+
 fn frame_time(model: &TimelineModel, time: f64) -> f64 {
     frame(time, model.index.fps)
 }
@@ -5798,18 +5983,49 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
                 .map_err(text)
         }
         Job::Begin(spec, time) => {
+            let drag_action = match &spec {
+                Spec::Trim(_) => "trim",
+                Spec::Ripple(_) => "ripple trim",
+                Spec::Roll(_) => "roll",
+                Spec::Slip => "slip",
+                Spec::Slide => "slide",
+                Spec::Duplicate => "duplicate",
+                Spec::Offset => "offset",
+                Spec::Keys
+                | Spec::GraphKeys
+                | Spec::StretchKeys { .. }
+                | Spec::QuickOffsetKeys
+                | Spec::Transform { .. }
+                | Spec::Handle { .. } => "edit keyframes",
+                Spec::Property { .. } => "edit properties",
+                Spec::TextStagger { .. } => "edit text stagger",
+                _ => "move",
+            };
+            let is_trim = matches!(&spec, Spec::Trim(_) | Spec::Ripple(_));
             let kind = drag_kind(&client.model, spec, time).map_err(|e| e.to_string())?;
-            if client.is_gain_drag(&kind)
+            let result = if client.is_gain_drag(&kind)
                 || kind.is_strip_trim()
                 || matches!(&kind, DragKind::Keys { .. })
                 || (matches!(&kind, DragKind::Layers { .. })
                     && client.model.mode == TimelineMode::Layers
                     && client.model.graph_display == GraphDisplay::DopeSheet)
             {
-                client.begin_preview_drag(kind).map_err(text)?;
+                client.begin_preview_drag(kind)
             } else {
-                client.begin_drag(kind).await.map_err(text)?;
+                client.begin_drag(kind).await
+            };
+            if let Err(pm_panel_timeline::ClientError::Model(
+                pm_panel_timeline::ModelError::Locked(layer_id),
+            )) = result
+            {
+                return Ok(vec![locked_strip_effect(
+                    &client.model.index,
+                    &layer_id,
+                    drag_action,
+                    is_trim,
+                )]);
             }
+            result.map_err(text)?;
             Ok(client
                 .active_drag()
                 .and_then(|d| d.locked_note())
@@ -5818,7 +6034,19 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
         }
         Job::Sample(sample) => {
             if client.active_drag().is_some() {
-                client.drag(sample).await.map_err(text)?;
+                let result = client.drag(sample).await;
+                if let Err(pm_panel_timeline::ClientError::Model(
+                    pm_panel_timeline::ModelError::Locked(layer_id),
+                )) = result
+                {
+                    return Ok(vec![locked_strip_effect(
+                        &client.model.index,
+                        &layer_id,
+                        "edit",
+                        false,
+                    )]);
+                }
+                result.map_err(text)?;
             }
             Ok(vec![])
         }

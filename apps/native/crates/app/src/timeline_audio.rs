@@ -837,6 +837,13 @@ impl TimelineSurface {
             return false;
         };
         if layer.effectively_locked {
+            let path = hit.detail["path"].as_str().unwrap_or("c.gain");
+            let action = if path.contains("Fade") || hit.id.starts_with("audio-fade") {
+                "edit fade"
+            } else {
+                "adjust audio level"
+            };
+            self.notify_locked(id, action, false, cx);
             return true;
         }
         let path = hit.detail["path"].as_str().unwrap_or("c.gain");

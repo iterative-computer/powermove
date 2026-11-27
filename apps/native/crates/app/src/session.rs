@@ -1287,6 +1287,146 @@ impl Controller {
         })
         .detach();
     }
+
+    /// Shows a floating popup toast letting the user know an interaction was
+    /// intercepted by one or more locked layers, with a one-click Unlock button.
+    pub(crate) fn show_locked_toast(
+        &mut self,
+        layers: Vec<String>,
+        document: u64,
+        composition: Option<String>,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let project = session.project.clone();
+        let kernel = self.kernel.clone();
+        crate::v4_native::announce(&self.host.borrow().window, &message);
+        self.note(message.clone(), cx);
+        let mut unique = Vec::new();
+        for id in layers {
+            if !unique.contains(&id) {
+                unique.push(id);
+            }
+        }
+        if unique.is_empty() {
+            self.action_toast = Some(cx.new(|cx| {
+                crate::action_toast::ToastView::notice(Some("lock.fill"), message, cx)
+            }));
+        } else {
+            let label = if unique.len() > 1 {
+                "Unlock All"
+            } else {
+                "Unlock"
+            };
+            let tx_label = if unique.len() > 1 {
+                "Unlock Layers"
+            } else {
+                "Unlock Layer"
+            };
+            self.action_toast = Some(cx.new(|cx| {
+                crate::action_toast::ToastView::with_icon_action(
+                    "lock.fill",
+                    message,
+                    label,
+                    move |cx| {
+                        let Some(publication) = kernel.published(&project) else {
+                            return;
+                        };
+                        if publication.snapshot.doc_id != document
+                            || publication.snapshot.open_comp() != composition
+                        {
+                            return;
+                        }
+                        let commands: Vec<_> = unique
+                            .iter()
+                            .map(|id| pm_kernel::Command::SetLayerLocked {
+                                layer_id: id.clone(),
+                                locked: false,
+                            })
+                            .collect();
+                        let request = pm_kernel::Request::new(
+                            pm_kernel::Caller::native(),
+                            pm_kernel::Call::Transact {
+                                label: Some(tx_label.into()),
+                                body: pm_kernel::WriteBody::Commands(commands),
+                                expected_revision: Some(publication.revision()),
+                            },
+                        )
+                        .with_document(document);
+                        let pending = kernel.call(&project, request);
+                        cx.spawn(async move |_| {
+                            let _ = pending.await;
+                        })
+                        .detach();
+                    },
+                    cx,
+                )
+            }));
+        }
+        cx.notify();
+    }
+
+    /// Resolves the locking owner for `layer_id` in the active composition and
+    /// presents the locked-layer popup toast.
+    pub(crate) fn show_locked_layer_toast_for(
+        &mut self,
+        layer_id: &str,
+        action: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(published) = self.published.clone() else {
+            return;
+        };
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&published.snapshot);
+        let owner = index.locking_layer(layer_id);
+        let owner_id = owner
+            .map(|l| l.id.clone())
+            .unwrap_or_else(|| layer_id.to_owned());
+        let message = match (index.layer(layer_id), owner) {
+            (Some(layer), Some(group)) if group.id != layer.id => format!(
+                "“{}” is inside locked group “{}”",
+                layer.name.to_string_lossy(),
+                group.name.to_string_lossy()
+            ),
+            (Some(layer), _) => format!("“{}” is locked — can't {action}", layer.name.to_string_lossy()),
+            _ => format!("That layer is locked — can't {action}"),
+        };
+        self.show_locked_toast(
+            vec![owner_id],
+            published.snapshot.doc_id,
+            published.snapshot.open_comp(),
+            message,
+            cx,
+        );
+    }
+
+    /// Shows the locked-layer popup for a status/error message reported without
+    /// an explicit layer id, attaching Unlock for any locked selected layers.
+    pub(crate) fn show_locked_status_toast(&mut self, message: String, cx: &mut Context<Self>) {
+        let Some(published) = self.published.clone() else {
+            self.note(message, cx);
+            return;
+        };
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&published.snapshot);
+        let mut owners = Vec::new();
+        for id in index.expanded_ids(published.selection.layers()) {
+            if let Some(owner) = index.locking_layer(&id)
+                && !owners.contains(&owner.id)
+            {
+                owners.push(owner.id.clone());
+            }
+        }
+        self.show_locked_toast(
+            owners,
+            published.snapshot.doc_id,
+            published.snapshot.open_comp(),
+            message,
+            cx,
+        );
+    }
     /// Status bar copy (language §14): a pending message or error, else
     /// `Saved`/`Edited` with layer and keyframe counts.
     pub fn status_text(&self) -> String {
@@ -2654,7 +2794,13 @@ impl Controller {
             let _ = this.update(cx, |v, cx| match result {
                 Some(Ok(ack)) => {
                     if let Reply::Throw(e) = ack.reply {
-                        v.message = e.to_string();
+                        let msg = e.to_string();
+                        if msg.to_ascii_lowercase().contains("locked") {
+                            v.show_locked_status_toast(msg, cx);
+                        } else {
+                            v.message = msg;
+                            cx.notify();
+                        }
                         return;
                     }
                     if let Some(published) = v.kernel.published(&project)

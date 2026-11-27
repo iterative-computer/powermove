@@ -320,6 +320,13 @@ impl Controller {
             self.message = format!("Drop {} on a layer, or select one first", drop.label);
             return cx.notify();
         };
+        if let Some(published) = &self.published {
+            let index = pm_panel_timeline::TimelineIndex::from_snapshot(&published.snapshot);
+            if index.layer(&layer).is_some_and(|l| l.effectively_locked) {
+                self.show_locked_layer_toast_for(&layer, "add effect", cx);
+                return;
+            }
+        }
         let kind = self.published.as_ref().and_then(|p| {
             let root = p.snapshot.root()?;
             let at = pm_kernel::model::find_layer(root, &layer)?;
@@ -389,6 +396,15 @@ impl Controller {
             return cx.notify();
         };
         let edge = drop.edge.unwrap_or(Edge::In);
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&published.snapshot);
+        if let Some(locked_id) = std::iter::once(layer.as_str())
+            .chain(drop.across.as_deref())
+            .find(|id| index.layer(id).is_some_and(|l| l.effectively_locked))
+            .map(str::to_owned)
+        {
+            self.show_locked_layer_toast_for(&locked_id, "add transition", cx);
+            return;
+        }
         let placed = self.place_transition(&layer, edge, drop.across.as_deref(), id);
         // Named by the registry (a search row's label also names its group).
         let label = self
@@ -425,6 +441,16 @@ impl Controller {
             .cloned()
             .collect();
         if clips.is_empty() {
+            if let Some(locked_id) = published
+                .selection
+                .layers()
+                .iter()
+                .find(|id| index.layer(id).is_some_and(|l| l.effectively_locked))
+                .cloned()
+            {
+                self.show_locked_layer_toast_for(&locked_id, "add transition", cx);
+                return;
+            }
             self.message = "Select a clip to add a transition to".into();
             return cx.notify();
         }

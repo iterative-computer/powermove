@@ -4478,6 +4478,16 @@ impl Controller {
 }
 
 struct ControllerDelegate(WeakEntity<Controller>);
+/// Recognizes timeline status/error lines that describe an interaction blocked
+/// or partially skipped by a locked layer so we can also raise the floating popup.
+fn is_locked_status(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("locked layer")
+        || lower.contains("locked group")
+        || lower.contains("layer is locked")
+        || lower.contains("locked.")
+}
+
 impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn timing_preview(&self, snapshot: Option<pm_kernel::Snapshot>, cx: &mut App) {
         let _ = self.0.update(cx, |v, _| {
@@ -4552,60 +4562,28 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn effect(&self, effect: pm_panel_timeline::HostEffect, cx: &mut App) {
         use pm_panel_timeline::HostEffect as E;
         let _ = self.0.update(cx, |v, cx| match effect {
-            E::Status(message) => v.note(message, cx),
+            E::Status(message) => {
+                if is_locked_status(&message) {
+                    v.show_locked_status_toast(message, cx);
+                } else {
+                    v.note(message, cx);
+                }
+            }
             E::LockedStrip {
                 layer,
                 document,
                 composition,
                 trim,
+                message,
             } => {
-                let Some(session) = v.session.as_ref() else {
-                    return;
-                };
-                let project = session.project.clone();
-                let kernel = v.kernel.clone();
-                let message = if trim {
-                    "1 locked layer didn't trim"
-                } else {
-                    "1 locked layer didn't move"
-                };
-                crate::v4_native::announce(&v.host.borrow().window, message);
-                v.action_toast = Some(cx.new(|cx| {
-                    crate::action_toast::ToastView::with_action(
-                        message.into(),
-                        "Unlock",
-                        move |cx| {
-                            let Some(publication) = kernel.published(&project) else {
-                                return;
-                            };
-                            if publication.snapshot.doc_id != document
-                                || publication.snapshot.open_comp() != composition
-                            {
-                                return;
-                            }
-                            let command = pm_kernel::Command::SetLayerLocked {
-                                layer_id: layer.clone(),
-                                locked: false,
-                            };
-                            let request = pm_kernel::Request::new(
-                                pm_kernel::Caller::native(),
-                                pm_kernel::Call::Transact {
-                                    label: Some("Unlock Layer".into()),
-                                    body: pm_kernel::WriteBody::Commands(vec![command]),
-                                    expected_revision: Some(publication.revision()),
-                                },
-                            )
-                            .with_document(document);
-                            let pending = kernel.call(&project, request);
-                            cx.spawn(async move |_| {
-                                let _ = pending.await;
-                            })
-                            .detach();
-                        },
-                        cx,
-                    )
-                }));
-                cx.notify();
+                let message = message.unwrap_or_else(|| {
+                    if trim {
+                        "1 locked layer didn't trim".into()
+                    } else {
+                        "1 locked layer didn't move".into()
+                    }
+                });
+                v.show_locked_toast(vec![layer], document, composition, message, cx);
             }
             E::Seek(time) => v.seek(time),
             // The empty composition's buttons: the app's own commands.
@@ -4669,7 +4647,13 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn report(&self, message: String, cx: &mut App) {
         // A passing note: it clears once its moment is over (PM-476 kept a
         // timeline view write's failure in the status line for good).
-        let _ = self.0.update(cx, |v, cx| v.note(message, cx));
+        let _ = self.0.update(cx, |v, cx| {
+            if is_locked_status(&message) {
+                v.show_locked_status_toast(message, cx);
+            } else {
+                v.note(message, cx);
+            }
+        });
     }
     fn command(&self, name: &str, cx: &mut App) {
         crate::timeline_surface::Delegate::run(self, name, vec![], cx);

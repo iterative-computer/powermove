@@ -71,6 +71,7 @@ pub enum HostEffect {
         document: u64,
         composition: Option<String>,
         trim: bool,
+        message: Option<String>,
     },
     TogglePlayback,
     /// Fit Selected Curves: show this span of composition time.
@@ -375,9 +376,13 @@ impl TimelineModel {
                 let selected: HashSet<_> = layers.iter().collect();
                 let min_duration = 1. / self.index.fps;
                 let mut layer_ids = Vec::new();
+                let mut first_locked: Option<String> = None;
                 for id in self.index.expanded_ids(&layers) {
                     let layer = self.index.layer(&id).unwrap();
                     if layer.effectively_locked {
+                        if first_locked.is_none() {
+                            first_locked = Some(id);
+                        }
                         continue;
                     }
                     let (from, duration) = self.index.strip_span(layer);
@@ -400,15 +405,48 @@ impl TimelineModel {
                         ));
                     }
                 }
-                if layer_ids.is_empty() {
+                let mut plan = if layer_ids.is_empty() {
                     Plan::default()
                 } else if is_in {
                     edit(TimingCommand::TrimIn { layer_ids, time }.into())
                 } else {
                     edit(TimingCommand::TrimOut { layer_ids, time }.into())
+                };
+                if let Some(locked_id) = first_locked {
+                    let owner = self
+                        .index
+                        .locking_layer(&locked_id)
+                        .map(|l| l.id.clone())
+                        .unwrap_or_else(|| locked_id.clone());
+                    let msg = self.index.layer(&locked_id).map(|l| {
+                        let name = l.name.to_string_lossy();
+                        if owner != locked_id {
+                            let group = self
+                                .index
+                                .layer(&owner)
+                                .map(|g| g.name.to_string_lossy())
+                                .unwrap_or_default();
+                            format!("“{name}” is inside locked group “{group}”")
+                        } else {
+                            format!("“{name}” is locked — can't trim")
+                        }
+                    });
+                    plan.effects.push(HostEffect::LockedStrip {
+                        layer: owner,
+                        document: self.index.doc_id,
+                        composition: self.index.comp_id.clone(),
+                        trim: true,
+                        message: msg,
+                    });
                 }
+                plan
             }
             "split" => {
+                let first_locked = layers.iter().find_map(|id| {
+                    let l = self.index.layer(id)?;
+                    (time > l.from && time < l.from + l.duration && l.effectively_locked)
+                        .then(|| id.clone())
+                });
                 let new_ids: Vec<_> = layers.iter().map(|_| new_id("L")).collect();
                 let tails: Vec<_> = layers
                     .iter()
@@ -420,14 +458,18 @@ impl TimelineModel {
                     })
                     .map(|(_, id)| id.clone())
                     .collect();
-                let mut plan = edit(
-                    TimingCommand::Split {
-                        layer_ids: layers,
-                        time,
-                        new_ids,
-                    }
-                    .into(),
-                );
+                let mut plan = if tails.is_empty() && first_locked.is_some() {
+                    Plan::default()
+                } else {
+                    edit(
+                        TimingCommand::Split {
+                            layer_ids: layers,
+                            time,
+                            new_ids,
+                        }
+                        .into(),
+                    )
+                };
                 if !tails.is_empty() {
                     plan.calls.push(
                         SelectionCall::Layers {
@@ -436,6 +478,33 @@ impl TimelineModel {
                         }
                         .into(),
                     );
+                }
+                if let Some(locked_id) = first_locked {
+                    let owner = self
+                        .index
+                        .locking_layer(&locked_id)
+                        .map(|l| l.id.clone())
+                        .unwrap_or_else(|| locked_id.clone());
+                    let msg = self.index.layer(&locked_id).map(|l| {
+                        let name = l.name.to_string_lossy();
+                        if owner != locked_id {
+                            let group = self
+                                .index
+                                .layer(&owner)
+                                .map(|g| g.name.to_string_lossy())
+                                .unwrap_or_default();
+                            format!("“{name}” is inside locked group “{group}”")
+                        } else {
+                            format!("“{name}” is locked — can't split")
+                        }
+                    });
+                    plan.effects.push(HostEffect::LockedStrip {
+                        layer: owner,
+                        document: self.index.doc_id,
+                        composition: self.index.comp_id.clone(),
+                        trim: false,
+                        message: msg,
+                    });
                 }
                 plan
             }
