@@ -1,0 +1,7 @@
+{
+  "note": "Pinned public inputs a release bundles. Codex and Claude come from crates/agents/fixtures/runtime-pins.json; the rest are pinned here. Every archive is checked against its digest before it is unpacked.",
+  "transcribe": {
+    "spec": "@transcribe-cpp/darwin-arm64-metal@0.3.1",
+    "integrity": "sha512-Fk6crfpnFmbelnDNIVJ8NzJbQHMwQIZcd3ZquVMTjNxPIoU1xqABKV5iKPcCnxtRk48g6QRDgH2tEIN8nTp7qw=="
+  }
+}

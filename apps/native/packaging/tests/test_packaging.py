@@ -1,5 +1,4 @@
 """Linux contract tests: subprocess calls are recorded, never actually signed/submitted."""
-import copy
 import importlib.util
 import json
 import os
@@ -8,6 +7,7 @@ import plistlib
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 SOURCE = Path(__file__).resolve().parents[1] / "package.py"
@@ -43,12 +43,10 @@ class PackagingTests(unittest.TestCase):
             shutil.copy2(self.binary, self.ffmpeg_dir / "bin" / tool)
         patch.dict(os.environ, {"PM_FFMPEG_DIR": str(self.ffmpeg_dir)}).start()
         self.app = self.root / "Powermove.app"
-        self.config = self.root / "updates.json"
-        self.config.write_bytes((package.HERE / "update-config.json").read_bytes())
 
     def test_media_tools_are_bundled_and_relocated(self):
         with patch.object(package, "macos"), patch.object(package, "run") as run:
-            package.bundle(self.binary, self.app, "cutover", "2.0.0", "12", self.config)
+            package.bundle(self.binary, self.app, "cutover", "2.0.0", "12")
         for tool in ("ffmpeg", "ffprobe"):
             target = self.app / "Contents/MacOS" / tool
             self.assertEqual(target.read_bytes(), self.binary.read_bytes())
@@ -63,10 +61,7 @@ class PackagingTests(unittest.TestCase):
             self.bundle()
 
     def bundle(self, channel="cutover", **kwargs):
-        config = json.loads(self.config.read_text())
-        config["channel"] = "cutover" if channel == "dev" else channel
-        self.config.write_text(json.dumps(config))
-        return package.bundle(self.binary, self.app, channel, "2.0.0", "12", self.config,
+        return package.bundle(self.binary, self.app, channel, "2.0.0", "12",
                               compile_assets=False, **kwargs)
 
     def test_bundle_layout_and_shipped_production_associations(self):
@@ -83,7 +78,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(info["NSAccentColorName"], "AccentColor")
         self.assertEqual((self.app / "Contents/MacOS/powermove-native").read_bytes(), self.binary.read_bytes())
         self.assertEqual((self.app / "Contents/PkgInfo").read_bytes(), b"APPL????")
-        for name in ("icon.icns", "document.icns", "update-config.json"):
+        for name in ("icon.icns", "document.icns"):
             self.assertTrue((self.app / "Contents/Resources" / name).is_file())
         self.assertFalse((self.app / "Contents/Resources/Assets.car").exists())
         self.assertNotIn("SUFeedURL", info)
@@ -111,6 +106,14 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(info["CFBundleIdentifier"], package.IDS[channel])
             self.assertNotIn("CFBundleDocumentTypes", info)
             self.assertNotIn("CFBundleURLTypes", info)
+
+    def test_only_dev_bundles_take_their_own_lane_id(self):
+        self.assertEqual(package.info("dev", "2.0.0", "1", bundle_id="com.powermove.native.dev.w122")
+                         ["CFBundleIdentifier"], "com.powermove.native.dev.w122")
+        for channel, value in (("cutover", "com.powermove.native.dev.w122"), ("dev", "com.zellzoi.powermove"),
+                               ("dev", "com.powermove.native.dev")):
+            with self.assertRaises(ValueError):
+                package.info(channel, "2.0.0", "1", bundle_id=value)
 
     def test_invalid_bundle_version_build_and_channel_fail(self):
         for channel, version, build in (("unknown", "2.0.0", "1"), ("cutover", "2.0.0-beta.1", "1"),
@@ -144,43 +147,57 @@ class PackagingTests(unittest.TestCase):
             self.bundle()
         self.assertFalse(self.app.exists())
 
-    def test_enabled_updates_require_pinned_keys_and_a_framework(self):
-        value = json.loads(self.config.read_text())
-        value.update(enabled=True, feedURL="https://updates.invalid/native/policy.json", publicKey=None)
-        self.config.write_text(json.dumps(value))
-        with self.assertRaises((ValueError, TypeError)):
-            self.bundle()
-        value["publicKey"] = "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
-        self.config.write_text(json.dumps(value))
-        with self.assertRaises(ValueError):
-            self.bundle()
-        self.assertFalse(self.app.exists())
-
-    def test_sparkle_bootstrap_has_pinned_public_key_and_no_automatic_quit(self):
+    def test_sparkle_needs_framework_feed_and_key_together(self):
         key = "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
-        info = package.info("cutover", "2.0.0", "1", "https://updates.invalid/native/appcast.xml", key)
-        self.assertEqual(info["SUPublicEDKey"], key)
-        self.assertFalse(info["SUEnableAutomaticChecks"])
-        self.assertFalse(info["SUAutomaticallyUpdate"])
+        with self.assertRaises(ValueError):
+            self.bundle(sparkle_feed="https://updates.invalid/appcast.xml", sparkle_key=key)
+        self.assertFalse(self.app.exists())
         with self.assertRaises(ValueError):
             package.info("cutover", "2.0.0", "1", "https://updates.invalid/native/appcast.xml")
 
-    def test_config_channel_legacy_feeds_and_untrusted_urls_fail(self):
-        original = json.loads(self.config.read_text())
+    def test_sparkle_checks_daily_asks_before_installing_and_requires_signed_feed(self):
+        key = "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
+        info = package.info("cutover", "2.0.0", "1", "https://updates.invalid/native/appcast.xml", key)
+        self.assertEqual(info["SUPublicEDKey"], key)
+        self.assertTrue(info["SUEnableAutomaticChecks"])
+        self.assertFalse(info["SUAutomaticallyUpdate"])
+        self.assertTrue(info["SUVerifyUpdateBeforeExtraction"])
+        self.assertTrue(info["SURequireSignedFeed"])
+
+    def test_shipping_feeds_are_https_and_dev_feeds_are_loopback_only(self):
+        key = "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
         for url in ("http://updates.invalid/a", "https://u:p@updates.invalid/a", "https://updates.invalid/a?q=1",
-                    "https://updates.invalid/a#x", "https://updates.invalid/latest-mac.yml"):
-            value = copy.deepcopy(original)
-            value.update(enabled=True, feedURL=url, publicKey="BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=")
-            self.config.write_text(json.dumps(value))
+                    "https://updates.invalid/a#x", "https://updates.invalid/latest-mac.yml",
+                    "http://127.0.0.1:8765/appcast.xml"):
             with self.assertRaises(ValueError):
-                package.config(self.config, "cutover")
-        self.config.write_text(json.dumps(original))
-        with self.assertRaises(ValueError):
-            package.config(self.config, "beta")
+                package.info("cutover", "2.0.0", "1", url, key)
+        # A dev or lane build never names the real feed.
+        for url in ("https://github.com/iterative-computer/powermove/releases/latest/download/appcast.xml",
+                    "http://localhost.invalid/appcast.xml", "http://u:p@127.0.0.1/appcast.xml"):
+            with self.assertRaises(ValueError):
+                package.info("dev", "2.0.0", "1", url, key)
+        for url in ("http://127.0.0.1:8765/appcast.xml", "http://[::1]:8765/appcast.xml"):
+            self.assertEqual(package.info("dev", "2.0.0", "1", url, key)["SUFeedURL"], url)
+
+    def test_release_resources_and_transcribe_runtime_are_bundled(self):
+        runtime = self.root / "transcribe"
+        runtime.mkdir()
+        (runtime / "contract.json").write_text("{}")
+        (runtime / "libtranscribe.dylib").write_bytes(self.binary.read_bytes())
+        for name, source in package.RESOURCES.items():
+            path = package.NATIVE / source
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"synthetic " + name.encode())
+        self.bundle(transcribe_runtime=runtime)
+        resources = self.app / "Contents/Resources"
+        self.assertTrue((resources / "transcribe/contract.json").is_file())
+        self.assertIn(resources / "transcribe/libtranscribe.dylib", package.nested_code(self.app))
+        for name in package.RESOURCES:
+            self.assertTrue((resources / name).is_file(), name)
 
     def test_assets_compile_uses_existing_accent_and_minimum_os(self):
         with patch.object(package, "macos"), patch.object(package, "run") as run:
-            package.bundle(self.binary, self.app, "cutover", "2.0.0", "12", self.config)
+            package.bundle(self.binary, self.app, "cutover", "2.0.0", "12")
         command = [str(x) for x in run.call_args.args[0]]
         self.assertEqual(command[:2], ["xcrun", "actool"])
         self.assertIn("AccentColor", command)
@@ -261,6 +278,13 @@ class PackagingTests(unittest.TestCase):
         calls = [[str(x) for x in c.args[0]] for c in run.call_args_list]
         self.assertEqual(calls[0][:3], ["xcrun", "notarytool", "submit"])
         self.assertIn("--keychain-profile", calls[0])
+        with patch.object(package, "macos"), patch.dict(os.environ, {"PM_NOTARY_KEY": str(artifact),
+                "PM_NOTARY_KEY_ID": "KEYID", "PM_NOTARY_ISSUER": "issuer"}, clear=True), \
+                patch.object(package, "run") as api:
+            package.notarize(artifact)
+        submit = [str(x) for x in api.call_args_list[0].args[0]]
+        self.assertEqual(submit[submit.index("--key") + 1], str(artifact))
+        self.assertNotIn("--keychain-profile", submit)
         self.assertEqual(calls[1][:3], ["xcrun", "stapler", "staple"])
         self.assertEqual(calls[2][:3], ["xcrun", "stapler", "validate"])
         self.assertEqual(calls[3][0], "spctl")
@@ -281,12 +305,14 @@ class PackagingTests(unittest.TestCase):
         (framework / "Resources").mkdir(parents=True)
         path = framework / "Resources/Info.plist"
         path.write_bytes(plistlib.dumps({"CFBundleShortVersionString": "0.0.0"}))
+        sparkle = dict(sparkle_framework=framework, sparkle_feed="https://updates.invalid/appcast.xml",
+                       sparkle_key="BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=")
         with self.assertRaises(ValueError):
-            self.bundle(sparkle_framework=framework)
+            self.bundle(**sparkle)
         self.assertFalse(self.app.exists())
         pin = json.loads((package.HERE / "sparkle-pin.json").read_text())
         path.write_bytes(plistlib.dumps({"CFBundleShortVersionString": pin["version"]}))
-        self.bundle(sparkle_framework=framework)
+        self.bundle(**sparkle)
         self.assertTrue((self.app / "Contents/Frameworks/Sparkle.framework/Resources/Info.plist").is_file())
 
     def test_upstream_sparkle_archive_digest_is_checked_without_extracting(self):
@@ -330,6 +356,95 @@ class AdhocProofSafetyTests(unittest.TestCase):
                 sign = calls.call_args_list[0].args[0]
                 self.assertIn("--timestamp=none", sign)
                 self.assertEqual(sign[sign.index("--sign") + 1], "-")
+
+
+class ReleaseFeedTests(unittest.TestCase):
+    """The feeds V1's electron-updater and V2's Sparkle read, from one ZIP."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.zip = self.root / "Powermove-2.0.0-mac-arm64.zip"
+        self.zip.write_bytes(b"synthetic signed app archive")
+        self.signed = []
+
+    def feeds(self, **kwargs):
+        def sign(tool, key, path, *extra):
+            self.signed.append((Path(path).name, extra))
+            return "c2ln" if extra == ("-p",) else ""
+        with patch.object(package, "sparkle_sign", sign), patch.object(package, "verify_ed25519") as verify:
+            out = package.feeds(self.zip, self.root / "feeds", "2.0.0", "2.0.0", "v2.0.0",
+                                "iterative-computer/powermove", "sign_update", "key",
+                                "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=",
+                                date=package.datetime(2026, 11, 27, 9, 30, tzinfo=package.timezone.utc), **kwargs)
+        verify.assert_called_once()
+        return out
+
+    def test_electron_feed_matches_what_electron_updater_reads(self):
+        out = self.feeds()
+        digest = package.base64.b64encode(package.hashlib.sha512(self.zip.read_bytes()).digest()).decode()
+        latest = (out / "latest-mac.yml").read_text()
+        self.assertEqual(latest, (out / "beta-mac.yml").read_text())
+        self.assertEqual(latest, f"""version: 2.0.0
+files:
+  - url: Powermove-2.0.0-mac-arm64.zip
+    sha512: {digest}
+    size: {self.zip.stat().st_size}
+minimumSystemVersion: 23.0.0
+path: Powermove-2.0.0-mac-arm64.zip
+sha512: {digest}
+releaseDate: '2026-11-27T09:30:00.000Z'
+""")
+        # electron-updater keeps arm64 files for Apple silicon V1 (MacUpdater.js).
+        self.assertIn("arm64", self.zip.name)
+
+    def test_sparkle_appcast_is_signed_and_points_at_the_tagged_archive(self):
+        out = self.feeds()
+        appcast = (out / "appcast.xml").read_text()
+        self.assertIn('url="https://github.com/iterative-computer/powermove/releases/download/v2.0.0/'
+                      'Powermove-2.0.0-mac-arm64.zip"', appcast)
+        self.assertIn('sparkle:edSignature="c2ln"', appcast)
+        self.assertIn(f'length="{self.zip.stat().st_size}"', appcast)
+        self.assertIn("<sparkle:version>2.0.0</sparkle:version>", appcast)
+        self.assertIn("<sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>", appcast)
+        self.assertEqual(self.signed, [(self.zip.name, ("-p",)), ("appcast.xml", ())])
+        import xml.etree.ElementTree as ET
+        ET.fromstring(appcast)
+
+    def test_feeds_refuse_wrong_names_tags_and_existing_outputs(self):
+        with self.assertRaises(ValueError):
+            package.feeds(self.zip, self.root / "a", "2.0.1", "2.0.1", "v2.0.1", "o/r", "s", "k", "x")
+        with self.assertRaises(ValueError):
+            package.feeds(self.zip, self.root / "a", "2.0.0", "2.0.0", "2.0.0", "o/r", "s", "k", "x")
+        self.feeds()
+        with self.assertRaises(ValueError):
+            self.feeds()
+
+    def test_v1_requirement_is_the_shipped_production_identity(self):
+        requirement = package.v1_requirement()
+        self.assertTrue(requirement.startswith('identifier "com.zellzoi.powermove" and anchor apple generic'))
+        self.assertIn('certificate leaf[subject.OU] = "8JTS5XWJJN"', requirement)
+        self.assertEqual(package.IDS["cutover"], "com.zellzoi.powermove")
+        self.assertEqual(package.info("cutover", "2.0.0", "2.0.0")["CFBundleIdentifier"], "com.zellzoi.powermove")
+
+    def test_continuity_checks_v1_requirement_identifier_and_arm64(self):
+        app = self.root / "Powermove.app"
+        (app / "Contents/MacOS").mkdir(parents=True)
+        info = {"CFBundleIdentifier": "com.zellzoi.powermove", "CFBundleExecutable": "powermove-native"}
+        (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
+        lipo = unittest.mock.Mock(stdout="arm64\n")
+        with patch.object(package, "macos"), patch.object(package.subprocess, "run", return_value=lipo):
+            calls = []
+            package.continuity(app, run=calls.append)
+            self.assertEqual(calls[0][-3:], ["-R", "=" + package.v1_requirement(), app])
+            lipo.stdout = "x86_64\n"
+            with self.assertRaises(ValueError):
+                package.continuity(app, run=calls.append)
+            info["CFBundleIdentifier"] = "com.zellzoi.powermove.native-beta"
+            (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
+            with self.assertRaises(ValueError):
+                package.continuity(app, run=calls.append)
 
 
 if __name__ == "__main__":

@@ -3,9 +3,13 @@
 
 Python is build tooling, never bundled. macOS commands are injectable for Linux
 contract tests. Destination paths must be new; existing bundles are never removed.
+The release workflow (.github/workflows/release-v2.yml) and release.sh drive it;
+docs/native/release.md is the operator's guide.
 """
 import argparse
 import base64
+from datetime import datetime, timezone
+from email.utils import format_datetime
 import hashlib
 import json
 import os
@@ -15,7 +19,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from urllib.parse import urlsplit
+from xml.sax.saxutils import escape
 
 HERE = Path(__file__).resolve().parent
 NATIVE = HERE.parent
@@ -56,32 +62,38 @@ def public_key(value):
     return value
 
 
-def config(path, channel):
-    value = json.loads(Path(path).read_text())
-    if set(value) != {"version", "enabled", "feedURL", "publicKey", "channel"}:
-        raise ValueError("unknown/missing update configuration fields")
-    if value["version"] != 1 or type(value["enabled"]) is not bool:
-        raise ValueError("unsupported update configuration")
-    if value["channel"] != channel:
-        raise ValueError("update channel mismatch")
-    if value["enabled"]:
-        https(value["feedURL"])
-        if urlsplit(value["feedURL"]).path.endswith(("latest-mac.yml", "beta-mac.yml")):
-            raise ValueError("legacy Electron feed cannot deliver native policy")
-        public_key(value["publicKey"])
+LOOPBACK = {"127.0.0.1", "::1"}
+
+
+def feed_url(value, channel):
+    """A shipping channel takes a credential-free HTTPS appcast. A dev bundle may
+    only name a loopback appcast (a local proof), so dev and lane builds never
+    reach the real feed; the app enforces the same rule (crates/app updates.rs)."""
+    if channel == "dev":
+        parsed = urlsplit(value)
+        if (parsed.scheme not in ("http", "https") or parsed.hostname not in LOOPBACK
+                or parsed.username is not None or parsed.password is not None):
+            raise ValueError("a dev bundle may only use a loopback appcast")
+        return value
+    https(value)
+    if urlsplit(value).path.endswith(("latest-mac.yml", "beta-mac.yml")):
+        raise ValueError("the Electron feed is not a Sparkle appcast")
     return value
 
 
-def info(channel, version, build, sparkle_feed=None, sparkle_key=None):
+def info(channel, version, build, sparkle_feed=None, sparkle_key=None, bundle_id=None):
     if channel not in IDS or not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError("explicit channel and numeric macOS bundle version required")
     if not re.fullmatch(r"[1-9]\d*(?:\.\d+){0,2}", build):
         raise ValueError("invalid bundle build number")
     if bool(sparkle_feed) != bool(sparkle_key):
         raise ValueError("Sparkle feed and public key must be provided together")
+    # A dev bundle may take a lane's own id (com.powermove.native.dev.<lane>).
+    if bundle_id and (channel != "dev" or not re.fullmatch(r"com\.powermove\.native\.dev(?:\.[A-Za-z0-9-]+)+", bundle_id)):
+        raise ValueError("only a dev bundle takes its own com.powermove.native.dev.<name> id")
     value = {
         "CFBundleName": "Powermove", "CFBundleDisplayName": "Powermove",
-        "CFBundleIdentifier": IDS[channel], "CFBundleExecutable": "powermove-native",
+        "CFBundleIdentifier": bundle_id or IDS[channel], "CFBundleExecutable": "powermove-native",
         "CFBundlePackageType": "APPL", "CFBundleShortVersionString": version,
         "CFBundleVersion": build, "LSMinimumSystemVersion": "14.0",
         # The system allocator otherwise keeps freed large blocks (V8, codecs)
@@ -107,8 +119,13 @@ def info(channel, version, build, sparkle_feed=None, sparkle_key=None):
                                        "public.mime-type": "application/vnd.powermove.project"},
         }]
     if sparkle_feed:
-        value.update(SUFeedURL=https(sparkle_feed), SUPublicEDKey=public_key(sparkle_key),
-                     SUEnableAutomaticChecks=False, SUAutomaticallyUpdate=False)
+        # Sparkle checks once a day without asking first and shows its update
+        # window; it never installs silently. Every archive and the appcast
+        # itself must carry an EdDSA signature from the pinned key, checked
+        # before extraction. Replacement waits for the app's normal quit.
+        value.update(SUFeedURL=feed_url(sparkle_feed, channel), SUPublicEDKey=public_key(sparkle_key),
+                     SUEnableAutomaticChecks=True, SUAutomaticallyUpdate=False,
+                     SUVerifyUpdateBeforeExtraction=True, SURequireSignedFeed=True)
     return value
 
 
@@ -135,13 +152,22 @@ def native_file(path):
 HELPERS = ("pm-store-helper", "pm-glsl-compiler")
 
 
-def bundle(executable, destination, channel, version, build, update_config,
+# Bundle resources the app reads by name (bundle-dev.sh copies the same set).
+RESOURCES = {
+    "little-victory-deep.wav": "bundle/little-victory-deep.wav",
+    "Credits.rtf": "bundle/Credits.rtf",
+    "Distortion Waves License.txt": "bundle/Distortion Waves License.txt",
+    "Pierre Icons License.txt": "crates/shell/icons/pierre/LICENSE",
+}
+
+
+def bundle(executable, destination, channel, version, build,
            sparkle_framework=None, sparkle_feed=None, sparkle_key=None, compile_assets=True,
-           glsl_compiler=None, claude_runtime=None, codex_vendor=None):
-    metadata = info(channel, version, build, sparkle_feed, sparkle_key)
-    updates = config(update_config, "cutover" if channel == "dev" else channel)
-    if updates["enabled"] and not all((sparkle_framework, sparkle_feed, sparkle_key)):
-        raise ValueError("enabled updates require the reviewed Sparkle framework/feed/key")
+           glsl_compiler=None, claude_runtime=None, codex_vendor=None, transcribe_runtime=None,
+           bundle_id=None):
+    metadata = info(channel, version, build, sparkle_feed, sparkle_key, bundle_id)
+    if bool(sparkle_framework) != bool(sparkle_feed):
+        raise ValueError("Sparkle needs its framework, feed and key together")
     executable = native_file(executable)
     destination = new_destination(destination)
     if destination.suffix != ".app":
@@ -194,6 +220,18 @@ def bundle(executable, destination, channel, version, build, update_config,
         codex_vendor = Path(codex_vendor)
         native_file(codex_vendor / "bin" / "codex")
         shutil.copytree(codex_vendor, resources / "codex", symlinks=True)
+    if transcribe_runtime:
+        # Speech to text: transcribe.cpp's contract and dylibs (signed with the app).
+        runtime = Path(transcribe_runtime)
+        if not (runtime / "contract.json").is_file():
+            raise ValueError("transcribe runtime needs contract.json")
+        (resources / "transcribe").mkdir()
+        for item in [runtime / "contract.json", *sorted(runtime.glob("*.dylib"))]:
+            shutil.copy2(item, resources / "transcribe" / item.name)
+    for name, source in RESOURCES.items():
+        source = NATIVE / source
+        if source.is_file():
+            shutil.copy2(source, resources / name)
     with (contents / "Info.plist").open("wb") as file:
         plistlib.dump(metadata, file, sort_keys=True)
     (contents / "PkgInfo").write_bytes(b"APPL????")
@@ -206,7 +244,6 @@ def bundle(executable, destination, channel, version, build, update_config,
              "--minimum-deployment-target", "14.0", "--accent-color", "AccentColor",
              "--output-partial-info-plist", resources / "asset-info.plist",
              resources / "Assets.xcassets"])
-    (resources / "update-config.json").write_text(json.dumps(updates, indent=2) + "\n")
     if sparkle_framework:
         (contents / "Frameworks").mkdir()
         shutil.copytree(framework, contents / "Frameworks" / "Sparkle.framework", symlinks=True)
@@ -247,8 +284,9 @@ def sign(app, identity=None, *, adhoc_proof=False):
     app = Path(app).resolve(strict=True)
     if adhoc_proof:
         info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
-        if not re.fullmatch(r"com\.powermove\.signature-proof(?:\.[A-Za-z0-9-]+)*", info.get("CFBundleIdentifier", "")):
-            raise ValueError("ad-hoc proof signing is limited to synthetic proof bundles")
+        if not re.fullmatch(r"com\.powermove\.(?:signature-proof|native\.dev)(?:\.[A-Za-z0-9-]+)*",
+                            info.get("CFBundleIdentifier", "")):
+            raise ValueError("ad-hoc proof signing is limited to proof and dev bundles")
     timestamp = "--timestamp=none" if adhoc_proof else "--timestamp"
     proof_requirement = ["--requirements", '=designated => identifier "' + info["CFBundleIdentifier"] + '"'] if adhoc_proof else []
     if not (app / "Contents" / "Resources" / "Assets.car").is_file():
@@ -300,13 +338,22 @@ def notarize(artifact, profile=None):
     artifact = Path(artifact).resolve(strict=True)
     if artifact.suffix not in (".dmg", ".app"):
         raise ValueError("notarize/staple a local app or DMG")
+    # CI: an App Store Connect API key file (PM_NOTARY_KEY, _KEY_ID, _ISSUER).
+    # A local operator: an existing notarytool Keychain profile.
+    api = [os.environ.get(name) for name in ("PM_NOTARY_KEY", "PM_NOTARY_KEY_ID", "PM_NOTARY_ISSUER")]
     profile = profile or os.environ.get("PM_NOTARY_KEYCHAIN_PROFILE")
-    if not profile or profile.startswith("-"):
-        raise ValueError("set PM_NOTARY_KEYCHAIN_PROFILE to an existing notarytool Keychain profile")
+    if all(api) and not profile:
+        if not Path(api[0]).is_file():
+            raise ValueError("PM_NOTARY_KEY must name the API key file")
+        credentials = ["--key", api[0], "--key-id", api[1], "--issuer", api[2]]
+    elif profile and not profile.startswith("-"):
+        credentials = ["--keychain-profile", profile]
+    else:
+        raise ValueError("set PM_NOTARY_KEY/_KEY_ID/_ISSUER or PM_NOTARY_KEYCHAIN_PROFILE")
     submission = artifact
     if artifact.suffix == ".app":
         submission = transition_zip(artifact, artifact.with_suffix(".notary.zip"))
-    run(["xcrun", "notarytool", "submit", submission, "--keychain-profile", profile, "--wait"])
+    run(["xcrun", "notarytool", "submit", submission, *credentials, "--wait"])
     run(["xcrun", "stapler", "staple", artifact])
     run(["xcrun", "stapler", "validate", artifact])
     if artifact.suffix == ".app":
@@ -324,6 +371,124 @@ def verify_sparkle_archive(archive):
             digest.update(chunk)
     if digest.hexdigest() != pin["sha256"]:
         raise ValueError("Sparkle archive does not match the reviewed SHA-256 pin")
+
+
+# V1 (Electron, electron-updater 6.8.3 + Squirrel.Mac) installs an update only
+# when the new bundle satisfies the running app's designated requirement, read
+# from the signed V1 1.3.2 executable. V2 stable keeps its identifier and Team.
+V1_REQUIREMENT = HERE / "v1-designated-requirement.txt"
+# electron-updater compares minimumSystemVersion with os.release(), the Darwin
+# kernel version, not the macOS version: macOS 14 is Darwin 23.
+DARWIN = {"14.0": "23.0.0"}
+ZIP_NAME = "Powermove-{version}-mac-arm64.zip"
+
+
+def v1_requirement():
+    text = V1_REQUIREMENT.read_text().strip()
+    if not text.startswith('designated => identifier "' + IDS["cutover"] + '" '):
+        raise ValueError("V1 requirement must name the production identifier")
+    return text.removeprefix("designated => ")
+
+
+def continuity(app, run=run):
+    """The checks Squirrel.Mac makes before it swaps V1 for this bundle: the same
+    bundle identifier (it picks the update bundle by identifier), a valid nested
+    signature that satisfies V1's designated requirement, and an arm64 slice."""
+    macos()
+    app = Path(app).resolve(strict=True)
+    metadata = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    if metadata.get("CFBundleIdentifier") != IDS["cutover"]:
+        raise ValueError("V1 updates only into the production identifier")
+    executable = app / "Contents/MacOS" / metadata["CFBundleExecutable"]
+    archs = subprocess.run(["lipo", "-archs", str(executable)], check=True,
+                           capture_output=True, text=True).stdout.split()
+    if "arm64" not in archs:
+        raise ValueError("V1 runs on Apple silicon only; the update needs arm64")
+    run(["codesign", "--verify", "--deep", "--strict", "--all-architectures",
+         "-R", "=" + v1_requirement(), app])
+
+
+def openssl():
+    """OpenSSL 3 or later (Ed25519 raw verification); macOS's LibreSSL lacks it."""
+    for candidate in (os.environ.get("PM_OPENSSL"), "/opt/homebrew/opt/openssl@3/bin/openssl", "openssl"):
+        if candidate and shutil.which(candidate):
+            version = subprocess.run([candidate, "version"], capture_output=True, text=True).stdout
+            if re.match(r"OpenSSL (?:[3-9]|\d\d)\.", version):
+                return candidate
+    raise ValueError("OpenSSL 3 or later is required to verify EdDSA signatures")
+
+
+def verify_ed25519(path, signature, key):
+    """Checks a Sparkle signature against the public key the app embeds, with an
+    implementation independent of Sparkle's sign_update."""
+    with tempfile.TemporaryDirectory() as temp:
+        temp = Path(temp)
+        (temp / "key.der").write_bytes(bytes.fromhex("302a300506032b6570032100") + base64.b64decode(public_key(key)))
+        (temp / "signature").write_bytes(base64.b64decode(signature, validate=True))
+        result = subprocess.run([openssl(), "pkeyutl", "-verify", "-pubin", "-keyform", "DER",
+                                 "-inkey", temp / "key.der", "-rawin", "-in", path,
+                                 "-sigfile", temp / "signature"], capture_output=True)
+    if result.returncode:
+        raise ValueError("EdDSA signature does not match the app's public key")
+
+
+def sparkle_sign(sign_update, key_file, path, *extra):
+    result = subprocess.run([str(sign_update), "--ed-key-file", str(key_file), *extra, str(path)],
+                            check=True, capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def feeds(archive, destination, version, build, tag, repo, sign_update, key_file, key,
+          minimum="14.0", notes=None, date=None, download_base=None):
+    """Writes the release's three feeds beside nothing else, from one signed ZIP:
+    latest-mac.yml and beta-mac.yml for V1's electron-updater (stable and beta
+    V1 users), and appcast.xml for V2's Sparkle, EdDSA-signed (archive and feed)."""
+    archive = Path(archive).resolve(strict=True)
+    if archive.name != ZIP_NAME.format(version=version):
+        raise ValueError("expected " + ZIP_NAME.format(version=version))
+    if not re.fullmatch(r"v" + re.escape(version), tag) or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        raise ValueError("tag must be v<version> and repo owner/name")
+    info("cutover", version, build)  # the bundle's version rules
+    destination = new_destination(destination)
+    destination.mkdir(parents=True)
+    data = archive.read_bytes()
+    sha512 = base64.b64encode(hashlib.sha512(data).digest()).decode()
+    size = len(data)
+    date = date or datetime.now(timezone.utc)
+    stamp = date.strftime("%Y-%m-%dT%H:%M:%S.") + f"{date.microsecond // 1000:03d}Z"
+    yml = (f"version: {version}\nfiles:\n  - url: {archive.name}\n    sha512: {sha512}\n"
+           f"    size: {size}\nminimumSystemVersion: {DARWIN[minimum]}\npath: {archive.name}\n"
+           f"sha512: {sha512}\nreleaseDate: '{stamp}'\n")
+    for channel in ("latest", "beta"):
+        (destination / f"{channel}-mac.yml").write_text(yml)
+    signature = sparkle_sign(sign_update, key_file, archive, "-p")
+    verify_ed25519(archive, signature, key)
+    # A tagged (immutable) download; a local proof serves the archive itself.
+    base = download_base or f"https://github.com/{repo}/releases/download/{tag}"
+    if download_base and urlsplit(download_base).hostname not in LOOPBACK:
+        raise ValueError("only a loopback proof may override the download location")
+    url = f"{base.rstrip('/')}/{archive.name}"
+    text = Path(notes).read_text() if notes else "Fixes and improvements."
+    description = escape(text) if "]]>" in text else "<![CDATA[" + text + "]]>"
+    appcast = f"""<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Powermove</title>
+    <item>
+      <title>Powermove {escape(version)}</title>
+      <pubDate>{format_datetime(date)}</pubDate>
+      <sparkle:version>{escape(build)}</sparkle:version>
+      <sparkle:shortVersionString>{escape(version)}</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>{minimum}</sparkle:minimumSystemVersion>
+      <description sparkle:format="markdown">{description}</description>
+      <enclosure url="{escape(url)}" length="{size}" type="application/octet-stream" sparkle:edSignature="{signature}"/>
+    </item>
+  </channel>
+</rss>
+"""
+    (destination / "appcast.xml").write_text(appcast)
+    sparkle_sign(sign_update, key_file, destination / "appcast.xml")  # embeds the feed signature
+    return destination
 
 
 POSTHOG_PROJECT = "766251"
@@ -363,19 +528,33 @@ def main():
     create.add_argument("--channel", choices=IDS, required=True)
     create.add_argument("--version", required=True)
     create.add_argument("--build", required=True)
-    create.add_argument("--update-config", default=HERE / "update-config.json", type=Path)
     create.add_argument("--sparkle-framework", type=Path)
     create.add_argument("--sparkle-feed")
     create.add_argument("--sparkle-key")
     create.add_argument("--glsl-compiler", type=Path)
     create.add_argument("--claude-runtime", type=Path, help="The pinned native claude binary")
     create.add_argument("--codex-vendor", type=Path, help="The pinned vendor/<triple> tree")
+    create.add_argument("--transcribe-runtime", type=Path, help="transcribe.cpp contract.json + dylibs")
+    create.add_argument("--bundle-id", help="dev bundles only: com.powermove.native.dev.<name>")
     create.add_argument("--layout-only", action="store_true", help="Linux proof only; output cannot be distribution-signed")
     symbol_set = commands.add_parser("symbols")
     symbol_set.add_argument("--executable", required=True, type=Path)
     symbol_set.add_argument("--destination", required=True, type=Path)
     symbol_set.add_argument("--version", required=True)
     symbol_set.add_argument("--build", required=True)
+    feed = commands.add_parser("feeds")
+    feed.add_argument("--zip", required=True, type=Path)
+    feed.add_argument("--destination", required=True, type=Path)
+    feed.add_argument("--version", required=True)
+    feed.add_argument("--build", required=True)
+    feed.add_argument("--tag", required=True)
+    feed.add_argument("--repo", required=True)
+    feed.add_argument("--sign-update", required=True, type=Path, help="Sparkle's bin/sign_update")
+    feed.add_argument("--ed-key-file", required=True, type=Path, help="Sparkle EdDSA private key file")
+    feed.add_argument("--public-key", required=True, help="SUPublicEDKey the app embeds")
+    feed.add_argument("--notes", type=Path, help="Markdown release notes")
+    feed.add_argument("--download-base", help="local proofs only: a loopback URL serving the ZIP")
+    commands.add_parser("continuity").add_argument("artifact", type=Path)
     verify = commands.add_parser("verify-sparkle-archive")
     verify.add_argument("artifact", type=Path)
     for name in ("sign", "dmg", "transition-zip", "notarize"):
@@ -383,17 +562,27 @@ def main():
         command.add_argument("artifact", type=Path)
         if name in ("dmg", "transition-zip"):
             command.add_argument("destination", type=Path)
+        if name == "sign":
+            command.add_argument("--adhoc", action="store_true",
+                                 help="local dry run: ad-hoc sign a proof/dev bundle")
     args = parser.parse_args()
     if args.command == "bundle":
         bundle(args.executable, args.destination, args.channel, args.version, args.build,
-               args.update_config, args.sparkle_framework, args.sparkle_feed, args.sparkle_key,
-               not args.layout_only, args.glsl_compiler, args.claude_runtime, args.codex_vendor)
+               args.sparkle_framework, args.sparkle_feed, args.sparkle_key,
+               not args.layout_only, args.glsl_compiler, args.claude_runtime, args.codex_vendor,
+               args.transcribe_runtime, args.bundle_id)
+    elif args.command == "feeds":
+        feeds(args.zip, args.destination, args.version, args.build, args.tag, args.repo,
+              args.sign_update, args.ed_key_file, args.public_key, notes=args.notes,
+              download_base=args.download_base)
+    elif args.command == "continuity":
+        continuity(args.artifact)
     elif args.command == "symbols":
         symbols(args.executable, args.destination, args.version, args.build)
     elif args.command == "verify-sparkle-archive":
         verify_sparkle_archive(args.artifact)
     elif args.command == "sign":
-        sign(args.artifact)
+        sign(args.artifact, adhoc_proof=args.adhoc)
     elif args.command == "dmg":
         dmg(args.artifact, args.destination)
     elif args.command == "transition-zip":
