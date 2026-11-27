@@ -1,23 +1,10 @@
 # Powermove native engine: plan and design
 
-Mac integration is **WIP, handed back** before full validation. See
-the exact failures and reproduction commands.
-Gate E remains open.
-
-> Native-app E-track status (2026-11-01): the five open author branches are
-> integrated with dispositions in engine/etrack-integration.md.
-> The base-M5 macOS integration includes the export-parity lane; its initial
-> export replay passed 139 tests. Fresh synthetic v1 captures on that build Mac
-> are new witnesses, not the unavailable original frozen corpus.
-> The exhaustive Gate E ledger
-> remains open. The GPUI/in-process/V8 architecture in docs/native supersedes
-> this document's older Electron-host assumptions. Native H.273 Log100/Log316
-> input interpretation extends the earlier Phase 3b transfer list; proprietary
-> camera log/gamut pairs still need explicit contracts and evidence.
-
-Status: proposal, not started. Revision 5, reconciled with main at `d5d5b731`
-and audited by five independent reviewers (architecture and readiness, 3D and
-Blender, agents and security, color and video, preservation).
+> This is the design plan the Rust engine in `engine/` was built from, written
+> while Powermove 1 (Electron) was still shipping. The native app's architecture
+> in [native/](native/) (GPUI shell, in-process engine, V8 extension runtime)
+> supersedes its Electron-host assumptions; sections on Electron hosts, the
+> frame bridge and phase gates are historical.
 
 This document covers the whole rewrite of the Powermove engine (evaluation,
 decode, compositing, 3D, color, text, audio, playback, caching, proxies, and

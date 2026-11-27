@@ -160,7 +160,8 @@ timeline to an agent's batch of changes, shares one history and one undo.
 
 Further reading: [native engine design](docs/rust-engine.md) ·
 [kernel](docs/native/kernel.md) · [shell](docs/native/shell.md) ·
-[MCP tools](docs/native/mcp.md) · [design language](docs/design.md)
+[MCP tools](docs/native/mcp.md) · [design language](docs/design.md) ·
+[all docs](docs/README.md)
 
 ## Repository layout
 
